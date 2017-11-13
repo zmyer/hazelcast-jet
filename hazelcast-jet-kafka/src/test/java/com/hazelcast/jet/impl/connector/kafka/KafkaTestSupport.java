@@ -16,8 +16,11 @@
 
 package com.hazelcast.jet.impl.connector.kafka;
 
+import com.hazelcast.jet.Util;
 import com.hazelcast.jet.core.JetTestSupport;
 import kafka.admin.AdminUtils;
+import kafka.admin.BrokerMetadata;
+import kafka.common.TopicAndPartition;
 import kafka.server.KafkaConfig;
 import kafka.server.KafkaServer;
 import kafka.utils.MockTime;
@@ -35,13 +38,20 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Time;
 import org.junit.After;
+import scala.Option;
+import scala.collection.JavaConversions;
+import scala.collection.JavaConverters;
+import scala.collection.Seq;
+import scala.collection.mutable.Map;
 
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Properties;
 import java.util.concurrent.Future;
+import java.util.stream.Collectors;
 
 import static kafka.admin.RackAwareMode.Disabled$.MODULE$;
 
@@ -101,7 +111,23 @@ public class KafkaTestSupport extends JetTestSupport {
 
     public void setPartitionCount(String topicId, int numPartitions) {
         // doesn't actually add the given number to existing partitions, just sets to it
-        AdminUtils.addPartitions(zkUtils, topicId, numPartitions, "", true, null);
+        ArrayList<String> list = new ArrayList<>();
+        list.add(topicId);
+        Seq<String> objectSeq = JavaConversions.asScalaBuffer(list).toSeq();
+        Map<TopicAndPartition, Seq<Object>> assignments = zkUtils.getReplicaAssignmentForTopics(objectSeq);
+        java.util.Map<TopicAndPartition, Seq<Object>> m = JavaConverters.mapAsJavaMapConverter(assignments).asJava();
+        java.util.Map<Object, Seq<Object>> collect = m.entrySet()
+                                                      .stream()
+                                                      .map(e -> Util.entry(e.getKey().partition(), e.getValue()))
+                                                      .collect(Collectors.toMap(e -> e.getKey(), e -> e.getValue()));
+        Map<Object, Seq<Object>> mapAsScalaMap = JavaConversions.mapAsScalaMap(collect);
+        Option<Seq<Object>> option = Option.apply(zkUtils.getSortedBrokerList());
+        Seq<BrokerMetadata> brokerMetadatas = AdminUtils.getBrokerMetadatas(zkUtils, null, option);
+        System.out.println("fatal mapAsScalaMap: " + mapAsScalaMap);
+        System.out.println("fatal brokerMetadatas: " + brokerMetadatas);
+        AdminUtils.addPartitions(zkUtils, topicId, mapAsScalaMap, brokerMetadatas,
+                numPartitions, scala.Option.empty(), true);
+
     }
 
     Future<RecordMetadata> produce(String topic, Integer key, String value) {
