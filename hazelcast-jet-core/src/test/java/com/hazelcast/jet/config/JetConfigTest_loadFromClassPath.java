@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ public class JetConfigTest_loadFromClassPath {
     public ExpectedException exception = ExpectedException.none();
 
     @Test
-    public void when_botNonNull_then_loaded() {
+    public void when_bothNonNull_then_loaded() {
         JetConfig config = JetConfig.loadFromClasspath(TEST_XML_JET);
         assertEquals(55, config.getInstanceConfig().getCooperativeThreadCount());
     }
@@ -52,19 +52,25 @@ public class JetConfigTest_loadFromClassPath {
         properties.setProperty("thread.count", "123");
         properties.setProperty("flow.control.period", "456");
         properties.setProperty("backup.count", "6");
+        properties.setProperty("scale.up.delay.millis", "1234");
 
         properties.setProperty("metrics.enabled", "false");
+        properties.setProperty("metrics.jmxEnabled", "false");
         properties.setProperty("metrics.retention", "124");
+        properties.setProperty("metrics.collection-interval", "123");
         properties.setProperty("metrics.enabled-for-data-structures", "true");
 
         JetConfig config = JetConfig.loadFromClasspath(TEST_XML_JET_WITH_VARIABLES, properties);
         assertEquals(123, config.getInstanceConfig().getCooperativeThreadCount());
         assertEquals(456, config.getInstanceConfig().getFlowControlPeriodMs());
         assertEquals(6, config.getInstanceConfig().getBackupCount());
+        assertEquals(1234, config.getInstanceConfig().getScaleUpDelayMillis());
 
         MetricsConfig metricsConfig = config.getMetricsConfig();
         assertFalse(metricsConfig.isEnabled());
+        assertFalse(metricsConfig.isJmxEnabled());
+        assertEquals(123, metricsConfig.getCollectionIntervalSeconds());
         assertEquals(124, metricsConfig.getRetentionSeconds());
-        assertTrue(metricsConfig.isEnabledForDataStructures());
+        assertTrue(metricsConfig.isMetricsForDataStructuresEnabled());
     }
 }

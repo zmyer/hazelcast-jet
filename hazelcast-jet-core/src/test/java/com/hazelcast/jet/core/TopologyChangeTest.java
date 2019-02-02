@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.TestProcessors.MockPS;
-import com.hazelcast.jet.core.TestProcessors.StuckProcessor;
+import com.hazelcast.jet.core.TestProcessors.NoOutputSourceP;
 import com.hazelcast.jet.impl.JetService;
 import com.hazelcast.jet.impl.JobRecord;
 import com.hazelcast.jet.impl.JobRepository;
@@ -34,6 +34,7 @@ import com.hazelcast.jet.impl.JobResult;
 import com.hazelcast.jet.impl.MasterContext;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.jet.impl.operation.InitExecutionOperation;
+import com.hazelcast.spi.exception.TargetNotMemberException;
 import com.hazelcast.test.HazelcastParametersRunnerFactory;
 import org.junit.Assert;
 import org.junit.Before;
@@ -47,14 +48,17 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
 import static com.hazelcast.internal.cluster.impl.ClusterDataSerializerHook.MEMBER_INFO_UPDATE;
 import static com.hazelcast.internal.partition.impl.PartitionDataSerializerHook.SHUTDOWN_REQUEST;
+import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
+import static com.hazelcast.jet.config.ProcessingGuarantee.NONE;
+import static com.hazelcast.jet.core.JobStatus.FAILED;
 import static com.hazelcast.jet.core.JobStatus.RUNNING;
 import static com.hazelcast.jet.core.JobStatus.STARTING;
+import static com.hazelcast.jet.core.JobStatus.SUSPENDED;
 import static com.hazelcast.jet.impl.JobRepository.JOB_RECORDS_MAP_NAME;
 import static com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook.INIT_EXECUTION_OP;
 import static com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook.START_EXECUTION_OP;
@@ -92,7 +96,7 @@ public class TopologyChangeTest extends JetTestSupport {
 
     @Parameterized.Parameters
     public static Collection<boolean[]> parameters() {
-        return Arrays.asList(new boolean[][] {
+        return Arrays.asList(new boolean[][]{
                 {false, false, false},
                 {true, false, false},
                 {false, true, false}
@@ -107,13 +111,7 @@ public class TopologyChangeTest extends JetTestSupport {
                 nodeCount++;
             }
         }
-
-        MockPS.closeCount.set(0);
-        MockPS.initCount.set(0);
-        MockPS.receivedCloseErrors.clear();
-
-        StuckProcessor.proceedLatch = new CountDownLatch(1);
-        StuckProcessor.executionStarted = new CountDownLatch(nodeCount * PARALLELISM);
+        TestProcessors.reset(nodeCount * PARALLELISM);
 
         config = new JetConfig();
         config.getInstanceConfig().setCooperativeThreadCount(PARALLELISM);
@@ -132,13 +130,13 @@ public class TopologyChangeTest extends JetTestSupport {
     @Test
     public void when_addNodeDuringExecution_then_completeSuccessfully() throws Throwable {
         // Given
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
 
         // When
         Job job = instances[0].newJob(dag);
-        StuckProcessor.executionStarted.await();
+        NoOutputSourceP.executionStarted.await();
         createJetMember();
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
         job.join();
 
         // Then
@@ -153,14 +151,14 @@ public class TopologyChangeTest extends JetTestSupport {
     @Test
     public void when_addAndRemoveNodeDuringExecution_then_completeSuccessfully() throws Throwable {
         // Given
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
 
         // When
         Job job = instances[0].newJob(dag);
-        StuckProcessor.executionStarted.await();
+        NoOutputSourceP.executionStarted.await();
         JetInstance instance = createJetMember();
         instance.shutdown();
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
         job.join();
 
         // Then
@@ -175,14 +173,14 @@ public class TopologyChangeTest extends JetTestSupport {
     @Test
     public void when_nonCoordinatorLeavesDuringExecution_then_jobRestarts() throws Throwable {
         // Given
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
 
         // When
         Job job = instances[0].newJob(dag);
-        StuckProcessor.executionStarted.await();
+        NoOutputSourceP.executionStarted.await();
 
         instances[2].getHazelcastInstance().getLifecycleService().terminate();
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
 
         job.join();
 
@@ -202,34 +200,44 @@ public class TopologyChangeTest extends JetTestSupport {
     }
 
     @Test
-    public void when_nonCoordinatorLeavesDuringExecutionAndNoRestartConfigured_then_jobFails() throws Throwable {
+    public void when_nonCoordinatorLeaves_AutoScalingOff_SnapshottingOn_then_jobSuspends() throws Throwable {
+        when_nonCoordinatorLeaves_AutoScalingOff_then_jobFailsOrSuspends(true);
+    }
+
+    @Test
+    public void when_nonCoordinatorLeaves_AutoScalingOff_SnapshottingOff_then_jobFails() throws Throwable {
+        when_nonCoordinatorLeaves_AutoScalingOff_then_jobFailsOrSuspends(false);
+    }
+
+    private void when_nonCoordinatorLeaves_AutoScalingOff_then_jobFailsOrSuspends(boolean snapshotted) throws Throwable {
         // Given
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
-        JobConfig config = new JobConfig().setAutoRestartOnMemberFailure(false);
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
+        JobConfig config = new JobConfig();
+        config.setAutoScaling(false);
+        config.setProcessingGuarantee(snapshotted ? EXACTLY_ONCE : NONE);
 
         // When
         Job job = instances[0].newJob(dag, config);
-        StuckProcessor.executionStarted.await();
+        NoOutputSourceP.executionStarted.await();
 
         instances[2].getHazelcastInstance().getLifecycleService().terminate();
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
 
-        Throwable ex = job.getFuture().handle((r, e) -> e).get();
-        assertInstanceOf(TopologyChangedException.class, ex);
+        assertJobStatusEventually(job, snapshotted ? SUSPENDED : FAILED, 10);
     }
 
     @Test
     public void when_nonCoordinatorLeavesDuringExecution_then_clientStillGetsJobResult() throws Throwable {
         // Given
         JetInstance client = createJetClient();
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
 
         // When
         Job job = client.newJob(dag);
-        StuckProcessor.executionStarted.await();
+        NoOutputSourceP.executionStarted.await();
 
         instances[2].getHazelcastInstance().getLifecycleService().terminate();
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
 
         job.join();
     }
@@ -237,7 +245,7 @@ public class TopologyChangeTest extends JetTestSupport {
     @Test
     public void when_coordinatorLeavesDuringExecution_then_jobCompletes() throws Throwable {
         // Given
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
 
         // When
         Long jobId = null;
@@ -245,10 +253,10 @@ public class TopologyChangeTest extends JetTestSupport {
             Job job = instances[0].newJob(dag);
             Future<Void> future = job.getFuture();
             jobId = job.getId();
-            StuckProcessor.executionStarted.await();
+            NoOutputSourceP.executionStarted.await();
 
             instances[0].getHazelcastInstance().getLifecycleService().terminate();
-            StuckProcessor.proceedLatch.countDown();
+            NoOutputSourceP.proceedLatch.countDown();
 
             future.get();
             fail();
@@ -283,35 +291,54 @@ public class TopologyChangeTest extends JetTestSupport {
     }
 
     @Test
-    public void when_coordinatorLeavesDuringExecutionAndNoRestartConfigured_then_jobFails() throws Throwable {
+    public void when_coordinatorLeaves_AutoScalingOff_SnapshottingOn_then_jobSuspends() throws Throwable {
+        when_coordinatorLeaves_AutoScalingOff_then_jobFailsOrSuspends(true);
+    }
+
+    @Test
+    public void when_coordinatorLeaves_AutoScalingOff_SnapshottingOff_then_jobFails() throws Throwable {
+        when_coordinatorLeaves_AutoScalingOff_then_jobFailsOrSuspends(false);
+    }
+
+    private void when_coordinatorLeaves_AutoScalingOff_then_jobFailsOrSuspends(boolean snapshotted) throws Throwable {
         // Given
         JetInstance client = createJetClient();
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
-        JobConfig config = new JobConfig().setAutoRestartOnMemberFailure(false);
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
+        JobConfig config = new JobConfig();
+        config.setAutoScaling(false);
+        config.setProcessingGuarantee(snapshotted ? EXACTLY_ONCE : NONE);
 
         // When
         Job job = client.newJob(dag, config);
-        StuckProcessor.executionStarted.await();
+        NoOutputSourceP.executionStarted.await();
 
         instances[0].getHazelcastInstance().getLifecycleService().terminate();
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
 
-        Throwable ex = job.getFuture().handle((r, e) -> e).get();
-        assertInstanceOf(TopologyChangedException.class, ex);
+        assertTrueEventually(() -> {
+            JobStatus status = null;
+            while (status == null) {
+                try {
+                    status = job.getStatus();
+                } catch (TargetNotMemberException ignored) {
+                }
+            }
+            assertEquals(snapshotted ? SUSPENDED : FAILED, status);
+        }, 10);
     }
 
     @Test
     public void when_coordinatorLeavesDuringExecution_then_nonCoordinatorJobSubmitterStillGetsJobResult()
             throws Throwable {
         // Given
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
 
         // When
         Job job = instances[1].newJob(dag);
-        StuckProcessor.executionStarted.await();
+        NoOutputSourceP.executionStarted.await();
 
         instances[0].getHazelcastInstance().getLifecycleService().terminate();
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
 
         // Then
         job.join();
@@ -321,14 +348,14 @@ public class TopologyChangeTest extends JetTestSupport {
     public void when_coordinatorLeavesDuringExecution_then_clientStillGetsJobResult() throws Throwable {
         // Given
         JetInstance client = createJetClient();
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(StuckProcessor::new, nodeCount)));
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPS(NoOutputSourceP::new, nodeCount)));
 
         // When
         Job job = client.newJob(dag);
-        StuckProcessor.executionStarted.await();
+        NoOutputSourceP.executionStarted.await();
 
         instances[0].getHazelcastInstance().getLifecycleService().terminate();
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
 
         // Then
         job.join();
@@ -348,7 +375,7 @@ public class TopologyChangeTest extends JetTestSupport {
 
 
         // Then
-        assertTrueEventually(() -> assertEquals(STARTING, job.getStatus()));
+        assertJobStatusEventually(job, STARTING);
         assertTrueAllTheTime(() -> assertEquals(STARTING, job.getStatus()), 5);
 
         resetPacketFiltersFrom(instances[0].getHazelcastInstance());
@@ -378,16 +405,16 @@ public class TopologyChangeTest extends JetTestSupport {
 
         assertTrueEventually(() -> {
             assertEquals(STARTING, masterContext.jobStatus());
-            assertNotEquals(0, masterContext.getExecutionId());
+            assertNotEquals(0, masterContext.executionId());
         });
 
         // When
-        long executionId = masterContext.getExecutionId();
+        long executionId = masterContext.executionId();
 
         assertTrueEventually(() -> {
             Arrays.stream(instances)
                   .filter(instance -> !instance.getHazelcastInstance().getCluster().getLocalMember().isLiteMember())
-                  .filter(instance ->  instance != instances[2])
+                  .filter(instance -> instance != instances[2])
                   .map(JetTestSupport::getJetService)
                   .map(service -> service.getJobExecutionService().getExecutionContext(executionId))
                   .forEach(Assert::assertNotNull);
@@ -400,10 +427,9 @@ public class TopologyChangeTest extends JetTestSupport {
 
         resetPacketFiltersFrom(instances[0].getHazelcastInstance());
 
-
         // Then
         job.join();
-        assertNotEquals(executionId, masterContext.getExecutionId());
+        assertNotEquals(executionId, masterContext.executionId());
     }
 
     @Test
@@ -427,10 +453,10 @@ public class TopologyChangeTest extends JetTestSupport {
 
         assertTrueEventually(() -> assertFalse(jetService.getJobCoordinationService().getMasterContexts().isEmpty()));
 
-        spawn(instances[2]::shutdown);
+        spawn(() -> instances[2].getHazelcastInstance().shutdown());
 
         // Then, it restarts until the shutting down node is gone
-        assertTrueEventually(() -> assertEquals(STARTING, job.getStatus()));
+        assertJobStatusEventually(job, STARTING);
         assertTrueAllTheTime(() -> assertEquals(STARTING, job.getStatus()), 5);
 
         resetPacketFiltersFrom(instances[2].getHazelcastInstance());
@@ -444,19 +470,15 @@ public class TopologyChangeTest extends JetTestSupport {
         for (JetInstance instance : instances) {
             warmUpPartitions(instance.getHazelcastInstance());
         }
-
         rejectOperationsBetween(instances[0].getHazelcastInstance(), instances[2].getHazelcastInstance(),
                 JetInitDataSerializerHook.FACTORY_ID, singletonList(START_EXECUTION_OP));
 
         DAG dag = new DAG().vertex(new Vertex("test", new MockPS(TestProcessors.Identity::new, nodeCount - 1)));
-
         Job job = instances[0].newJob(dag);
-
-        assertTrueEventually(() -> assertEquals(RUNNING, job.getStatus()));
+        assertJobStatusEventually(job, RUNNING);
 
         // When a participant shuts down during execution
-        instances[2].shutdown();
-
+        instances[2].getHazelcastInstance().getLifecycleService().shutdown();
 
         // Then, the job restarts and successfully completes
         job.join();
@@ -473,7 +495,7 @@ public class TopologyChangeTest extends JetTestSupport {
             memberInfos.add(new MemberInfo(getNode(instances[i].getHazelcastInstance()).getLocalMember()));
         }
 
-        JobRecord jobRecord = new JobRecord(jobId, 0, null, "", new JobConfig(), 2);
+        JobRecord jobRecord = new JobRecord(jobId, 0, null, "", new JobConfig());
         instances[0].getMap(JOB_RECORDS_MAP_NAME).put(jobId, jobRecord);
 
         InitExecutionOperation op = new InitExecutionOperation(jobId, executionId, memberListVersion, memberInfos, null);

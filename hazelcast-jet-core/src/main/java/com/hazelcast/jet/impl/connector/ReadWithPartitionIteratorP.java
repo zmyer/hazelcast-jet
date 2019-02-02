@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ package com.hazelcast.jet.impl.connector;
 import com.hazelcast.cache.impl.CacheProxy;
 import com.hazelcast.client.cache.impl.ClientCacheProxy;
 import com.hazelcast.client.config.ClientConfig;
-import com.hazelcast.client.impl.HazelcastClientProxy;
+import com.hazelcast.client.impl.clientside.HazelcastClientProxy;
 import com.hazelcast.client.proxy.ClientMapProxy;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.Partition;
@@ -47,6 +47,8 @@ import java.util.function.Function;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.client.HazelcastClient.newHazelcastClient;
+import static com.hazelcast.jet.impl.util.Util.asClientConfig;
+import static com.hazelcast.jet.impl.util.Util.asXmlString;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static com.hazelcast.jet.impl.util.Util.processorToPartitions;
 import static java.util.stream.Collectors.groupingBy;
@@ -64,13 +66,14 @@ import static java.util.stream.Collectors.toList;
 public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
 
     private static final boolean PREFETCH_VALUES = true;
-
     private static final int FETCH_SIZE = 16384;
 
     private final Traverser<T> outputTraverser;
 
-    ReadWithPartitionIteratorP(Function<Integer, Iterator<T>> partitionToIterator,
-                               List<Integer> partitions) {
+    ReadWithPartitionIteratorP(
+            Function<? super Integer, ? extends Iterator<T>> partitionToIterator,
+            List<Integer> partitions
+    ) {
         final CircularListCursor<Iterator<T>> iteratorCursor = new CircularListCursor<>(
                 partitions.stream().map(partitionToIterator).collect(toList())
         );
@@ -79,6 +82,7 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
                 final Iterator<T> currIterator = iteratorCursor.value();
                 while (currIterator.hasNext()) {
                     T next = currIterator.next();
+                    // iterator can return null element (entry projected to null), we ignore these
                     if (next != null) {
                         iteratorCursor.advance();
                         return next;
@@ -88,6 +92,11 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
             } while (iteratorCursor.advance());
             return null;
         };
+    }
+
+    @Override
+    public boolean isCooperative() {
+        return false;
     }
 
     public static <T> ProcessorMetaSupplier readMapSupplier(@Nonnull String mapName) {
@@ -106,24 +115,24 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
 
     public static <K, V, T> ProcessorMetaSupplier readMapSupplier(
             @Nonnull String mapName,
-            @Nonnull Predicate<K, V> predicate,
-            @Nonnull Projection<Map.Entry<K, V>, T> projection
+            @Nonnull Predicate<? super K, ? super V> predicate,
+            @Nonnull Projection<? super Map.Entry<K, V>, ? extends T> projection
     ) {
         checkSerializable(predicate, "predicate");
         checkSerializable(projection, "projection");
 
         return new LocalClusterMetaSupplier<T>(
                 instance -> partition -> {
-                    MapProxyImpl map = (MapProxyImpl) instance.<K, V>getMap(mapName);
-                    return map.<T>iterator(FETCH_SIZE, partition, projection, predicate);
+                    MapProxyImpl map = (MapProxyImpl) instance.getMap(mapName);
+                    return map.iterator(FETCH_SIZE, partition, projection, predicate);
                 });
     }
 
     public static <K, V, T> ProcessorMetaSupplier readRemoteMapSupplier(
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull Projection<Entry<K, V>, T> projection,
-            @Nonnull Predicate<K, V> predicate
+            @Nonnull Projection<? super Entry<K, V>, ? extends T> projection,
+            @Nonnull Predicate<? super K, ? super V> predicate
     ) {
         checkSerializable(projection, "projection");
         checkSerializable(predicate, "predicate");
@@ -139,8 +148,10 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
                         .iterator(FETCH_SIZE, partition, PREFETCH_VALUES));
     }
 
-    public static ProcessorMetaSupplier readRemoteCacheSupplier(@Nonnull String cacheName,
-                                                                @Nonnull ClientConfig clientConfig) {
+    public static ProcessorMetaSupplier readRemoteCacheSupplier(
+            @Nonnull String cacheName,
+            @Nonnull ClientConfig clientConfig
+    ) {
         return new RemoteClusterMetaSupplier<>(clientConfig,
                 instance -> partition -> ((ClientCacheProxy) instance.getCacheManager().getCache(cacheName))
                         .iterator(FETCH_SIZE, partition, PREFETCH_VALUES));
@@ -151,14 +162,11 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
         return emitFromTraverser(outputTraverser);
     }
 
-    @Override
-    public boolean isCooperative() {
-        return false;
-    }
-
-    private static <T> List<Processor> getProcessors(int count, List<Integer> ownedPartitions,
-                                                     Function<Integer, Iterator<T>> partitionToIterator) {
-
+    private static <T> List<Processor> getProcessors(
+            int count,
+            List<Integer> ownedPartitions,
+            Function<? super Integer, ? extends Iterator<T>> partitionToIterator
+    ) {
         return processorToPartitions(count, ownedPartitions)
                 .values().stream()
                 .map(partitions -> !partitions.isEmpty()
@@ -172,16 +180,17 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
 
         static final long serialVersionUID = 1L;
 
-        private final SerializableClientConfig serializableConfig;
-        private final DistributedFunction<HazelcastInstance, Function<Integer, Iterator<T>>> iteratorSupplier;
+        private final String clientXml;
+        private final DistributedFunction<? super HazelcastInstance, ? extends Function<Integer, Iterator<T>>>
+                iteratorSupplier;
 
         private transient int remotePartitionCount;
 
         RemoteClusterMetaSupplier(
-                ClientConfig clientConfig,
-                DistributedFunction<HazelcastInstance, Function<Integer, Iterator<T>>> iteratorSupplier
+            ClientConfig clientConfig,
+            DistributedFunction<? super HazelcastInstance, ? extends Function<Integer, Iterator<T>>> iteratorSupplier
         ) {
-            this.serializableConfig = new SerializableClientConfig(clientConfig);
+            this.clientXml = asXmlString(clientConfig);
             this.iteratorSupplier = iteratorSupplier;
         }
 
@@ -192,7 +201,7 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
 
         @Override
         public void init(@Nonnull Context context) {
-            HazelcastInstance client = newHazelcastClient(serializableConfig.asClientConfig());
+            HazelcastInstance client = newHazelcastClient(asClientConfig(clientXml));
             try {
                 HazelcastClientProxy clientProxy = (HazelcastClientProxy) client;
                 remotePartitionCount = clientProxy.client.getClientPartitionService().getPartitionCount();
@@ -210,7 +219,7 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
                              .collect(groupingBy(partition -> addresses.get(partition % addresses.size())));
 
             return address -> new RemoteClusterProcessorSupplier<>(membersToPartitions.get(address),
-                    serializableConfig, iteratorSupplier);
+                    clientXml, iteratorSupplier);
         }
     }
 
@@ -219,25 +228,26 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
         static final long serialVersionUID = 1L;
 
         private final List<Integer> ownedPartitions;
-        private final SerializableClientConfig serializableClientConfig;
-        private final DistributedFunction<HazelcastInstance, Function<Integer, Iterator<T>>> iteratorSupplier;
+        private final String clientXml;
+        private final DistributedFunction<? super HazelcastInstance, ? extends Function<Integer, Iterator<T>>>
+                iteratorSupplier;
 
         private transient HazelcastInstance client;
-        private transient Function<Integer, Iterator<T>> partitionToIterator;
+        private transient Function<? super Integer, ? extends Iterator<T>> partitionToIterator;
 
         RemoteClusterProcessorSupplier(
-                List<Integer> ownedPartitions,
-                SerializableClientConfig serializableClientConfig,
-                DistributedFunction<HazelcastInstance, Function<Integer, Iterator<T>>> iteratorSupplier
+            List<Integer> ownedPartitions,
+            String clientXml,
+            DistributedFunction<? super HazelcastInstance, ? extends Function<Integer, Iterator<T>>> iteratorSupplier
         ) {
             this.ownedPartitions = ownedPartitions;
-            this.serializableClientConfig = serializableClientConfig;
+            this.clientXml = clientXml;
             this.iteratorSupplier = iteratorSupplier;
         }
 
         @Override
         public void init(@Nonnull Context context) {
-            client = newHazelcastClient(serializableClientConfig.asClientConfig());
+            client = newHazelcastClient(asClientConfig(clientXml));
             partitionToIterator = iteratorSupplier.apply(client);
         }
 
@@ -258,12 +268,13 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
 
         static final long serialVersionUID = 1L;
 
-        private final DistributedFunction<HazelcastInstance, Function<Integer, Iterator<T>>> iteratorSupplier;
+        private final DistributedFunction<? super HazelcastInstance, ? extends Function<Integer, Iterator<T>>>
+                iteratorSupplier;
 
         private transient Map<Address, List<Integer>> addrToPartitions;
 
         LocalClusterMetaSupplier(
-                DistributedFunction<HazelcastInstance, Function<Integer, Iterator<T>>> iteratorSupplier
+            DistributedFunction<? super HazelcastInstance, ? extends Function<Integer, Iterator<T>>> iteratorSupplier
         ) {
             this.iteratorSupplier = iteratorSupplier;
         }
@@ -292,13 +303,14 @@ public final class ReadWithPartitionIteratorP<T> extends AbstractProcessor {
         static final long serialVersionUID = 1L;
 
         private final List<Integer> ownedPartitions;
-        private final DistributedFunction<HazelcastInstance, Function<Integer, Iterator<T>>> iteratorSupplier;
+        private final DistributedFunction<? super HazelcastInstance, ? extends Function<Integer, Iterator<T>>>
+                iteratorSupplier;
 
         private transient Function<Integer, Iterator<T>> partitionToIterator;
 
         LocalClusterProcessorSupplier(
-                List<Integer> ownedPartitions,
-                DistributedFunction<HazelcastInstance, Function<Integer, Iterator<T>>> iteratorSupplier
+            List<Integer> ownedPartitions,
+            DistributedFunction<? super HazelcastInstance, ? extends Function<Integer, Iterator<T>>> iteratorSupplier
         ) {
             this.ownedPartitions = ownedPartitions != null ? ownedPartitions : Collections.emptyList();
             this.iteratorSupplier = iteratorSupplier;

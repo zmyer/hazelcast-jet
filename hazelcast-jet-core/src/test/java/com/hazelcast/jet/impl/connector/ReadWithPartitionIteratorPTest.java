@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ public class ReadWithPartitionIteratorPTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    public void when_readFromTwoPartitions_then_emitRoundRobin() {
+    public void when_readFromTwoPartitions_then_emitRoundRobin() throws Exception {
         // Given
         final List<Integer> partitions = asList(0, 1);
         final Iterator<Entry<Integer, Integer>>[] content = new Iterator[]{

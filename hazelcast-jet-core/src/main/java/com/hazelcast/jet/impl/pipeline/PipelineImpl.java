@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sink;
 import com.hazelcast.jet.pipeline.SinkStage;
 import com.hazelcast.jet.pipeline.StreamSource;
-import com.hazelcast.jet.pipeline.StreamStage;
+import com.hazelcast.jet.pipeline.StreamSourceStage;
 
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
@@ -43,13 +43,13 @@ import java.util.Set;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ADAPT_TO_JET_EVENT;
-import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.DO_NOT_ADAPT;
 import static com.hazelcast.jet.impl.pipeline.Planner.uniqueName;
 import static com.hazelcast.jet.impl.util.Util.escapeGraphviz;
 import static java.util.stream.Collectors.toList;
 
 public class PipelineImpl implements Pipeline {
 
+    private static final GeneralStage[] NO_STAGES = {};
     private final Map<Transform, List<Transform>> adjacencyMap = new LinkedHashMap<>();
 
     @Nonnull @Override
@@ -60,23 +60,39 @@ public class PipelineImpl implements Pipeline {
 
     @Nonnull @Override
     @SuppressWarnings("unchecked")
-    public <T> StreamStage<T> drawFrom(@Nonnull StreamSource<? extends T> source) {
-        StreamSourceTransform<? extends T> xform = (StreamSourceTransform<? extends T>) source;
-        return new StreamStageImpl<>(xform, xform.emitsJetEvents() ? ADAPT_TO_JET_EVENT : DO_NOT_ADAPT, this);
+    public <T> StreamSourceStage<T> drawFrom(@Nonnull StreamSource<? extends T> source) {
+        StreamSourceTransform<T> xform = (StreamSourceTransform<T>) source;
+        return new StreamSourceStageImpl<>(xform, this);
     }
 
     @Override
-    public <T> SinkStage drainTo(@Nonnull Sink<T> sink, GeneralStage<?>... stagesToDrain) {
-        if (stagesToDrain == null || stagesToDrain.length == 0) {
-            throw new IllegalArgumentException("No stages supplied to Pipeline.drainTo()");
-        }
-        List<Transform> upstream = Arrays.stream(stagesToDrain)
-                                         .map(s -> (AbstractStage) s)
-                                         .map(s -> s.transform)
-                                         .collect(toList());
+    @SuppressWarnings("unchecked")
+    public <T> SinkStage drainTo(
+            @Nonnull Sink<? super T> sink,
+            @Nonnull GeneralStage<? extends T> stage0,
+            @Nonnull GeneralStage<? extends T> stage1
+    ) {
+        return drainTo(sink, stage0, stage1, (GeneralStage<? extends T>[]) NO_STAGES);
+    }
+
+    @Override
+    public <T> SinkStage drainTo(
+            @Nonnull Sink<? super T> sink,
+            @Nonnull GeneralStage<? extends T> stage0,
+            @Nonnull GeneralStage<? extends T> stage1,
+            @Nonnull GeneralStage<? extends T>... moreStages
+    ) {
+        GeneralStage[] stages = new GeneralStage[2 + moreStages.length];
+        stages[0] = stage0;
+        stages[1] = stage1;
+        System.arraycopy(moreStages, 0, stages, 2, moreStages.length);
+        List<Transform> upstream = Arrays.stream(stages)
+                .map(s -> (AbstractStage) s)
+                .map(s -> s.transform)
+                .collect(toList());
         int[] ordinalsToAdapt = IntStream
-                .range(0, stagesToDrain.length)
-                .filter(i -> ((ComputeStageImplBase) stagesToDrain[i]).fnAdapter == ADAPT_TO_JET_EVENT)
+                .range(0, stages.length)
+                .filter(i -> ((ComputeStageImplBase) stages[i]).fnAdapter == ADAPT_TO_JET_EVENT)
                 .toArray();
         SinkImpl sinkImpl = (SinkImpl) sink;
         SinkTransform sinkTransform = new SinkTransform(sinkImpl, upstream, ordinalsToAdapt);
@@ -114,11 +130,11 @@ public class PipelineImpl implements Pipeline {
         for (Entry<Transform, List<Transform>> entry : adjMap.entrySet()) {
             Transform src = entry.getKey();
             String srcName = transformNames.computeIfAbsent(
-                    src, t -> uniqueName(knownNames, t.name(), "")
+                    src, t -> uniqueName(knownNames, t.name())
             );
             for (Transform dest : entry.getValue()) {
                 String destName = transformNames.computeIfAbsent(
-                        dest, t -> uniqueName(knownNames, t.name(), "")
+                        dest, t -> uniqueName(knownNames, t.name())
                 );
                 builder.append("\t")
                        .append("\"").append(escapeGraphviz(srcName)).append("\"")

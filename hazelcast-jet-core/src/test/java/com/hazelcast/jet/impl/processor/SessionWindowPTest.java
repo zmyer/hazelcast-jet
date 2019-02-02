@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -137,6 +137,19 @@ public class SessionWindowPTest {
                 ));
     }
 
+    @Test
+    public void when_sessionsTouch_then_shouldNotBeMerged() {
+        verifyProcessor(supplier)
+                .input(asList(
+                        entry("key", 0L),
+                        entry("key", 10L)
+                ))
+                .expectOutput(asList(
+                        new WindowResult(0, 10, "key", 1L),
+                        new WindowResult(10, 20, "key", 1L)
+                ));
+    }
+
     private void assertCorrectness(List<Object> events) {
         List<Object> expectedOutput = events.stream()
                                                .map(e -> ((Entry<String, Long>) e).getKey())
@@ -157,7 +170,7 @@ public class SessionWindowPTest {
         }
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         for (int i = 0; i < 10; i++) {
             SessionWindowPTest test = new SessionWindowPTest();
             test.before();
@@ -166,7 +179,7 @@ public class SessionWindowPTest {
     }
 
     @SuppressWarnings("checkstyle:emptystatement")
-    private void runBench() {
+    private void runBench() throws Exception {
         Random rnd = ThreadLocalRandom.current();
         long start = System.nanoTime();
         long eventCount = 40_000_000;

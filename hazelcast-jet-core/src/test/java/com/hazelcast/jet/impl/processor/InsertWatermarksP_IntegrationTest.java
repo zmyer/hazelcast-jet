@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,20 +23,21 @@ import com.hazelcast.jet.core.TestProcessors.ListSource;
 import com.hazelcast.jet.core.TestProcessors.MapWatermarksToString;
 import com.hazelcast.jet.core.Vertex;
 import com.hazelcast.jet.core.processor.Processors;
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
 import java.util.Arrays;
 
 import static com.hazelcast.jet.core.Edge.between;
-import static com.hazelcast.jet.core.SlidingWindowPolicy.tumblingWinPolicy;
-import static com.hazelcast.jet.core.WatermarkEmissionPolicy.emitByFrame;
-import static com.hazelcast.jet.core.WatermarkGenerationParams.wmGenParams;
-import static com.hazelcast.jet.core.WatermarkPolicies.limitingLag;
+import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
+import static com.hazelcast.jet.core.WatermarkPolicy.limitingLag;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeListP;
 import static java.util.Arrays.asList;
 import static org.junit.Assert.assertArrayEquals;
 
+@RunWith(HazelcastSerialClassRunner.class)
 public class InsertWatermarksP_IntegrationTest extends JetTestSupport {
 
     private JetInstance instance;
@@ -50,8 +51,8 @@ public class InsertWatermarksP_IntegrationTest extends JetTestSupport {
     public void test() {
         DAG dag = new DAG();
         Vertex source = dag.newVertex("source", ListSource.supplier(asList(111L, 222L, 333L)));
-        Vertex iwm = dag.newVertex("iwm", Processors.insertWatermarksP(wmGenParams(
-                (Long x) -> x, limitingLag(100), emitByFrame(tumblingWinPolicy(100)), -1)))
+        Vertex iwm = dag.newVertex("iwm", Processors.insertWatermarksP(eventTimePolicy(
+                (Long x) -> x, limitingLag(100), 100, 0, -1)))
                 .localParallelism(1);
         Vertex mapWmToStr = dag.newVertex("mapWmToStr", MapWatermarksToString::new)
                 .localParallelism(1);

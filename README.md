@@ -13,8 +13,6 @@ about the architecture and use cases.
 
 * Low-latency, high-throughput distributed data processing framework.
 * Highly parallel and distributed stream and batch processing of data.
-* Distributed java.util.stream API support for Hazelcast data
-structures such as IMap and IList.
 * Connectors allowing high-velocity ingestion of data from Apache
 Kafka, HDFS, Hazelcast IMDG, sockets and local data files (such as
 logs or CSVs).
@@ -38,7 +36,7 @@ for some examples.
 
 ### Documentation
 
-See the [Jet Reference Manual](https://docs.hazelcast.org/docs/jet/0.6/).
+See the [Jet Reference Manual](https://jet.hazelcast.org/documentation/).
 
 ### Architecture
 
@@ -128,6 +126,6 @@ Hazelcast Jet is available under the Apache 2 License. Please see the
 
 #### Copyright
 
-Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
 
 Visit [www.hazelcast.com](http://www.hazelcast.com/) for more info.

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,20 +17,15 @@
 package com.hazelcast.jet.impl.operation;
 
 import com.hazelcast.jet.impl.JetService;
+import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
+import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 import com.hazelcast.spi.ExceptionAction;
+import com.hazelcast.spi.Operation;
 
-import static com.hazelcast.jet.impl.util.ExceptionUtil.isTopologicalFailure;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.isRestartableException;
 import static com.hazelcast.spi.ExceptionAction.THROW_EXCEPTION;
 
-public abstract class AsyncOperation extends AbstractJobOperation {
-
-    protected AsyncOperation() {
-    }
-
-    protected AsyncOperation(long jobId) {
-        super(jobId);
-    }
-
+public abstract class AsyncOperation extends Operation implements IdentifiedDataSerializable {
 
     @Override
     public void beforeRun() {
@@ -60,7 +55,7 @@ public abstract class AsyncOperation extends AbstractJobOperation {
         throw new UnsupportedOperationException();
     }
 
-    public final void doSendResponse(Object value) {
+    final void doSendResponse(Object value) {
         try {
             sendResponse(value);
         } finally {
@@ -71,7 +66,12 @@ public abstract class AsyncOperation extends AbstractJobOperation {
 
     @Override
     public ExceptionAction onInvocationException(Throwable throwable) {
-        return isTopologicalFailure(throwable) ? THROW_EXCEPTION : super.onInvocationException(throwable);
+        return isRestartableException(throwable) ? THROW_EXCEPTION : super.onInvocationException(throwable);
+    }
+
+    @Override
+    public final int getFactoryId() {
+        return JetInitDataSerializerHook.FACTORY_ID;
     }
 
 }

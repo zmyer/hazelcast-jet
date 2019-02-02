@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,17 +48,17 @@ public final class WrappingProcessorMetaSupplier implements ProcessorMetaSupplie
 
     @Nonnull @Override
     public Function<Address, ProcessorSupplier> get(@Nonnull List<Address> addresses) {
-        Function<Address, ProcessorSupplier> function = wrapped.get(addresses);
+        Function<? super Address, ? extends ProcessorSupplier> function = wrapped.get(addresses);
         return address -> new WrappingProcessorSupplier(function.apply(address), wrapperSupplier);
     }
 
     @Override
-    public void init(@Nonnull Context context) {
+    public void init(@Nonnull Context context) throws Exception {
         wrapped.init(context);
     }
 
     @Override
-    public void close(Throwable error) {
+    public void close(Throwable error) throws Exception {
         wrapped.close(error);
     }
 }

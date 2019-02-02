@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,8 @@ import com.hazelcast.internal.serialization.InternalSerializationService;
 import com.hazelcast.internal.serialization.impl.DefaultSerializationServiceBuilder;
 import com.hazelcast.query.Predicate;
 import com.hazelcast.query.QueryException;
-import com.hazelcast.query.impl.AttributeType;
 import com.hazelcast.query.impl.QueryEntry;
 import com.hazelcast.query.impl.getters.Extractors;
-import com.hazelcast.query.impl.getters.ReflectionHelper;
 import com.hazelcast.query.impl.predicates.ILikePredicate;
 import com.hazelcast.query.impl.predicates.PredicateDataSerializerHook;
 import com.hazelcast.test.HazelcastSerialClassRunner;
@@ -172,17 +170,12 @@ public class GenericPredicatesTest extends HazelcastTestSupport {
     private class DummyEntry extends QueryEntry {
 
         DummyEntry(Comparable attribute) {
-            super(ss, toData("1"), attribute, Extractors.empty());
+            super(ss, toData("1"), attribute, Extractors.newBuilder(ss).build());
         }
 
         @Override
         public Comparable getAttributeValue(String attributeName) throws QueryException {
             return (Comparable) getValue();
-        }
-
-        @Override
-        public AttributeType getAttributeType(String attributeName) {
-            return ReflectionHelper.getAttributeType(getValue().getClass());
         }
     }
 

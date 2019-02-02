@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,11 +35,9 @@ import org.apache.hadoop.mapred.TaskAttemptContextImpl;
 import org.apache.hadoop.mapred.TaskAttemptID;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.List;
 
-import static com.hazelcast.jet.impl.util.Util.uncheckRun;
 import static java.lang.String.valueOf;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.IntStream.range;
@@ -71,6 +69,11 @@ public final class WriteHdfsP<T, K, V> extends AbstractProcessor {
     }
 
     @Override
+    public boolean isCooperative() {
+        return false;
+    }
+
+    @Override
     protected boolean tryProcess(int ordinal, @Nonnull Object item) throws Exception {
         @SuppressWarnings("unchecked")
         T t = (T) item;
@@ -79,18 +82,11 @@ public final class WriteHdfsP<T, K, V> extends AbstractProcessor {
     }
 
     @Override
-    public void close(@Nullable Throwable error) {
-        uncheckRun(() -> {
-            recordWriter.close(Reporter.NULL);
-            if (outputCommitter.needsTaskCommit(taskAttemptContext)) {
-                outputCommitter.commitTask(taskAttemptContext);
-            }
-        });
-    }
-
-    @Override
-    public boolean isCooperative() {
-        return false;
+    public void close() throws Exception {
+        recordWriter.close(Reporter.NULL);
+        if (outputCommitter.needsTaskCommit(taskAttemptContext)) {
+            outputCommitter.commitTask(taskAttemptContext);
+        }
     }
 
     public static class MetaSupplier<T, K, V> implements ProcessorMetaSupplier {
@@ -119,16 +115,16 @@ public final class WriteHdfsP<T, K, V> extends AbstractProcessor {
         }
 
         @Override
-        public void init(@Nonnull Context context) {
+        public void init(@Nonnull Context context) throws Exception {
             outputCommitter = jobConf.getOutputCommitter();
             jobContext = new JobContextImpl(jobConf, new JobID());
-            uncheckRun(() -> outputCommitter.setupJob(jobContext));
+            outputCommitter.setupJob(jobContext);
         }
 
         @Override
-        public void close(Throwable error) {
+        public void close(Throwable error) throws Exception {
             if (outputCommitter != null && jobContext != null) {
-                uncheckRun(() -> outputCommitter.commitJob(jobContext));
+                outputCommitter.commitJob(jobContext);
             }
         }
 

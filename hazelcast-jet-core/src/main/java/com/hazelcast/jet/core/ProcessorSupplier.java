@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ public interface ProcessorSupplier extends Serializable {
     /**
      * Called on each cluster member after deserialization.
      */
-    default void init(@Nonnull Context context) {
+    default void init(@Nonnull Context context) throws Exception {
     }
 
     /**
@@ -71,7 +71,7 @@ public interface ProcessorSupplier extends Serializable {
      * @param error the exception (if any) that caused the job to fail;
      *              {@code null} in the case of successful job completion
      */
-    default void close(@Nullable Throwable error) {
+    default void close(@Nullable Throwable error) throws Exception {
     }
 
     /**

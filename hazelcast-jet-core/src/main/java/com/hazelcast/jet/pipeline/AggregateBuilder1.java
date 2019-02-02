@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,10 @@ import javax.annotation.Nonnull;
  * the data from several input stages. To obtain it, call {@link
  * BatchStage#aggregateBuilder()} on the first stage you are co-aggregating.
  * Refer to the documentation of that method for more details.
+ * <p>
+ * <strong>Note:</strong> this is not a builder of {@code
+ * AggregateOperation}. If that' s what you are looking for, go {@link
+ * AggregateOperation#withCreate here}.
  *
  * @param <T0> type of items in stage-0 (the one you obtained this builder from)
  */
@@ -69,13 +73,12 @@ public class AggregateBuilder1<T0> {
      * BatchStage#aggregateBuilder()} for more details.
      *
      * @param aggrOp the aggregate operation to perform
-     * @param <A> type of the accumulator used by the aggregate operation
      * @param <R> type of the output item
      * @return a new stage representing the co-aggregation
      */
     @Nonnull
     @SuppressWarnings("unchecked")
-    public <A, R> BatchStage<R> build(@Nonnull AggregateOperation<A, R> aggrOp) {
+    public <R> BatchStage<R> build(@Nonnull AggregateOperation<?, R> aggrOp) {
         CreateOutStageFn<R, BatchStage<R>> createOutStageFn = BatchStageImpl::new;
         return aggBuilder.build(aggrOp, createOutStageFn, null);
     }

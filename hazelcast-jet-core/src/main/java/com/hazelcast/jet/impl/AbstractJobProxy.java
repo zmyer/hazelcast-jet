@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 import static com.hazelcast.jet.impl.util.ExceptionUtil.peel;
-import static com.hazelcast.jet.impl.util.Util.idToString;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
 import static com.hazelcast.jet.impl.util.Util.memoizeConcurrent;
 import static com.hazelcast.jet.impl.util.Util.toLocalDateTime;
 
@@ -60,29 +60,29 @@ public abstract class AbstractJobProxy<T> implements Job {
 
     // Flag which indicates if this proxy has sent a request to join the job result or not
     private final AtomicBoolean joinedJob = new AtomicBoolean();
-    private final AtomicBoolean cancelledJob = new AtomicBoolean();
     private final ExecutionCallback<Void> joinJobCallback = new JoinJobCallback();
 
-    private final Supplier<JobConfig> jobConfigSup;
+    private volatile JobConfig jobConfig;
     private final Supplier<Long> submissionTimeSup = memoizeConcurrent(this::doGetJobSubmissionTime);
 
     AbstractJobProxy(T container, long jobId) {
         this.jobId = jobId;
-        this.jobConfigSup = memoizeConcurrent(this::doGetJobConfig);
         this.container = container;
-        this.logger = createLogger();
+        this.logger = loggingService().getLogger(Job.class);
     }
 
     AbstractJobProxy(T container, long jobId, DAG dag, JobConfig config) {
         this.jobId = jobId;
-        this.jobConfigSup = () -> config;
         this.container = container;
-        this.logger = createLogger();
+        this.logger = loggingService().getLogger(Job.class);
 
-        doSubmitJob(dag, config);
-
-        joinedJob.set(true);
-        doInvokeJoinJob();
+        try {
+            doSubmitJob(dag, config);
+            joinedJob.set(true);
+            doInvokeJoinJob();
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
     }
 
     @Override
@@ -92,7 +92,35 @@ public abstract class AbstractJobProxy<T> implements Job {
 
     @Nonnull @Override
     public JobConfig getConfig() {
-        return jobConfigSup.get();
+        // The common path will use a single volatile load
+        JobConfig loadResult = jobConfig;
+        if (loadResult != null) {
+            return loadResult;
+        }
+        synchronized (this) {
+            // The uncommon path can use simpler code with multiple volatile loads
+            if (jobConfig != null) {
+                return jobConfig;
+            }
+            jobConfig = doGetJobConfig();
+            if (jobConfig == null) {
+                throw new NullPointerException("Supplier returned null");
+            }
+            return jobConfig;
+        }
+    }
+
+    /**
+     * Returns the string {@code <jobId> (name <jobName>)} without risking
+     * triggering of lazy-loading of JobConfig: if we don't have it, it will
+     * say {@code name ??}. If we have it and it is null, it will say {@code
+     * name ''}.
+     */
+    private String idAndName() {
+        JobConfig config = jobConfig;
+        return getIdString() + " (name "
+                + (config != null ? "'" + (config.getName() != null ? config.getName() : "") + "'" : "??")
+                + ')';
     }
 
     @Nonnull @Override
@@ -109,18 +137,38 @@ public abstract class AbstractJobProxy<T> implements Job {
     }
 
     @Override
-    public boolean cancel() {
-        boolean cancelled = cancelledJob.compareAndSet(false, true);
-        if (cancelled) {
-            logger.fine("Sending Cancel Job " + idToString(jobId) + " request.");
-            invokeCancelJob().andThen(new CancelJobCallback());
+    public void cancel() {
+        terminate(TerminationMode.CANCEL_FORCEFUL);
+    }
+
+    @Override
+    public void restart() {
+        terminate(TerminationMode.RESTART_GRACEFUL);
+    }
+
+    @Override
+    public void suspend() {
+        terminate(TerminationMode.SUSPEND_GRACEFUL);
+    }
+
+    private void terminate(TerminationMode mode) {
+        logger.fine("Sending " + mode + " request for job " + idAndName());
+        while (true) {
+            try {
+                invokeTerminateJob(mode).get();
+                break;
+            } catch (Exception e) {
+                if (!isRestartable(e)) {
+                    throw rethrow(e);
+                }
+                logger.fine("Re-sending " + mode + " request for job " + idAndName());
+            }
         }
-        return cancelled;
     }
 
     @Override
     public String toString() {
-        return "Job{id=" + idToString(jobId)
+        return "Job{id=" + getIdString()
                 + ", name=" + getName()
                 + ", submissionTime=" + toLocalDateTime(getSubmissionTime())
                 + ", status=" + getStatus()
@@ -137,7 +185,7 @@ public abstract class AbstractJobProxy<T> implements Job {
      */
     protected abstract ICompletableFuture<Void> invokeJoinJob();
 
-    protected abstract ICompletableFuture<Void> invokeCancelJob();
+    protected abstract ICompletableFuture<Void> invokeTerminateJob(TerminationMode mode);
 
     protected abstract long doGetJobSubmissionTime();
 
@@ -148,10 +196,6 @@ public abstract class AbstractJobProxy<T> implements Job {
     protected abstract SerializationService serializationService();
 
     protected abstract LoggingService loggingService();
-
-    protected ILogger getLogger() {
-        return logger;
-    }
 
     protected T container() {
         return container;
@@ -174,10 +218,6 @@ public abstract class AbstractJobProxy<T> implements Job {
         invokeJoinJob().andThen(joinJobCallback);
     }
 
-    private ILogger createLogger() {
-        return loggingService().getLogger(Job.class + "." + idToString(jobId));
-    }
-
     private class SubmitJobCallback implements ExecutionCallback<Void> {
         private final CompletableFuture<Void> future;
         private final DAG dag;
@@ -198,11 +238,11 @@ public abstract class AbstractJobProxy<T> implements Job {
         public synchronized void onFailure(Throwable t) {
             Throwable ex = peel(t);
             if (ex instanceof LocalMemberResetException) {
-                String msg = "Job " + idToString(jobId) + " failed because the cluster is performing split-brain merge";
+                String msg = "Job " + idAndName() + " failed because the cluster is performing split-brain merge";
                 logger.warning(msg, ex);
                 future.completeExceptionally(new CancellationException(msg));
             } else if (!isRestartable(ex)) {
-                String msg = "Job " + idToString(jobId)
+                String msg = "Job " + idAndName()
                         + " failed because it has received a non-restartable exception during submission";
                 logger.warning(msg, ex);
                 future.completeExceptionally(ex);
@@ -217,12 +257,12 @@ public abstract class AbstractJobProxy<T> implements Job {
 
         private void resubmitJob(Throwable t) {
             if (masterAddress() != null) {
-                logger.fine("Resubmitting job " + idToString(jobId) + " after " + t.getClass().getSimpleName());
+                logger.fine("Resubmitting job " + idAndName() + " after " + t.getClass().getSimpleName());
                 invokeSubmitJob(serializationService().toData(dag), config).andThen(this);
                 return;
             }
             // job data will be cleaned up eventually by coordinator
-            String msg = "Job " + idToString(jobId) + " failed because the cluster is performing "
+            String msg = "Job " + idAndName() + " failed because the cluster is performing "
                     + " split-brain merge and coordinator is not known";
             logger.warning(msg, t);
             future.completeExceptionally(new CancellationException(msg));
@@ -241,7 +281,7 @@ public abstract class AbstractJobProxy<T> implements Job {
         public synchronized void onFailure(Throwable t) {
             Throwable ex = peel(t);
             if (ex instanceof LocalMemberResetException) {
-                String msg = "Job " + idToString(jobId) + " failed because the cluster is performing split-brain merge";
+                String msg = "Job " + idAndName() + " failed because the cluster is performing split-brain merge";
                 logger.warning(msg, ex);
                 future.internalCompleteExceptionally(new CancellationException(msg));
             } else if (!isRestartable(ex)) {
@@ -257,35 +297,15 @@ public abstract class AbstractJobProxy<T> implements Job {
 
         private void rejoinJob(Throwable t) {
             if (masterAddress() != null) {
-                logger.fine("Rejoining to job " + idToString(jobId) + " after " + t.getClass().getSimpleName());
+                logger.fine("Rejoining to job " + idAndName() + " after " + t.getClass().getSimpleName());
                 doInvokeJoinJob();
                 return;
             }
             // job data will be cleaned up eventually by coordinator
-            String msg = "Job " + idToString(jobId) + " failed because the cluster is performing "
+            String msg = "Job " + idAndName() + " failed because the cluster is performing "
                     + " split-brain merge and coordinator is not known";
             logger.warning(msg, t);
             future.internalCompleteExceptionally(new CancellationException(msg));
         }
     }
-
-    private class CancelJobCallback implements ExecutionCallback<Void> {
-
-        @Override
-        public void onResponse(Void response) {
-            logger.fine("Job " + idToString(jobId) + " is cancelled.");
-        }
-
-        @Override
-        public void onFailure(Throwable t) {
-            Throwable ex = peel(t);
-            if (isRestartable(ex)) {
-                logger.fine("Re-sending cancel request for Job " + idToString(jobId));
-                invokeCancelJob().andThen(this);
-            } else {
-                logger.severe("Cancellation of Job " + idToString(jobId) + " failed.", t);
-            }
-        }
-    }
-
 }

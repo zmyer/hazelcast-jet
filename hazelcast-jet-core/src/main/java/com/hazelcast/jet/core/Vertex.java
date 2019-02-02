@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import com.hazelcast.jet.impl.SerializationConstants;
 import com.hazelcast.jet.impl.execution.init.CustomClassLoadedObject;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.nio.serialization.HazelcastSerializationException;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 
 import javax.annotation.Nonnull;
@@ -190,7 +191,11 @@ public class Vertex implements IdentifiedDataSerializable {
     public void readData(@Nonnull ObjectDataInput in) throws IOException {
         localParallelism = in.readInt();
         name = in.readUTF();
-        metaSupplier = CustomClassLoadedObject.read(in);
+        try {
+            metaSupplier = CustomClassLoadedObject.read(in);
+        } catch (HazelcastSerializationException e) {
+            throw new HazelcastSerializationException("Error deserializing vertex '" + name + "': " + e, e);
+        }
     }
 
     @Override

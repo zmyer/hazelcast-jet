@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,9 @@
 
 package com.hazelcast.jet.impl;
 
-import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.ICacheJet;
 import com.hazelcast.jet.JetCacheManager;
-import com.hazelcast.jet.stream.impl.ICacheDecorator;
+import com.hazelcast.jet.JetInstance;
 
 /**
  * Hazelcast Jet {@code JetCacheManager} implementation accessible via {@code JetInstance} that provides access to JSR-107

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.hazelcast.jet.impl.execution.init;
 
 import com.hazelcast.jet.core.ProcessorSupplier;
+import com.hazelcast.jet.impl.MasterContext;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
@@ -79,18 +80,30 @@ public class VertexDef implements IdentifiedDataSerializable {
         return processorSupplier;
     }
 
+    boolean isSnapshotVertex() {
+        return name.startsWith(MasterContext.SNAPSHOT_VERTEX_PREFIX);
+    }
+
     /**
      * Returns true in any of the following cases:<ul>
      *     <li>this vertex is a higher-priority source for some of its
      *         downstream vertices
-     *     <li>it sits upstream of such a vertex
+     *     <li>this vertex' output is connected by a snapshot restore edge*
+     *     <li>it sits upstream of a vertex meeting the other conditions
      * </ul>
+     *
+     * (*) We consider a snapshot-restoring vertices to by higher priority
+     * because when connected to a source vertex, they are the only input to it
+     * and therefore they wouldn't be a higher-priority source. However, we
+     * want to prevent snapshot before snapshot restoring is done.
+     * Fixes https://github.com/hazelcast/hazelcast-jet/pull/1101
      */
     boolean isHigherPriorityUpstream() {
         for (EdgeDef outboundEdge : outboundEdges) {
             VertexDef downstream = outboundEdge.destVertex();
             if (downstream.inboundEdges.stream()
                                        .anyMatch(edge -> edge.priority() > outboundEdge.priority())
+                    || outboundEdge.isSnapshotRestoreEdge()
                     || downstream.isHigherPriorityUpstream()) {
                 return true;
             }
@@ -104,7 +117,6 @@ public class VertexDef implements IdentifiedDataSerializable {
                 "name='" + name + '\'' +
                 '}';
     }
-
 
     //             IdentifiedDataSerializable implementation
 

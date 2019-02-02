@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,6 +32,10 @@ import javax.annotation.Nonnull;
  * To obtain it, call {@link StageWithWindow#aggregateBuilder()} on one of
  * the stages to co-aggregate and refer to that method's Javadoc for
  * further details.
+ * <p>
+ * <strong>Note:</strong> this is not a builder of {@code
+ * AggregateOperation}. If that' s what you are looking for, go {@link
+ * AggregateOperation#withCreate here}.
  *
  * @param <T0> the type of the stream-0 item
  */
@@ -73,14 +77,13 @@ public class WindowAggregateBuilder1<T0> {
      *
      * @param aggrOp        the aggregate operation to perform
      * @param mapToOutputFn a function that creates the output item from the aggregation result
-     * @param <A>           the type of items in the pipeline stage this builder was obtained from
      * @param <R>           the type of the aggregation result
      * @param <OUT>         the type of the output item
      * @return a new stage representing the co-aggregation
      */
     @Nonnull
-    public <A, R, OUT> StreamStage<OUT> build(
-            @Nonnull AggregateOperation<A, R> aggrOp,
+    public <R, OUT> StreamStage<OUT> build(
+            @Nonnull AggregateOperation<?, R> aggrOp,
             @Nonnull WindowResultFunction<? super R, ? extends OUT> mapToOutputFn
     ) {
         CreateOutStageFn<OUT, StreamStage<OUT>> createOutStageFn = StreamStageImpl::new;

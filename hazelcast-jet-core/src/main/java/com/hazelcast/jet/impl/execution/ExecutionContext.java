@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,18 +17,23 @@
 package com.hazelcast.jet.impl.execution;
 
 import com.hazelcast.internal.metrics.MetricsRegistry;
+import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.impl.JetService;
+import com.hazelcast.jet.impl.TerminationMode;
+import com.hazelcast.jet.impl.exception.JobTerminateRequestedException;
+import com.hazelcast.jet.impl.exception.TerminatedWithSnapshotException;
 import com.hazelcast.jet.impl.execution.init.ExecutionPlan;
 import com.hazelcast.jet.impl.operation.SnapshotOperation.SnapshotOperationResult;
+import com.hazelcast.jet.impl.util.Util;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.nio.Address;
 import com.hazelcast.nio.BufferObjectDataInput;
 import com.hazelcast.spi.NodeEngine;
 import com.hazelcast.spi.impl.NodeEngineImpl;
 
-import java.util.HashSet;
+import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -36,7 +41,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-import static com.hazelcast.jet.impl.util.Util.jobAndExecutionId;
+import static com.hazelcast.jet.Util.idToString;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.unmodifiableList;
@@ -55,6 +60,7 @@ public class ExecutionContext {
     private final Set<Address> participants;
     private final Object executionLock = new Object();
     private final ILogger logger;
+    private String jobName;
 
     // dest vertex id --> dest ordinal --> sender addr --> receiver tasklet
     private Map<Integer, Map<Integer, Map<Address, ReceiverTasklet>>> receiverMap = emptyMap();
@@ -74,28 +80,34 @@ public class ExecutionContext {
     private final CompletableFuture<Void> cancellationFuture = new CompletableFuture<>();
 
     private final NodeEngine nodeEngine;
-    private final TaskletExecutionService execService;
+    private final TaskletExecutionService taskletExecService;
     private SnapshotContext snapshotContext;
+    private JobConfig jobConfig;
 
-    public ExecutionContext(NodeEngine nodeEngine, TaskletExecutionService execService,
+    public ExecutionContext(NodeEngine nodeEngine, TaskletExecutionService taskletExecService,
                             long jobId, long executionId, Address coordinator, Set<Address> participants) {
         this.jobId = jobId;
         this.executionId = executionId;
         this.coordinator = coordinator;
-        this.participants = new HashSet<>(participants);
-        this.execService = execService;
+        this.participants = participants;
+        this.taskletExecService = taskletExecService;
         this.nodeEngine = nodeEngine;
 
         logger = nodeEngine.getLogger(getClass());
     }
 
     public ExecutionContext initialize(ExecutionPlan plan) {
+        jobConfig = plan.getJobConfig();
+        jobName = jobConfig.getName();
+        if (jobName == null) {
+            jobName = idToString(jobId);
+        }
         // Must be populated early, so all processor suppliers are
         // available to be completed in the case of init failure
         procSuppliers = unmodifiableList(plan.getProcessorSuppliers());
         processors = plan.getProcessors();
-        snapshotContext = new SnapshotContext(nodeEngine.getLogger(SnapshotContext.class), jobId, executionId,
-                plan.lastSnapshotId(), plan.getJobConfig().getProcessingGuarantee());
+        snapshotContext = new SnapshotContext(nodeEngine.getLogger(SnapshotContext.class), jobId, jobNameAndExecutionId(),
+                plan.lastSnapshotId(), jobConfig.getProcessingGuarantee());
         plan.initialize(nodeEngine, jobId, executionId, snapshotContext);
         snapshotContext.initTaskletCount(plan.getStoreSnapshotTaskletCount(), plan.getHigherPriorityVertexCount());
         receiverMap = unmodifiableMap(plan.getReceiverMap());
@@ -111,7 +123,7 @@ public class ExecutionContext {
      * Returns a future which is completed only when all tasklets are completed. If
      * execution was already cancelled before this method is called then the returned
      * future is completed immediately. The future returned can't be cancelled,
-     * instead {@link #cancelExecution()} should be used.
+     * instead {@link #terminateExecution} should be used.
      */
     public CompletableFuture<Void> beginExecution() {
         synchronized (executionLock) {
@@ -121,8 +133,18 @@ public class ExecutionContext {
             } else {
                 // begin job execution
                 JetService service = nodeEngine.getService(JetService.SERVICE_NAME);
-                ClassLoader cl = service.getClassLoader(jobId);
-                executionFuture = execService.beginExecute(tasklets, cancellationFuture, cl);
+                ClassLoader cl = service.getJobExecutionService().getClassLoader(jobConfig, jobId);
+                executionFuture = taskletExecService.beginExecute(tasklets, cancellationFuture, cl)
+                        .thenApply(res -> {
+                            // There's a race here: a snapshot could be requested after the job just completed
+                            // normally, in that case we'll report that it terminated with snapshot.
+                            // We ignore this for now.
+                            if (snapshotContext.isTerminalSnapshot()) {
+                                throw new TerminatedWithSnapshotException();
+                            }
+                            return res;
+                        });
+
             }
             return executionFuture;
         }
@@ -136,11 +158,11 @@ public class ExecutionContext {
         assert executionFuture == null || executionFuture.isDone()
                 : "If execution was begun, then completeExecution() should not be called before execution is done.";
 
-        for (Processor processor : processors) {
+        for (Tasklet tasklet : tasklets) {
             try {
-                processor.close(error);
+                tasklet.close();
             } catch (Throwable e) {
-                logger.severe(jobAndExecutionId(jobId, executionId)
+                logger.severe(jobNameAndExecutionId()
                         + " encountered an exception in Processor.close(), ignoring it", e);
             }
         }
@@ -149,7 +171,7 @@ public class ExecutionContext {
             try {
                 s.close(error);
             } catch (Throwable e) {
-                logger.severe(jobAndExecutionId(jobId, executionId)
+                logger.severe(jobNameAndExecutionId()
                         + " encountered an exception in ProcessorSupplier.complete(), ignoring it", e);
             }
         }
@@ -159,16 +181,25 @@ public class ExecutionContext {
     }
 
     /**
-     * Cancels local execution of tasklets and returns a future which is only completed
-     * when all tasklets are completed and contains the result of the execution.
+     * Terminates the local execution of tasklets and returns a future which is
+     * only completed when all tasklets are completed and contains the result
+     * of the execution.
      */
-    public CompletableFuture<Void> cancelExecution() {
+    public CompletableFuture<Void> terminateExecution(@Nullable TerminationMode mode) {
+        assert mode == null || !mode.isWithTerminalSnapshot()
+                : "terminating with a mode that should do a terminal snapshot";
+
         synchronized (executionLock) {
-            cancellationFuture.cancel(true);
+            if (mode == null) {
+                cancellationFuture.cancel(true);
+            } else {
+                cancellationFuture.completeExceptionally(new JobTerminateRequestedException(mode));
+            }
             if (executionFuture == null) {
                 // if cancelled before execution started, then assign the already completed future.
                 executionFuture = cancellationFuture;
             }
+            snapshotContext.cancel();
             return executionFuture;
         }
     }
@@ -176,12 +207,13 @@ public class ExecutionContext {
     /**
      * Starts a new snapshot by incrementing the current snapshot id
      */
-    public CompletionStage<SnapshotOperationResult> beginSnapshot(long snapshotId) {
+    public CompletionStage<SnapshotOperationResult> beginSnapshot(long snapshotId, String mapName,
+                                                                  boolean isTerminal) {
         synchronized (executionLock) {
             if (cancellationFuture.isDone() || executionFuture != null && executionFuture.isDone()) {
                 throw new CancellationException();
             }
-            return snapshotContext.startNewSnapshot(snapshotId);
+            return snapshotContext.startNewSnapshot(snapshotId, mapName, isTerminal);
         }
     }
 
@@ -204,6 +236,10 @@ public class ExecutionContext {
         return executionId;
     }
 
+    public String jobNameAndExecutionId() {
+        return Util.jobNameAndExecutionId(jobName, executionId);
+    }
+
     public Address coordinator() {
         return coordinator;
     }
@@ -219,5 +255,10 @@ public class ExecutionContext {
     // visible for testing only
     public SnapshotContext snapshotContext() {
         return snapshotContext;
+    }
+
+    @Nullable
+    public String jobName() {
+        return jobName;
     }
 }

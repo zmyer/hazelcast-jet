@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,28 @@
 
 package com.hazelcast.jet.function;
 
+import com.hazelcast.jet.impl.util.ExceptionUtil;
+
 import java.io.Serializable;
 
 /**
- * {@code Serializable} variant of {@link TriFunction}.
- *
- **/
+ * {@code Serializable} variant of {@link TriFunction} which declares checked
+ * exception.
+ */
 @FunctionalInterface
-public interface DistributedTriFunction<T, U, V, R> extends TriFunction<T, U, V, R>, Serializable {
+public interface DistributedTriFunction<T0, T1, T2, R> extends TriFunction<T0, T1, T2, R>, Serializable {
+
+    /**
+     * Exception-declaring variant of {@link TriFunction#apply}.
+     */
+    R applyEx(T0 t0, T1 t1, T2 t2) throws Exception;
+
+    @Override
+    default R apply(T0 t0, T1 t1, T2 t2) {
+        try {
+            return applyEx(t0, t1, t2);
+        } catch (Exception e) {
+            throw ExceptionUtil.sneakyThrow(e);
+        }
+    }
 }

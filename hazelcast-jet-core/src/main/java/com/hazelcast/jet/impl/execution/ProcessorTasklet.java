@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,23 +19,30 @@ package com.hazelcast.jet.impl.execution;
 import com.hazelcast.internal.metrics.LongProbeFunction;
 import com.hazelcast.internal.metrics.ProbeBuilder;
 import com.hazelcast.internal.metrics.ProbeLevel;
+import com.hazelcast.internal.metrics.ProbeUnit;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.Processor;
+import com.hazelcast.jet.core.Processor.Context;
 import com.hazelcast.jet.core.Watermark;
-import com.hazelcast.jet.impl.execution.init.Contexts.ProcCtx;
+import com.hazelcast.jet.impl.processor.ProcessorWrapper;
 import com.hazelcast.jet.impl.util.ArrayDequeInbox;
 import com.hazelcast.jet.impl.util.CircularListCursor;
 import com.hazelcast.jet.impl.util.ProgressState;
 import com.hazelcast.jet.impl.util.ProgressTracker;
+import com.hazelcast.logging.ILogger;
+import com.hazelcast.logging.Logger;
+import com.hazelcast.spi.serialization.SerializationService;
 import com.hazelcast.util.Preconditions;
+import com.hazelcast.util.function.Predicate;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
-import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.TreeMap;
@@ -47,14 +54,15 @@ import static com.hazelcast.jet.impl.execution.ProcessorState.COMPLETE;
 import static com.hazelcast.jet.impl.execution.ProcessorState.COMPLETE_EDGE;
 import static com.hazelcast.jet.impl.execution.ProcessorState.EMIT_BARRIER;
 import static com.hazelcast.jet.impl.execution.ProcessorState.EMIT_DONE_ITEM;
-import static com.hazelcast.jet.impl.execution.ProcessorState.EMIT_WATERMARK;
 import static com.hazelcast.jet.impl.execution.ProcessorState.END;
 import static com.hazelcast.jet.impl.execution.ProcessorState.PROCESS_INBOX;
 import static com.hazelcast.jet.impl.execution.ProcessorState.PROCESS_WATERMARK;
 import static com.hazelcast.jet.impl.execution.ProcessorState.SAVE_SNAPSHOT;
 import static com.hazelcast.jet.impl.execution.WatermarkCoalescer.IDLE_MESSAGE;
 import static com.hazelcast.jet.impl.execution.WatermarkCoalescer.NO_NEW_WM;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
 import static com.hazelcast.jet.impl.util.ProgressState.NO_PROGRESS;
+import static com.hazelcast.jet.impl.util.Util.jobNameAndExecutionId;
 import static com.hazelcast.jet.impl.util.Util.lazyAdd;
 import static com.hazelcast.jet.impl.util.Util.lazyIncrement;
 import static com.hazelcast.jet.impl.util.Util.sum;
@@ -69,7 +77,7 @@ public class ProcessorTasklet implements Tasklet {
     private final ProgressTracker progTracker = new ProgressTracker();
     private final OutboundEdgeStream[] outstreams;
     private final OutboxImpl outbox;
-    private final ProcCtx context;
+    private final Processor.Context context;
 
     private final Processor processor;
     private final SnapshotContext ssContext;
@@ -78,81 +86,114 @@ public class ProcessorTasklet implements Tasklet {
     private final ArrayDequeInbox inbox = new ArrayDequeInbox(progTracker);
     private final Queue<ArrayList<InboundEdgeStream>> instreamGroupQueue;
     private final WatermarkCoalescer watermarkCoalescer;
+    private final ILogger logger;
+    private final SerializationService serializationService;
 
     private int numActiveOrdinals; // counter for remaining active ordinals
     private CircularListCursor<InboundEdgeStream> instreamCursor;
     private InboundEdgeStream currInstream;
     private ProcessorState state;
     private long pendingSnapshotId;
+    private SnapshotBarrier currentBarrier;
     private Watermark pendingWatermark;
+    private boolean processorClosed;
+
+    // Tells whether we are operating in exactly-once or at-least-once mode.
+    // In other words, whether a barrier from all inputs must be present before
+    // draining more items from an input stream where a barrier has been reached.
+    // Once a terminal snapshot barrier is reached, this is always true.
+    private boolean waitForAllBarriers;
 
     private final AtomicLongArray receivedCounts;
     private final AtomicLongArray receivedBatches;
     private final AtomicLongArray emittedCounts;
     private final AtomicLong queuesSize = new AtomicLong();
     private final AtomicLong queuesCapacity = new AtomicLong();
+    private final Predicate<Object> addToInboxFunction = inbox.queue()::add;
 
-    public ProcessorTasklet(@Nonnull ProcCtx context,
+    @SuppressWarnings("checkstyle:ExecutableStatementCount")
+    public ProcessorTasklet(@Nonnull Context context,
+                            @Nonnull SerializationService serializationService,
                             @Nonnull Processor processor,
                             @Nonnull List<? extends InboundEdgeStream> instreams,
                             @Nonnull List<? extends OutboundEdgeStream> outstreams,
                             @Nonnull SnapshotContext ssContext,
                             @Nonnull OutboundCollector ssCollector,
-                            int maxWatermarkRetainMillis) {
+                            @Nullable ProbeBuilder probeBuilder
+    ) {
         Preconditions.checkNotNull(processor, "processor");
         this.context = context;
+        this.serializationService = serializationService;
         this.processor = processor;
         this.numActiveOrdinals = instreams.size();
-        this.instreamGroupQueue = instreams
-                .stream()
+        this.instreamGroupQueue = new ArrayDeque<>(instreams.stream()
                 .collect(groupingBy(InboundEdgeStream::priority, TreeMap::new,
                         toCollection(ArrayList<InboundEdgeStream>::new)))
-                .entrySet().stream()
-                .map(Entry::getValue)
-                .collect(toCollection(ArrayDeque::new));
+                .values());
         this.outstreams = outstreams.stream()
                                     .sorted(comparing(OutboundEdgeStream::ordinal))
                                     .toArray(OutboundEdgeStream[]::new);
         this.ssContext = ssContext;
+        this.logger = getLogger(context);
 
         instreamCursor = popInstreamGroup();
-        currInstream = instreamCursor != null ? instreamCursor.value() : null;
         receivedCounts = new AtomicLongArray(instreams.size());
         receivedBatches = new AtomicLongArray(instreams.size());
         emittedCounts = new AtomicLongArray(outstreams.size() + 1);
         outbox = createOutbox(ssCollector);
         receivedBarriers = new BitSet(instreams.size());
         state = initialProcessingState();
-        pendingSnapshotId = ssContext.lastSnapshotId() + 1;
+        pendingSnapshotId = ssContext.activeSnapshotId() + 1;
+        waitForAllBarriers = ssContext.processingGuarantee() == ProcessingGuarantee.EXACTLY_ONCE;
 
-        watermarkCoalescer = WatermarkCoalescer.create(maxWatermarkRetainMillis, instreams.size());
+        watermarkCoalescer = WatermarkCoalescer.create(instreams.size());
+        if (probeBuilder != null) {
+            registerMetrics(instreams, probeBuilder);
+        }
     }
 
-    public void registerMetrics(final ProbeBuilder probeBuilder) {
-        for (int i = 0; i < receivedCounts.length(); i++) {
+    @SuppressFBWarnings(value = "RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE",
+            justification = "jetInstance() can be null in TestProcessorContext")
+    private ILogger getLogger(@Nonnull Context context) {
+        return context.jetInstance() != null
+                ? context.jetInstance().getHazelcastInstance().getLoggingService().getLogger(getClass() + "." + toString())
+                : Logger.getLogger(getClass());
+    }
+
+    private void registerMetrics(List<? extends InboundEdgeStream> instreams, final ProbeBuilder probeBuilder) {
+        for (int i = 0; i < instreams.size(); i++) {
             int finalI = i;
             ProbeBuilder builderWithOrdinal = probeBuilder
                     .withTag("ordinal", String.valueOf(i));
-            builderWithOrdinal.register(this, "receivedCount", ProbeLevel.INFO,
+            builderWithOrdinal.register(this, "receivedCount", ProbeLevel.INFO, ProbeUnit.COUNT,
                             (LongProbeFunction<ProcessorTasklet>) t -> t.receivedCounts.get(finalI));
-
-            builderWithOrdinal.register(this, "receivedBatches", ProbeLevel.INFO,
+            builderWithOrdinal.register(this, "receivedBatches", ProbeLevel.INFO, ProbeUnit.COUNT,
                             (LongProbeFunction<ProcessorTasklet>) t -> t.receivedBatches.get(finalI));
+
+            InboundEdgeStream instream = instreams.get(finalI);
+            builderWithOrdinal.register(this, "topObservedWm", ProbeLevel.INFO, ProbeUnit.MS,
+                    (LongProbeFunction<ProcessorTasklet>) t -> instream.topObservedWm());
+            builderWithOrdinal.register(this, "coalescedWm", ProbeLevel.INFO, ProbeUnit.MS,
+                    (LongProbeFunction<ProcessorTasklet>) t -> instream.coalescedWm());
         }
 
         for (int i = 0; i < emittedCounts.length() - (context.snapshottingEnabled() ? 0 : 1); i++) {
             int finalI = i;
             probeBuilder
                     .withTag("ordinal", i == emittedCounts.length() - 1 ? "snapshot" : String.valueOf(i))
-                    .register(this, "emittedCount", ProbeLevel.INFO,
+                    .register(this, "emittedCount", ProbeLevel.INFO, ProbeUnit.COUNT,
                             (LongProbeFunction<ProcessorTasklet>) t -> t.emittedCounts.get(finalI));
         }
 
-        probeBuilder.register(this, "lastReceivedWm", ProbeLevel.INFO,
-                (LongProbeFunction<ProcessorTasklet>) t -> t.watermarkCoalescer.lastEmittedWm());
-        probeBuilder.register(this, "queuesSize", ProbeLevel.INFO,
+        probeBuilder.register(this, "topObservedWm", ProbeLevel.INFO, ProbeUnit.MS,
+                (LongProbeFunction<ProcessorTasklet>) t -> t.watermarkCoalescer.topObservedWm());
+        probeBuilder.register(this, "coalescedWm", ProbeLevel.INFO, ProbeUnit.MS,
+                (LongProbeFunction<ProcessorTasklet>) t -> t.watermarkCoalescer.coalescedWm());
+        probeBuilder.register(this, "lastForwardedWm", ProbeLevel.INFO, ProbeUnit.MS,
+                (LongProbeFunction<ProcessorTasklet>) t -> t.outbox.lastForwardedWm());
+        probeBuilder.register(this, "queuesSize", ProbeLevel.INFO, ProbeUnit.COUNT,
                 (LongProbeFunction<ProcessorTasklet>) t -> t.queuesSize.get());
-        probeBuilder.register(this, "queuesCapacity", ProbeLevel.INFO,
+        probeBuilder.register(this, "queuesCapacity", ProbeLevel.INFO, ProbeUnit.COUNT,
                 (LongProbeFunction<ProcessorTasklet>) t -> t.queuesCapacity.get());
     }
 
@@ -163,64 +204,82 @@ public class ProcessorTasklet implements Tasklet {
         }
         collectors[outstreams.length] = ssCollector;
         return new OutboxImpl(collectors, true, progTracker,
-                context.getSerializationService(), OUTBOX_BATCH_SIZE, emittedCounts);
+                serializationService, OUTBOX_BATCH_SIZE, emittedCounts);
     }
 
     @Override
     public void init() {
-        if (context.getSerializationService().getManagedContext() != null) {
-            Object processor2 = context.getSerializationService().getManagedContext().initialize(processor);
-            assert processor2 == processor : "different object returned";
+        if (serializationService.getManagedContext() != null) {
+            Processor toInit = processor instanceof ProcessorWrapper
+                    ? ((ProcessorWrapper) processor).getWrapped() : processor;
+            Object initialized = serializationService.getManagedContext().initialize(toInit);
+            assert initialized == toInit : "different object returned";
         }
-        processor.init(outbox, context);
+        try {
+            processor.init(outbox, context);
+        } catch (Exception e) {
+            throw sneakyThrow(e);
+        }
     }
 
     @Override @Nonnull
     public ProgressState call() {
-        return call(watermarkCoalescer.getTime());
-    }
-
-    // package-visible for testing
-    ProgressState call(long now) {
+        assert !processorClosed : "processor closed";
         progTracker.reset();
         outbox.reset();
-        stateMachineStep(now);
-        return progTracker.toProgressState();
+        stateMachineStep();
+        ProgressState progressState = progTracker.toProgressState();
+        if (progressState.isDone()) {
+            closeProcessor();
+            processorClosed = true;
+        }
+        return progressState;
+    }
+
+    private void closeProcessor() {
+        assert !processorClosed : "processor already closed";
+        try {
+            processor.close();
+        } catch (Exception e) {
+            logger.severe(jobNameAndExecutionId(context.jobConfig().getName(), context.executionId())
+                    + " encountered an exception in Processor.close(), ignoring it", e);
+        }
     }
 
     @SuppressWarnings("checkstyle:returncount")
-    private void stateMachineStep(long now) {
+    private void stateMachineStep() {
         switch (state) {
             case PROCESS_WATERMARK:
                 progTracker.notDone();
                 if (pendingWatermark == null) {
-                    long wm = watermarkCoalescer.checkWmHistory(now);
+                    long wm = watermarkCoalescer.checkWmHistory();
                     if (wm == NO_NEW_WM) {
                         state = PROCESS_INBOX;
-                        stateMachineStep(now); // recursion
+                        stateMachineStep(); // recursion
                         break;
                     }
                     pendingWatermark = new Watermark(wm);
                 }
-                if (pendingWatermark.equals(IDLE_MESSAGE) || processor.tryProcessWatermark(pendingWatermark)) {
-                    state = EMIT_WATERMARK;
-                    stateMachineStep(now); // recursion
-                }
-                break;
-
-            case EMIT_WATERMARK:
-                progTracker.notDone();
-                if (outbox.offer(pendingWatermark)) {
+                if (pendingWatermark.equals(IDLE_MESSAGE)
+                        ? outbox.offer(IDLE_MESSAGE)
+                        : processor.tryProcessWatermark(pendingWatermark)) {
                     state = PROCESS_INBOX;
                     pendingWatermark = null;
-                    stateMachineStep(now); // recursion
+                    stateMachineStep(); // recursion
                 }
                 break;
 
             case PROCESS_INBOX:
                 progTracker.notDone();
-                if (inbox.isEmpty() && (isSnapshotInbox() || processor.tryProcess())) {
-                    fillInbox(now);
+                if (inbox.isEmpty()) {
+                    if (isSnapshotInbox() || processor.tryProcess()) {
+                        assert !outbox.hasUnfinishedItem() : isSnapshotInbox()
+                                ? "Unfinished item before fillInbox call"
+                                : "Processor.tryProcess() returned true, but there's unfinished item in the outbox";
+                        fillInbox();
+                    } else {
+                        return;
+                    }
                 }
                 if (!inbox.isEmpty()) {
                     if (isSnapshotInbox()) {
@@ -236,8 +295,7 @@ public class ProcessorTasklet implements Tasklet {
                         state = COMPLETE_EDGE;
                         progTracker.madeProgress();
                         return;
-                    } else if (context.snapshottingEnabled()
-                            && numActiveOrdinals > 0
+                    } else if (numActiveOrdinals > 0
                             && receivedBarriers.cardinality() == numActiveOrdinals) {
                         // we have an empty inbox and received the current snapshot barrier from all active ordinals
                         state = SAVE_SNAPSHOT;
@@ -255,14 +313,14 @@ public class ProcessorTasklet implements Tasklet {
                 progTracker.notDone();
                 if (isSnapshotInbox()
                         ? processor.finishSnapshotRestore() : processor.completeEdge(currInstream.ordinal())) {
+                    assert !outbox.hasUnfinishedItem() :
+                            "outbox has unfinished item after successful completeEdge() or finishSnapshotRestore()";
                     progTracker.madeProgress();
                     state = initialProcessingState();
                 }
                 return;
 
             case SAVE_SNAPSHOT:
-                assert context.snapshottingEnabled() : "Snapshotting is not enabled";
-
                 progTracker.notDone();
                 if (processor.saveToSnapshot()) {
                     progTracker.madeProgress();
@@ -271,25 +329,34 @@ public class ProcessorTasklet implements Tasklet {
                 return;
 
             case EMIT_BARRIER:
-                assert context.snapshottingEnabled() : "Snapshotting is not enabled";
-
-                progTracker.notDone();
-                if (outbox.offerToEdgesAndSnapshot(new SnapshotBarrier(pendingSnapshotId))) {
-                    receivedBarriers.clear();
-                    pendingSnapshotId++;
-                    state = initialProcessingState();
+                assert currentBarrier != null : "currentBarrier == null";
+                if (outbox.offerToEdgesAndSnapshot(currentBarrier)) {
+                    progTracker.madeProgress();
+                    if (currentBarrier.isTerminal()) {
+                        state = EMIT_DONE_ITEM;
+                    } else {
+                        currentBarrier = null;
+                        receivedBarriers.clear();
+                        pendingSnapshotId++;
+                        state = initialProcessingState();
+                    }
                 }
+                progTracker.notDone();
                 return;
 
             case COMPLETE:
                 progTracker.notDone();
                 // check ssContext to see if a barrier should be emitted
-                if (context.snapshottingEnabled()) {
-                    long currSnapshotId = ssContext.lastSnapshotId();
-                    assert currSnapshotId <= pendingSnapshotId : "Unexpected new snapshot id " + currSnapshotId
-                            + ", current was" + pendingSnapshotId;
-                    if (currSnapshotId == pendingSnapshotId) {
+                long currSnapshotId = ssContext.activeSnapshotId();
+                assert currSnapshotId <= pendingSnapshotId : "Unexpected new snapshot id " + currSnapshotId
+                        + ", current was" + pendingSnapshotId;
+                if (currSnapshotId == pendingSnapshotId) {
+                    if (outbox.hasUnfinishedItem()) {
+                        outbox.block();
+                    } else {
+                        outbox.unblock();
                         state = SAVE_SNAPSHOT;
+                        currentBarrier = new SnapshotBarrier(currSnapshotId, ssContext.isTerminalSnapshot());
                         progTracker.madeProgress();
                         return;
                     }
@@ -314,7 +381,7 @@ public class ProcessorTasklet implements Tasklet {
         }
     }
 
-    private void fillInbox(long now) {
+    private void fillInbox() {
         assert inbox.isEmpty() : "inbox is not empty";
         assert pendingWatermark == null : "null wm expected, but was " + pendingWatermark;
 
@@ -328,25 +395,24 @@ public class ProcessorTasklet implements Tasklet {
             result = NO_PROGRESS;
 
             // skip ordinals where a snapshot barrier has already been received
-            if (ssContext != null && ssContext.processingGuarantee() == ProcessingGuarantee.EXACTLY_ONCE
-                    && receivedBarriers.get(currInstream.ordinal())) {
+            if (waitForAllBarriers && receivedBarriers.get(currInstream.ordinal())) {
                 instreamCursor.advance();
                 continue;
             }
-            result = currInstream.drainTo(inbox.queue()::add);
+            result = currInstream.drainTo(addToInboxFunction);
             progTracker.madeProgress(result.isMadeProgress());
 
             // check if the last drained item is special
             Object lastItem = inbox.queue().peekLast();
             if (lastItem instanceof Watermark) {
                 long newWmValue = ((Watermark) inbox.queue().removeLast()).timestamp();
-                long wm = watermarkCoalescer.observeWm(now, currInstream.ordinal(), newWmValue);
+                long wm = watermarkCoalescer.observeWm(currInstream.ordinal(), newWmValue);
                 if (wm != NO_NEW_WM) {
                     pendingWatermark = new Watermark(wm);
                 }
             } else if (lastItem instanceof SnapshotBarrier) {
                 SnapshotBarrier barrier = (SnapshotBarrier) inbox.queue().removeLast();
-                observeSnapshot(currInstream.ordinal(), barrier.snapshotId());
+                observeBarrier(currInstream.ordinal(), barrier);
             } else if (lastItem != null && !(lastItem instanceof BroadcastItem)) {
                 watermarkCoalescer.observeEvent(currInstream.ordinal());
             }
@@ -374,7 +440,9 @@ public class ProcessorTasklet implements Tasklet {
 
         // we are the only updating thread, no need for CAS operations
         lazyAdd(receivedCounts, currInstream.ordinal(), inbox.size());
-        lazyIncrement(receivedBatches, currInstream.ordinal());
+        if (!inbox.isEmpty()) {
+            lazyIncrement(receivedBatches, currInstream.ordinal());
+        }
         queuesCapacity.lazySet(instreamCursor == null ? 0 : sum(instreamCursor.getList(), InboundEdgeStream::capacities));
         queuesSize.lazySet(instreamCursor == null ? 0 : sum(instreamCursor.getList(), InboundEdgeStream::sizes));
     }
@@ -387,13 +455,22 @@ public class ProcessorTasklet implements Tasklet {
 
     @Override
     public String toString() {
-        return "ProcessorTasklet{" + context.vertexName() + '#' + context.globalProcessorIndex() + '}';
+        String jobPrefix = context.jobConfig().getName() == null ? "" : context.jobConfig().getName() + "/";
+        return "ProcessorTasklet{" + jobPrefix + context.vertexName() + '#' + context.globalProcessorIndex() + '}';
     }
 
-    private void observeSnapshot(int ordinal, long snapshotId) {
-        if (snapshotId != pendingSnapshotId) {
-            throw new JetException("Unexpected snapshot barrier " + snapshotId + " from ordinal " + ordinal +
+    private void observeBarrier(int ordinal, SnapshotBarrier barrier) {
+        if (barrier.snapshotId() != pendingSnapshotId) {
+            throw new JetException("Unexpected snapshot barrier ID " + barrier.snapshotId() + " from ordinal " + ordinal +
                     " expected " + pendingSnapshotId);
+        }
+        currentBarrier = barrier;
+        if (barrier.isTerminal()) {
+            // Switch to exactly-once mode. The reason is that there will be DONE_ITEM just after the
+            // terminal barrier and if we process it before receiving the other barriers, it could cause
+            // the watermark to advance. The exactly-once mode disallows processing of any items after
+            // the barrier before the barrier is processed.
+            waitForAllBarriers = true;
         }
         receivedBarriers.set(ordinal);
     }
@@ -417,5 +494,13 @@ public class ProcessorTasklet implements Tasklet {
     @Override
     public boolean isCooperative() {
         return processor.isCooperative();
+    }
+
+    @Override
+    public void close() {
+        if (!processorClosed) {
+            closeProcessor();
+            processorClosed = true;
+        }
     }
 }

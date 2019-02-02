@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.hazelcast.jet.impl.pipeline;
 
 import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.function.DistributedBiFunction;
@@ -32,12 +33,14 @@ import com.hazelcast.jet.pipeline.ContextFactory;
 import com.hazelcast.jet.pipeline.JoinClause;
 import com.hazelcast.jet.pipeline.StageWithWindow;
 import com.hazelcast.jet.pipeline.StreamStage;
-import com.hazelcast.jet.pipeline.StreamStageWithGrouping;
+import com.hazelcast.jet.pipeline.StreamStageWithKey;
 import com.hazelcast.jet.pipeline.WindowDefinition;
 
 import javax.annotation.Nonnull;
+import java.util.concurrent.CompletableFuture;
 
 import static com.hazelcast.jet.function.DistributedFunctions.constantKey;
+import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 
 public class StreamStageImpl<T> extends ComputeStageImplBase<T> implements StreamStage<T> {
 
@@ -50,8 +53,9 @@ public class StreamStageImpl<T> extends ComputeStageImplBase<T> implements Strea
     }
 
     @Nonnull @Override
-    public <K> StreamStageWithGrouping<T, K> groupingKey(@Nonnull DistributedFunction<? super T, ? extends K> keyFn) {
-        return new StreamStageWithGroupingImpl<>(this, keyFn);
+    public <K> StreamStageWithKey<T, K> groupingKey(@Nonnull DistributedFunction<? super T, ? extends K> keyFn) {
+        checkSerializable(keyFn, "keyFn");
+        return new StreamStageWithKeyImpl<>(this, keyFn);
     }
 
     @Nonnull @Override
@@ -85,6 +89,15 @@ public class StreamStageImpl<T> extends ComputeStageImplBase<T> implements Strea
     }
 
     @Nonnull @Override
+    public <C, R> StreamStage<R> mapUsingContextAsync(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
+    ) {
+        return attachFlatMapUsingContextAsync("map", contextFactory,
+                (c, t) -> mapAsyncFn.apply(c, t).thenApply(Traversers::singleton));
+    }
+
+    @Nonnull @Override
     public <C> StreamStage<T> filterUsingContext(
             @Nonnull ContextFactory<C> contextFactory,
             @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
@@ -93,16 +106,33 @@ public class StreamStageImpl<T> extends ComputeStageImplBase<T> implements Strea
     }
 
     @Nonnull @Override
+    public <C> StreamStage<T> filterUsingContextAsync(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
+    ) {
+        return attachFlatMapUsingContextAsync("filter", contextFactory,
+                (c, t) -> filterAsyncFn.apply(c, t).thenApply(passed -> passed ? Traversers.singleton(t) : null));
+    }
+
+    @Nonnull @Override
     public <C, R> StreamStage<R> flatMapUsingContext(
             @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<? extends R>> flatMapFn
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<R>> flatMapFn
     ) {
         return attachFlatMapUsingContext(contextFactory, flatMapFn);
     }
 
     @Nonnull @Override
-    public <R> StreamStage<R> aggregateRolling(@Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp) {
-        return groupingKey(constantKey()).aggregateRolling(aggrOp, (k, v) -> v);
+    public <C, R> StreamStage<R> flatMapUsingContextAsync(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Traverser<R>>> flatMapAsyncFn
+    ) {
+        return attachFlatMapUsingContextAsync("flatMap", contextFactory, flatMapAsyncFn);
+    }
+
+    @Nonnull @Override
+    public <R> StreamStage<R> rollingAggregate(@Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp) {
+        return groupingKey(constantKey()).rollingAggregate(aggrOp, (k, v) -> v);
     }
 
     @Nonnull @Override

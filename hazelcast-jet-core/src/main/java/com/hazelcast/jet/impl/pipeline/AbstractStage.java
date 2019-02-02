@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,9 @@ import com.hazelcast.jet.pipeline.GeneralStage;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.SinkStage;
 import com.hazelcast.jet.pipeline.Stage;
-import java.util.ArrayList;
+
 import javax.annotation.Nonnull;
+import java.util.ArrayList;
 
 import static java.util.Collections.emptyList;
 

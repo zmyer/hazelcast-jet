@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.impl;
 
+import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.JobStatus;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
@@ -23,14 +24,16 @@ import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
+import static com.hazelcast.jet.Util.idToString;
 import static com.hazelcast.jet.core.JobStatus.COMPLETED;
 import static com.hazelcast.jet.core.JobStatus.FAILED;
 import static com.hazelcast.jet.impl.util.Util.exceptionallyCompletedFuture;
-import static com.hazelcast.jet.impl.util.Util.idToString;
 import static com.hazelcast.jet.impl.util.Util.toLocalDateTime;
 import static java.util.concurrent.CompletableFuture.completedFuture;
 
@@ -41,29 +44,35 @@ public class JobResult implements IdentifiedDataSerializable {
     private JobConfig jobConfig;
     private long creationTime;
     private long completionTime;
-    private Throwable failure;
+    private String failureText;
 
     public JobResult() {
     }
 
-    public JobResult(long jobId, JobConfig jobConfig, String coordinatorUUID, long creationTime, Long completionTime,
-                     Throwable failure) {
+    JobResult(long jobId,
+              @Nonnull JobConfig jobConfig,
+              @Nonnull String coordinatorUUID,
+              long creationTime, long completionTime,
+              @Nullable String failureText
+    ) {
         this.jobId = jobId;
         this.jobConfig = jobConfig;
         this.coordinatorUUID = coordinatorUUID;
         this.creationTime = creationTime;
         this.completionTime = completionTime;
-        this.failure = failure;
+        this.failureText = failureText;
     }
 
     public long getJobId() {
         return jobId;
     }
 
+    @Nonnull
     public JobConfig getJobConfig() {
         return jobConfig;
     }
 
+    @Nonnull
     public String getCoordinatorUUID() {
         return coordinatorUUID;
     }
@@ -77,23 +86,48 @@ public class JobResult implements IdentifiedDataSerializable {
     }
 
     public boolean isSuccessful() {
-        return (failure == null);
+        return failureText == null;
     }
 
-    public boolean isSuccessfulOrCancelled() {
-        return (failure == null || failure instanceof CancellationException);
+    @Nullable
+    public String getFailureText() {
+        return failureText;
     }
 
-    public Throwable getFailure() {
-        return failure;
+    /**
+     * Returns a mock throwable created for the failureText. It's either {@link
+     * CancellationException} or {@link JetException} with the failureText
+     * text.
+     */
+    @Nullable
+    public Throwable getFailureAsThrowable() {
+        if (failureText == null) {
+            return null;
+        }
+        Throwable throwable;
+        if (failureText.startsWith(CancellationException.class.getName())) {
+            int prefixLength = (CancellationException.class.getName() + ": ").length();
+            String message = failureText.length() >= prefixLength ? failureText.substring(prefixLength) : null;
+            throwable = new CancellationException(message);
+        } else {
+            throwable = new JetException(failureText);
+        }
+        return throwable;
     }
 
+    @Nonnull
     public JobStatus getJobStatus() {
-        return isSuccessfulOrCancelled() ? COMPLETED : FAILED;
+        return isSuccessful() ? COMPLETED : FAILED;
     }
 
-    public CompletableFuture<Void> asCompletableFuture() {
-        return failure == null ? completedFuture(null) : exceptionallyCompletedFuture(failure);
+    @Nonnull
+    CompletableFuture<Void> asCompletableFuture() {
+        return failureText == null ? completedFuture(null) : exceptionallyCompletedFuture(getFailureAsThrowable());
+    }
+
+    @Nonnull
+    public String getJobNameOrId() {
+        return jobConfig.getName() != null ? jobConfig.getName() : idToString(jobId);
     }
 
     @Override
@@ -101,10 +135,10 @@ public class JobResult implements IdentifiedDataSerializable {
         return "JobResult{" +
                 "coordinatorUUID='" + coordinatorUUID + '\'' +
                 ", jobId=" + idToString(jobId) +
-                ", jobConfig.name=" + jobConfig.getName() +
+                ", name=" + jobConfig.getName() +
                 ", creationTime=" + toLocalDateTime(creationTime) +
                 ", completionTime=" + toLocalDateTime(completionTime) +
-                ", failure=" + failure +
+                ", failureText=" + failureText +
                 '}';
     }
 
@@ -125,7 +159,7 @@ public class JobResult implements IdentifiedDataSerializable {
         out.writeUTF(coordinatorUUID);
         out.writeLong(creationTime);
         out.writeLong(completionTime);
-        out.writeObject(failure);
+        out.writeObject(failureText);
     }
 
     @Override
@@ -135,7 +169,6 @@ public class JobResult implements IdentifiedDataSerializable {
         coordinatorUUID = in.readUTF();
         creationTime = in.readLong();
         completionTime = in.readLong();
-        failure = in.readObject();
+        failureText = in.readObject();
     }
-
 }

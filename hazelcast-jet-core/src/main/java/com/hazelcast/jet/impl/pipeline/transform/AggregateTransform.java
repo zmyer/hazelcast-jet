@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,8 @@ import static com.hazelcast.jet.core.processor.Processors.aggregateP;
 import static com.hazelcast.jet.core.processor.Processors.combineP;
 
 public class AggregateTransform<A, R> extends AbstractTransform {
+    public static final String FIRST_STAGE_VERTEX_NAME_SUFFIX = "-prepare";
+
     @Nonnull
     private final AggregateOperation<A, ? extends R> aggrOp;
 
@@ -71,7 +73,7 @@ public class AggregateTransform<A, R> extends AbstractTransform {
     //                  |   aggregateP   | local parallelism = 1
     //                   ----------------
     private void addToDagSingleStage(Planner p) {
-        PlannerVertex pv = p.addVertex(this, p.uniqueVertexName(name(), ""), 1, aggregateP(aggrOp));
+        PlannerVertex pv = p.addVertex(this, p.uniqueVertexName(name()), 1, aggregateP(aggrOp));
         p.addEdges(this, pv.v, edge -> edge.distributed().allToOne());
     }
 
@@ -93,10 +95,10 @@ public class AggregateTransform<A, R> extends AbstractTransform {
     //                  |    combineP    | local parallelism = 1
     //                   ----------------
     private void addToDagTwoStage(Planner p) {
-        String namePrefix = p.uniqueVertexName(name(), "-step");
-        Vertex v1 = p.dag.newVertex(namePrefix + '1', accumulateP(aggrOp))
+        String vertexName = p.uniqueVertexName(name());
+        Vertex v1 = p.dag.newVertex(vertexName + FIRST_STAGE_VERTEX_NAME_SUFFIX, accumulateP(aggrOp))
                          .localParallelism(localParallelism());
-        PlannerVertex pv2 = p.addVertex(this, namePrefix + '2', 1, combineP(aggrOp));
+        PlannerVertex pv2 = p.addVertex(this, vertexName, 1, combineP(aggrOp));
         p.addEdges(this, v1);
         p.dag.edge(between(v1, pv2.v).distributed().allToOne());
     }

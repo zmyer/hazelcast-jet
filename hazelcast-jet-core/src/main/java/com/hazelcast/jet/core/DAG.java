@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.com.eclipsesource.json.JsonArray;
-import com.hazelcast.com.eclipsesource.json.JsonObject;
+import com.hazelcast.internal.json.JsonArray;
+import com.hazelcast.internal.json.JsonObject;
 import com.hazelcast.jet.core.Edge.RoutingPolicy;
 import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.impl.SerializationConstants;
@@ -36,11 +36,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.jet.impl.TopologicalSorter.topologicalSort;
+import static com.hazelcast.jet.impl.pipeline.transform.AggregateTransform.FIRST_STAGE_VERTEX_NAME_SUFFIX;
 import static com.hazelcast.jet.impl.util.Util.escapeGraphviz;
 import static com.hazelcast.util.Preconditions.checkTrue;
 import static java.util.Collections.emptyList;
@@ -334,11 +333,11 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
 
     /**
      * Returns a JSON representation of the DAG.
+     * <p>
+     * <strong>Note:</strong> the exact structure of the JSON is unspecified.
      *
-     * @param defaultLocalParallelism the local parallelism that will be shown if
-     *                                neither overridden on the vertex nor the
-     *                                preferred parallelism is defined by
-     *                                meta-supplier
+     * @param defaultLocalParallelism the local parallelism that will be shown if neither overridden on the
+     *                                vertex nor the preferred parallelism is defined by meta-supplier
      */
     @Nonnull
     public JsonObject toJson(int defaultLocalParallelism) {
@@ -386,11 +385,11 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
     public String toDotString() {
         final StringBuilder builder = new StringBuilder(512);
         builder.append("digraph DAG {\n");
-        Pattern stepPattern = Pattern.compile("(?<stepName>.+)-step[12]");
         int clusterCount = 0;
         for (Vertex v : this) {
             List<Edge> out = getOutboundEdges(v.getName());
             List<Edge> in = getInboundEdges(v.getName());
+
             if (out.isEmpty() && in.isEmpty()) {
                 // dangling vertex
                 builder.append("\t")
@@ -405,10 +404,7 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
                 if (e.getRoutingPolicy() != RoutingPolicy.UNICAST) {
                     labels.add(e.getRoutingPolicy().toString().toLowerCase());
                 }
-                Matcher srcMatcher = stepPattern.matcher(e.getSourceName());
-                Matcher destMatcher = stepPattern.matcher(e.getDestName());
-                boolean inSubgraph = srcMatcher.matches() && destMatcher.matches()
-                        && srcMatcher.group("stepName").equals(destMatcher.group("stepName"));
+                boolean inSubgraph = e.getSourceName().equals(e.getDestName() + FIRST_STAGE_VERTEX_NAME_SUFFIX);
                 if (inSubgraph) {
                     builder.append("\tsubgraph cluster_").append(clusterCount++).append(" {\n")
                            .append("\t");

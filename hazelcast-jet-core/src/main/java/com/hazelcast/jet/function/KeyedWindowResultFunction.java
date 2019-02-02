@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,16 @@
 
 package com.hazelcast.jet.function;
 
+import com.hazelcast.jet.pipeline.StageWithKeyAndWindow;
+
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.Serializable;
 
 /**
  * Represents the function you pass to a windowed group-and-aggregate
- * method in the Pipeline API, such as {@link
- * com.hazelcast.jet.pipeline.StageWithGroupingAndWindow#aggregate stage.aggregate()}.
+ * method in the Pipeline API, such as {@link StageWithKeyAndWindow#aggregate
+ * stage.aggregate()}.
  * It creates the item to emit based on the results of a single aggregate
  * operation performed for a particular window and a particular grouping
  * key.
@@ -43,5 +46,7 @@ import java.io.Serializable;
  */
 @FunctionalInterface
 public interface KeyedWindowResultFunction<K, R, OUT> extends Serializable {
-    @Nonnull OUT apply(long winStart, long winEnd, @Nonnull K key, @Nonnull R windowResult);
+
+    @Nullable
+    OUT apply(long winStart, long winEnd, @Nonnull K key, @Nonnull R windowResult);
 }

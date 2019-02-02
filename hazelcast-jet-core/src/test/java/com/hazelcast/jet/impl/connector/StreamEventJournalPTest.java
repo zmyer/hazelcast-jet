@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +18,20 @@ package com.hazelcast.jet.impl.connector;
 
 import com.hazelcast.config.EventJournalConfig;
 import com.hazelcast.jet.JetInstance;
+import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
+import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.JetTestSupport;
+import com.hazelcast.jet.core.JobStatus;
 import com.hazelcast.jet.core.Processor;
-import com.hazelcast.jet.core.WatermarkEmissionPolicy;
+import com.hazelcast.jet.core.Vertex;
 import com.hazelcast.jet.core.test.TestInbox;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.core.test.TestSupport;
 import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.jet.pipeline.JournalInitialPosition;
 import com.hazelcast.map.impl.proxy.MapProxyImpl;
 import com.hazelcast.map.journal.EventJournalMapEvent;
 import com.hazelcast.test.HazelcastParallelClassRunner;
@@ -42,8 +47,9 @@ import java.util.Map.Entry;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-import static com.hazelcast.jet.core.WatermarkGenerationParams.wmGenParams;
-import static com.hazelcast.jet.core.WatermarkPolicies.limitingLag;
+import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
+import static com.hazelcast.jet.core.EventTimePolicy.noEventTime;
+import static com.hazelcast.jet.core.processor.SourceProcessors.streamMapP;
 import static com.hazelcast.jet.core.test.TestSupport.SAME_ITEMS_ANY_ORDER;
 import static com.hazelcast.jet.pipeline.JournalInitialPosition.START_FROM_OLDEST;
 import static com.hazelcast.spi.properties.GroupProperty.PARTITION_COUNT;
@@ -84,15 +90,10 @@ public class StreamEventJournalPTest extends JetTestSupport {
 
         supplier = () -> new StreamEventJournalP<>(map, allPartitions, e -> true,
                 EventJournalMapEvent::getNewValue, START_FROM_OLDEST, false,
-                wmGenParams(Integer::intValue, limitingLag(0), suppressAll(), -1));
+                noEventTime());
 
         key0 = generateKeyForPartition(instance.getHazelcastInstance(), 0);
         key1 = generateKeyForPartition(instance.getHazelcastInstance(), 1);
-
-    }
-
-    private WatermarkEmissionPolicy suppressAll() {
-        return (currentWm, lastEmittedWm) -> lastEmittedWm;
     }
 
     @Test
@@ -107,7 +108,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
     }
 
     @Test
-    public void when_newData() {
+    public void when_newData() throws Exception {
         TestOutbox outbox = new TestOutbox(new int[]{16}, 16);
         List<Object> actual = new ArrayList<>();
         Processor p = supplier.get();
@@ -136,7 +137,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
     }
 
     @Test
-    public void when_lostItems() {
+    public void when_lostItems() throws Exception {
         TestOutbox outbox = new TestOutbox(new int[]{16}, 16);
         Processor p = supplier.get();
         p.init(outbox, new TestProcessorContext());
@@ -154,7 +155,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
     }
 
     @Test
-    public void when_lostItems_afterRestore() {
+    public void when_lostItems_afterRestore() throws Exception {
         TestOutbox outbox = new TestOutbox(new int[]{16}, 16);
         final Processor p = supplier.get();
         p.init(outbox, new TestProcessorContext());
@@ -176,13 +177,13 @@ public class StreamEventJournalPTest extends JetTestSupport {
         List<Entry> snapshotItems = new ArrayList<>();
         outbox.drainSnapshotQueueAndReset(snapshotItems, false);
 
-        System.out.println("Restoring journal");
+        logger.info("Restoring journal");
         // restore from snapshot
         assertRestore(snapshotItems);
     }
 
     @Test
-    public void when_futureSequence_thenResetOffset() {
+    public void when_futureSequence_thenResetOffset() throws Exception {
         TestOutbox outbox = new TestOutbox(new int[]{16}, 16);
         StreamEventJournalP p = (StreamEventJournalP) supplier.get();
 
@@ -217,6 +218,28 @@ public class StreamEventJournalPTest extends JetTestSupport {
         });
     }
 
+    @Test
+    public void when_processorsWithNoPartitions_then_snapshotRestoreWorks() {
+        DAG dag = new DAG();
+        Vertex vertex = dag.newVertex("src",
+                streamMapP(map.getName(), JournalInitialPosition.START_FROM_OLDEST, noEventTime()))
+                           .localParallelism(8);
+        int partitionCount = instance.getHazelcastInstance().getPartitionService().getPartitions().size();
+        assertTrue("partition count should be lower than local parallelism",
+                vertex.getLocalParallelism() > partitionCount);
+        Job job = instance.newJob(dag, new JobConfig()
+                .setProcessingGuarantee(EXACTLY_ONCE)
+                .setSnapshotIntervalMillis(200_000));
+        assertJobStatusEventually(job, JobStatus.RUNNING, 25);
+        job.restart();
+
+        // Then
+        // The job should be running: this test checks that state restored to NoopP, which is
+        // created by the meta supplier for processor with no partitions, is ignored.
+        sleepMillis(3000);
+        assertJobStatusEventually(job, JobStatus.RUNNING, 10);
+    }
+
     private void fillJournal(int countPerPartition) {
         for (int i = 0; i < countPerPartition; i++) {
             map.put(key0, i * 2);
@@ -224,7 +247,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
         }
     }
 
-    private void assertRestore(List<Entry> snapshotItems) {
+    private void assertRestore(List<Entry> snapshotItems) throws Exception {
         Processor p = supplier.get();
         TestOutbox newOutbox = new TestOutbox(new int[]{16}, 16);
         List<Object> output = new ArrayList<>();

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,10 +18,12 @@ package com.hazelcast.jet.impl.execution;
 
 import com.hazelcast.jet.impl.util.ProgressTracker;
 import com.hazelcast.spi.serialization.SerializationService;
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
+import org.junit.runner.RunWith;
 
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.function.Predicate;
@@ -33,6 +35,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 
+@RunWith(HazelcastSerialClassRunner.class)
 public class OutboxImplTest {
 
     @Rule
@@ -163,6 +166,29 @@ public class OutboxImplTest {
     @Test
     public void when_offerFailsAndOfferedToDifferentOrdinal_then_fail_4() {
         do_when_offerToDifferentOrdinal_then_fail(e -> outbox.offer(0, e), e -> outbox.offerToEdgesAndSnapshot(e));
+    }
+
+    @Test
+    public void when_blocked_then_allowsOnlyFinishingTheItem() {
+        boolean[] allowOffer = {false};
+        assertFalse(outbox.hasUnfinishedItem());
+        outbox = new OutboxImpl(new OutboundCollector[] {e -> allowOffer[0] ? DONE : NO_PROGRESS},
+                true, new ProgressTracker(), mock(SerializationService.class), 128, new AtomicLongArray(3));
+
+        assertFalse(outbox.offer(4));
+        assertTrue(outbox.hasUnfinishedItem());
+        // When
+        outbox.block();
+        outbox.reset();
+        allowOffer[0] = true;
+        // Then
+        assertTrue(outbox.offer(4));
+        assertFalse(outbox.hasUnfinishedItem());
+        assertFalse(outbox.offer(5));
+        assertFalse(outbox.hasUnfinishedItem());
+
+        outbox.unblock();
+        assertTrue(outbox.offer(5));
     }
 
     private void do_when_offerDifferent_then_fail(Predicate<Object> offerF) {

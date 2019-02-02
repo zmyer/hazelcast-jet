@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,14 +25,13 @@ import java.util.concurrent.CompletableFuture;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.peel;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.withTryCatch;
 
-public class JoinSubmittedJobOperation extends AsyncOperation {
+public class JoinSubmittedJobOperation extends AsyncJobOperation {
 
     public JoinSubmittedJobOperation() {
     }
 
     public JoinSubmittedJobOperation(long jobId) {
         super(jobId);
-
     }
 
     @Override
@@ -47,5 +46,4 @@ public class JoinSubmittedJobOperation extends AsyncOperation {
     public int getId() {
         return JetInitDataSerializerHook.JOIN_SUBMITTED_JOB;
     }
-
 }

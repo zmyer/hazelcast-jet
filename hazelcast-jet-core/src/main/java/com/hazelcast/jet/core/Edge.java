@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,16 +18,19 @@ package com.hazelcast.jet.core;
 
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.config.EdgeConfig;
+import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.impl.MasterContext;
 import com.hazelcast.jet.impl.SerializationConstants;
 import com.hazelcast.jet.impl.execution.init.CustomClassLoadedObject;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.nio.serialization.HazelcastSerializationException;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 import com.hazelcast.util.UuidUtil;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Map;
@@ -190,8 +193,33 @@ public class Edge implements IdentifiedDataSerializable {
      * Example: there two incoming edges on a vertex, with priorities 1 and 2.
      * The data from the edge with priority 1 will be processed in full before
      * accepting any data from the edge with priority 2.
+     *
+     * <h4>Possible deadlock</h4>
+     *
+     * If you split the output of one source vertex and later join the streams
+     * with different priorities, you're very likely to run into a deadlock. Consider this DAG:
+     * <pre>
+     * S --+---- V1 ----+--- J
+     *      \          /
+     *       +-- V2 --+
+     * </pre>
+
+     * The vertex {@code J} joins the streams, that were originally split from
+     * source {@code S}. Let's say the input from {@code V1} has higher
+     * priority than the input from {@code V2}. In this case, no item from
+     * {@code V2} will be processed by {@code J} before {@code V1} completes,
+     * which presupposes that {@code S} also completes. But {@code S} cannot
+     * complete, because it can't emit all items to {@code V2} because {@code
+     * V2} is blocked by {@code J}, which is not processing its items. This is
+     * a deadlock.
      * <p>
-     * <i>Note:</i> having different priority edges will cause postponing of
+     * This DAG can work only if {@code S} emits as few items into both paths
+     * as can fit into the queues (see {@linkplain EdgeConfig#setQueueSize
+     * queue size configuration}.
+     *
+     * <h4>Note</h4>
+
+     * Having different priority edges will cause postponing of
      * the first snapshot until after upstream vertices of higher priority
      * edges are completed.
      * Reason: after receiving a {@link
@@ -338,15 +366,18 @@ public class Edge implements IdentifiedDataSerializable {
 
     /**
      * Returns the {@code EdgeConfig} instance associated with this edge.
+     * Default value is {@code null}.
      */
+    @Nullable
     public EdgeConfig getConfig() {
         return config;
     }
 
     /**
-     * Assigns an {@code EdgeConfig} to this edge.
+     * Assigns an {@code EdgeConfig} to this edge. If {@code null} is supplied,
+     * the edge will use {@link JetConfig#getDefaultEdgeConfig()}.
      */
-    public Edge setConfig(EdgeConfig config) {
+    public Edge setConfig(@Nullable EdgeConfig config) {
         this.config = config;
         return this;
     }
@@ -439,7 +470,12 @@ public class Edge implements IdentifiedDataSerializable {
         priority = in.readInt();
         isDistributed = in.readBoolean();
         routingPolicy = in.readObject();
-        partitioner = CustomClassLoadedObject.read(in);
+        try {
+            partitioner = CustomClassLoadedObject.read(in);
+        } catch (HazelcastSerializationException e) {
+            throw new HazelcastSerializationException("Error deserializing edge '" + sourceName + "' -> '"
+                    + destName + "': " + e, e);
+        }
         config = in.readObject();
     }
 

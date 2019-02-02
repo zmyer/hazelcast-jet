@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.processor.SourceProcessors;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -141,7 +140,7 @@ public final class StreamSocketP extends AbstractProcessor {
     }
 
     @Override
-    public void close(@Nullable Throwable error) throws IOException {
+    public void close() throws IOException {
         if (socketChannel != null) {
             getLogger().info("Closing socket " + hostAndPort());
             socketChannel.close();

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,12 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Util;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.core.test.TestSupport;
 import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.pipeline.ContextFactory;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Test;
@@ -33,6 +31,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static com.hazelcast.jet.Traversers.traverseItems;
 import static com.hazelcast.jet.Traversers.traverseIterable;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.core.processor.Processors.aggregateByKeyP;
@@ -45,14 +44,11 @@ import static com.hazelcast.jet.core.processor.Processors.flatMapUsingContextP;
 import static com.hazelcast.jet.core.processor.Processors.mapP;
 import static com.hazelcast.jet.core.processor.Processors.mapUsingContextP;
 import static com.hazelcast.jet.core.processor.Processors.noopP;
-import static com.hazelcast.jet.function.DistributedFunctions.alwaysTrue;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 
 @RunWith(HazelcastParallelClassRunner.class)
 public class ProcessorsTest {
@@ -145,13 +141,13 @@ public class ProcessorsTest {
         TestSupport
                 .verifyProcessor(flatMapUsingContextP(
                         ContextFactory.withCreateFn(procContext -> context)
-                                      .withDestroyFn(c -> c[0]++),
-                        (int[] c, Integer item) -> Traverser.over(item, c[0] += item)))
+                                      .withDestroyFn(c -> c[0] = 0),
+                        (int[] c, Integer item) -> traverseItems(item, c[0] += item)))
                 .disableSnapshots()
                 .input(asList(1, 2, 3))
                 .expectOutput(asList(1, 1, 2, 3, 3, 6));
 
-        assertEquals(7, context[0]);
+        assertEquals(0, context[0]);
     }
 
     @Test
@@ -231,22 +227,6 @@ public class ProcessorsTest {
     }
 
     @Test
-    public void nonCooperative_ProcessorSupplier() {
-        ProcessorSupplier cooperativeSupplier = ProcessorSupplier.of(filterP(alwaysTrue()));
-        ProcessorSupplier nonCooperativeSupplier = Processors.nonCooperativeP(cooperativeSupplier);
-        assertTrue(cooperativeSupplier.get(1).iterator().next().isCooperative());
-        assertFalse(nonCooperativeSupplier.get(1).iterator().next().isCooperative());
-    }
-
-    @Test
-    public void nonCooperative_SupplierProcessor() {
-        DistributedSupplier<Processor> cooperativeSupplier = filterP(alwaysTrue());
-        DistributedSupplier<Processor> nonCooperativeSupplier = Processors.nonCooperativeP(cooperativeSupplier);
-        assertTrue(cooperativeSupplier.get().isCooperative());
-        assertFalse(nonCooperativeSupplier.get().isCooperative());
-    }
-
-    @Test
     public void noop() {
         TestSupport
                 .verifyProcessor(noopP())
@@ -259,6 +239,6 @@ public class ProcessorsTest {
                 .<List<T>>withCreate(ArrayList::new)
                 .<T>andAccumulate(List::add)
                 .andCombine(List::addAll)
-                .andFinish(Object::toString);
+                .andExportFinish(Object::toString);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,26 +17,37 @@
 package com.hazelcast.jet.impl;
 
 import com.hazelcast.core.ExecutionCallback;
+import com.hazelcast.core.IMap;
+import com.hazelcast.core.LocalMemberResetException;
 import com.hazelcast.internal.cluster.MemberInfo;
 import com.hazelcast.internal.cluster.impl.ClusterServiceImpl;
 import com.hazelcast.internal.cluster.impl.MembersView;
+import com.hazelcast.jet.JetException;
+import com.hazelcast.jet.JetInstance;
+import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JobConfig;
-import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.Edge;
 import com.hazelcast.jet.core.JobStatus;
 import com.hazelcast.jet.core.TopologyChangedException;
 import com.hazelcast.jet.core.Vertex;
-import com.hazelcast.jet.impl.exception.JobRestartRequestedException;
+import com.hazelcast.jet.datamodel.Tuple2;
+import com.hazelcast.jet.datamodel.Tuple3;
+import com.hazelcast.jet.impl.JobExecutionRecord.SnapshotStats;
+import com.hazelcast.jet.impl.TerminationMode.ActionAfterTerminate;
+import com.hazelcast.jet.impl.exception.JobTerminateRequestedException;
+import com.hazelcast.jet.impl.exception.ShutdownInProgressException;
+import com.hazelcast.jet.impl.exception.TerminatedWithSnapshotException;
 import com.hazelcast.jet.impl.execution.init.ExecutionPlan;
-import com.hazelcast.jet.impl.operation.CancelExecutionOperation;
 import com.hazelcast.jet.impl.operation.CompleteExecutionOperation;
 import com.hazelcast.jet.impl.operation.InitExecutionOperation;
 import com.hazelcast.jet.impl.operation.SnapshotOperation;
 import com.hazelcast.jet.impl.operation.SnapshotOperation.SnapshotOperationResult;
 import com.hazelcast.jet.impl.operation.StartExecutionOperation;
-import com.hazelcast.jet.impl.util.CompletionToken;
+import com.hazelcast.jet.impl.operation.TerminateExecutionOperation;
+import com.hazelcast.jet.impl.util.AsyncSnapshotWriterImpl;
 import com.hazelcast.jet.impl.util.ExceptionUtil;
+import com.hazelcast.jet.impl.util.LoggingUtil;
 import com.hazelcast.jet.impl.util.NonCompletableFuture;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.spi.ExecutionService;
@@ -44,43 +55,61 @@ import com.hazelcast.spi.InternalCompletableFuture;
 import com.hazelcast.spi.Operation;
 import com.hazelcast.spi.impl.NodeEngineImpl;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.stream.Collectors;
 
+import static com.hazelcast.jet.Util.idToString;
+import static com.hazelcast.jet.config.ProcessingGuarantee.NONE;
 import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.JobStatus.COMPLETED;
 import static com.hazelcast.jet.core.JobStatus.FAILED;
-import static com.hazelcast.jet.core.JobStatus.NOT_STARTED;
-import static com.hazelcast.jet.core.JobStatus.RESTARTING;
+import static com.hazelcast.jet.core.JobStatus.NOT_RUNNING;
 import static com.hazelcast.jet.core.JobStatus.RUNNING;
 import static com.hazelcast.jet.core.JobStatus.STARTING;
+import static com.hazelcast.jet.core.JobStatus.SUSPENDED;
+import static com.hazelcast.jet.core.JobStatus.SUSPENDED_EXPORTING_SNAPSHOT;
 import static com.hazelcast.jet.core.processor.SourceProcessors.readMapP;
+import static com.hazelcast.jet.datamodel.Tuple2.tuple2;
+import static com.hazelcast.jet.datamodel.Tuple3.tuple3;
 import static com.hazelcast.jet.function.DistributedFunctions.entryKey;
-import static com.hazelcast.jet.impl.SnapshotRepository.snapshotDataMapName;
-import static com.hazelcast.jet.impl.execution.SnapshotContext.NO_SNAPSHOT;
+import static com.hazelcast.jet.impl.JobRepository.EXPORTED_SNAPSHOTS_PREFIX;
+import static com.hazelcast.jet.impl.JobRepository.exportedSnapshotMapName;
+import static com.hazelcast.jet.impl.JobRepository.snapshotDataMapName;
+import static com.hazelcast.jet.impl.TerminationMode.ActionAfterTerminate.RESTART;
+import static com.hazelcast.jet.impl.TerminationMode.ActionAfterTerminate.SUSPEND;
+import static com.hazelcast.jet.impl.TerminationMode.CANCEL_FORCEFUL;
+import static com.hazelcast.jet.impl.TerminationMode.CANCEL_GRACEFUL;
+import static com.hazelcast.jet.impl.TerminationMode.RESTART_GRACEFUL;
 import static com.hazelcast.jet.impl.execution.init.CustomClassLoadedObject.deserializeWithCustomClassLoader;
 import static com.hazelcast.jet.impl.execution.init.ExecutionPlanBuilder.createExecutionPlans;
-import static com.hazelcast.jet.impl.util.ExceptionUtil.isTopologicalFailure;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.isRestartableException;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.isTopologyException;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.peel;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.withTryCatch;
-import static com.hazelcast.jet.impl.util.Util.idToString;
-import static com.hazelcast.jet.impl.util.Util.jobAndExecutionId;
+import static com.hazelcast.jet.impl.util.Util.callbackOf;
+import static com.hazelcast.jet.impl.util.Util.copyMapUsingJob;
+import static com.hazelcast.jet.impl.util.Util.jobNameAndExecutionId;
 import static java.util.Collections.emptyList;
+import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.stream.Collectors.partitioningBy;
 import static java.util.stream.Collectors.toList;
 
@@ -91,63 +120,261 @@ import static java.util.stream.Collectors.toList;
 public class MasterContext {
 
     public static final int SNAPSHOT_RESTORE_EDGE_PRIORITY = Integer.MIN_VALUE;
+    public static final String SNAPSHOT_VERTEX_PREFIX = "__snapshot_";
+
+    private static final Object NULL_OBJECT = new Object() {
+        @Override
+        public String toString() {
+            return "NULL_OBJECT";
+        }
+    };
+
+    /**
+     * Use smaller queue size because the snapshot entries are large ({@value
+     * AsyncSnapshotWriterImpl#DEFAULT_CHUNK_SIZE} bytes).
+     */
+    private static final int COPY_MAP_JOB_QUEUE_SIZE = 32;
+
+    private final Object lock = new Object();
 
     private final NodeEngineImpl nodeEngine;
     private final JobCoordinationService coordinationService;
     private final ILogger logger;
-    private final JobRecord jobRecord;
     private final long jobId;
-    private final NonCompletableFuture completionFuture = new NonCompletableFuture();
-    private final CompletionToken cancellationToken;
-    private final AtomicReference<JobStatus> jobStatus = new AtomicReference<>(NOT_STARTED);
-    private final SnapshotRepository snapshotRepository;
+    private final String jobName;
+    private final JobRepository jobRepository;
+    private final JobRecord jobRecord;
+    private final JobExecutionRecord jobExecutionRecord;
+    private volatile JobStatus jobStatus = NOT_RUNNING;
     private volatile Set<Vertex> vertices;
 
     private volatile long executionId;
-    private volatile long jobStartTime;
+    private volatile long executionStartTime;
     private volatile Map<MemberInfo, ExecutionPlan> executionPlanMap;
-    private volatile CompletionToken executionRestartToken;
+    private volatile ExecutionInvocationCallback executionInvocationCallback;
 
-    MasterContext(NodeEngineImpl nodeEngine, JobCoordinationService coordinationService, JobRecord jobRecord) {
+    /**
+     * A future completed when the job fully completes. It's NOT completed when
+     * the job is suspended or when it is going to be restarted. It's used for
+     * {@link Job#join()}.
+     */
+    private final NonCompletableFuture jobCompletionFuture = new NonCompletableFuture();
+
+    /**
+     * Null initially. When a job termination is requested, it is assigned a
+     * termination mode. It's reset back to null when execute operations
+     * complete.
+     */
+    private volatile TerminationMode requestedTerminationMode;
+
+    /**
+     * It's true while a snapshot is in progress. It's used to prevent
+     * concurrent snapshots.
+     */
+    private boolean snapshotInProgress;
+
+    /**
+     * The queue with snapshots to run. An item is added to it regularly (to do
+     * a regular snapshot) or when a snapshot export is requested by the user.
+     *
+     * The tuple contains:<ul>
+     *     <li>{@code snapshotMapName}: user-specified name of the snapshot or
+     *         null, if no name is specified
+     *     <li>{@code isTerminal}: if true, execution will be terminated after the
+     *         snapshot
+     *     <li>{@code future}: future, that will be completed when the snapshot
+     *         is validated.
+     * </ul>
+     *
+     * Queue is accessed only in synchronized code.
+     */
+    private final Queue<Tuple3<String, Boolean, CompletableFuture<Void>>> snapshotQueue = new LinkedList<>();
+
+    /**
+     * A future (re)created when the job is started and completed when its
+     * execution ends. Execution ending doesn't mean the job is done, it may
+     * be just temporarily stopping due to suspension, job restarting, etc.
+     *
+     * <p>It's always completed normally, even if the execution fails.
+     */
+    @Nonnull
+    private volatile CompletableFuture<Void> executionCompletionFuture = completedFuture(null);
+
+    /**
+     * A future (re)created when the job is started and completed when terminal
+     * snapshot is completed (successfully or not).
+     */
+    @Nonnull
+    private volatile CompletableFuture<Void> terminalSnapshotFuture = completedFuture(null);
+
+    MasterContext(NodeEngineImpl nodeEngine, JobCoordinationService coordinationService, @Nonnull JobRecord jobRecord,
+                  @Nonnull JobExecutionRecord jobExecutionRecord) {
         this.nodeEngine = nodeEngine;
         this.coordinationService = coordinationService;
-        this.snapshotRepository = coordinationService.snapshotRepository();
+        this.jobRepository = coordinationService.jobRepository();
         this.logger = nodeEngine.getLogger(getClass());
         this.jobRecord = jobRecord;
+        this.jobExecutionRecord = jobExecutionRecord;
         this.jobId = jobRecord.getJobId();
-        this.cancellationToken = new CompletionToken(logger);
+        this.jobName = jobRecord.getJobNameOrId();
+        if (jobExecutionRecord.isSuspended()) {
+            jobStatus = SUSPENDED;
+        }
     }
 
-    public long getJobId() {
+    public long jobId() {
         return jobId;
     }
 
-    public long getExecutionId() {
+    public long executionId() {
         return executionId;
     }
 
     public JobStatus jobStatus() {
-        return jobStatus.get();
+        return jobStatus;
     }
 
-    public JobConfig getJobConfig() {
+    public JobConfig jobConfig() {
         return jobRecord.getConfig();
     }
 
-    public JobRecord getJobRecord() {
+    JobRecord jobRecord() {
         return jobRecord;
     }
 
-    public CompletableFuture<Void> completionFuture() {
-        return completionFuture;
+    public JobExecutionRecord jobExecutionRecord() {
+        return jobExecutionRecord;
     }
 
-    boolean cancelJob() {
-        return cancellationToken.complete();
+    public CompletableFuture<Void> jobCompletionFuture() {
+        return jobCompletionFuture;
     }
 
-    boolean isCancelled() {
-        return cancellationToken.isCompleted();
+    /**
+     * Returns a tuple of:<ol>
+     *     <li>a future that will be completed when the execution completes (or
+     *          a completed future, if execution is not RUNNING or STARTING)
+     *     <li>a string with a message why this call did nothing or null, if
+     *          this call actually initiated the termination
+     * </ol>
+     *
+     * @param allowWhileExportingSnapshot if false and jobStatus is
+     *      SUSPENDED_EXPORTING_SNAPSHOT, termination will be rejected
+     */
+    @Nonnull
+    Tuple2<CompletableFuture<Void>, String> requestTermination(TerminationMode mode, boolean allowWhileExportingSnapshot) {
+        JobStatus localStatus;
+        assertLockNotHeld();
+        Tuple2<CompletableFuture<Void>, String> result;
+        synchronized (lock) {
+            // Switch graceful method to forceful if we don't do snapshots, except for graceful
+            // cancellation, which is allowed even if not snapshotting.
+            if (!isSnapshottingEnabled() && mode != CANCEL_GRACEFUL) {
+                mode = mode.withoutTerminalSnapshot();
+            }
+
+            localStatus = jobStatus();
+            if (localStatus == SUSPENDED_EXPORTING_SNAPSHOT && !allowWhileExportingSnapshot) {
+                return tuple2(executionCompletionFuture, "Cannot cancel when job status is "
+                        + SUSPENDED_EXPORTING_SNAPSHOT);
+            }
+            if (localStatus == SUSPENDED && mode != CANCEL_FORCEFUL) {
+                // if suspended, we can only cancel the job. Other terminations have no effect.
+                return tuple2(executionCompletionFuture, "Job is " + SUSPENDED);
+            }
+            if (requestedTerminationMode != null) {
+                // don't report cancellation of cancelled job as an error
+                String message = requestedTerminationMode == CANCEL_FORCEFUL && mode == CANCEL_FORCEFUL ? null
+                        : "Job is already terminating in mode: " + requestedTerminationMode.name();
+                return tuple2(executionCompletionFuture, message);
+            }
+            requestedTerminationMode = mode;
+            // handle cancellation of a suspended job
+            if (localStatus == SUSPENDED || localStatus == SUSPENDED_EXPORTING_SNAPSHOT) {
+                this.jobStatus = FAILED;
+                setFinalResult(new CancellationException());
+            }
+            if (mode.isWithTerminalSnapshot()) {
+                snapshotQueue.add(tuple3(null, true, null));
+            }
+
+            result = tuple2(executionCompletionFuture, null);
+        }
+
+        if (localStatus == SUSPENDED) {
+            coordinationService.completeJob(this, System.currentTimeMillis(), new CancellationException());
+        } else {
+            if (localStatus == RUNNING || localStatus == STARTING) {
+                handleTermination(mode);
+            }
+        }
+
+        return result;
+    }
+
+    CompletableFuture<Void> exportSnapshot(String name, boolean cancelJob) {
+        assertLockNotHeld();
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        JobStatus localStatus;
+
+        synchronized (lock) {
+            localStatus = jobStatus();
+            if (localStatus != RUNNING && localStatus != SUSPENDED) {
+                throw new JetException("Cannot export snapshot, job is neither RUNNING nor SUSPENDED, but " + localStatus);
+            }
+
+            if (localStatus == SUSPENDED) {
+                if (jobExecutionRecord.snapshotId() < 0) {
+                    throw new JetException("Cannot export state snapshot: job is suspended and no successful snapshot " +
+                            "was created while it was running");
+                }
+                localStatus = jobStatus = SUSPENDED_EXPORTING_SNAPSHOT;
+            } else {
+                snapshotQueue.add(tuple3(name, cancelJob, future));
+            }
+        }
+
+        if (localStatus == SUSPENDED_EXPORTING_SNAPSHOT) {
+            String sourceMapName = jobExecutionRecord.successfulSnapshotDataMapName(jobId);
+            JetInstance jetInstance = coordinationService.getJetService().getJetInstance();
+            return copyMapUsingJob(jetInstance, COPY_MAP_JOB_QUEUE_SIZE, sourceMapName, EXPORTED_SNAPSHOTS_PREFIX + name)
+                    .whenComplete(withTryCatch(logger, (r, t) -> {
+                        SnapshotValidationRecord validationRecord =
+                                (SnapshotValidationRecord) jetInstance.getMap(sourceMapName)
+                                                                      .get(SnapshotValidationRecord.KEY);
+                        jobRepository.cacheValidationRecord(name, validationRecord);
+                        if (cancelJob) {
+                            String terminationFailure = requestTermination(CANCEL_FORCEFUL, true).f1();
+                            if (terminationFailure != null) {
+                                throw new JetException("State for " + jobIdString() + " exported to '" + name
+                                        + "', but failed to cancel the job: " + terminationFailure);
+                            }
+                        } else {
+                            jobStatus = SUSPENDED;
+                        }
+                    }));
+        }
+        if (cancelJob) {
+            // We already added a terminal snapshot to the queue. There will be one more added in
+            // `requestTermination`, but we'll never get to execute that one because the execution
+            // will terminate after our terminal snapshot.
+            String terminationFailure = requestTermination(CANCEL_GRACEFUL, false).f1();
+            if (terminationFailure != null) {
+                throw new JetException("Cannot cancel " + jobIdString() + " and export to '" + name + "': "
+                        + terminationFailure);
+            }
+        } else {
+            tryBeginSnapshot();
+        }
+        return future;
+    }
+
+    private boolean isCancelled() {
+        return requestedTerminationMode == CANCEL_FORCEFUL;
+    }
+
+    TerminationMode requestedTerminationMode() {
+        return requestedTerminationMode;
     }
 
     /**
@@ -157,54 +384,111 @@ public class MasterContext {
      * If there was a membership change and the partition table is not completely
      * fixed yet, job restart is rescheduled.
      */
+    @SuppressWarnings("checkstyle:ReturnCount")
     void tryStartJob(Function<Long, Long> executionIdSupplier) {
-        if (!setJobStatusToStarting()) {
+        ClassLoader classLoader = null;
+        DAG dag = null;
+        Throwable exception = null;
+        String dotString = null;
+
+        assertLockNotHeld();
+        synchronized_block:
+        synchronized (lock) {
+            if (isCancelled()) {
+                logger.fine("Skipping init job '" + jobName + "': is already cancelled.");
+                exception = new CancellationException();
+                break synchronized_block;
+            }
+            if (jobStatus != NOT_RUNNING) {
+                logger.fine("Not starting job '" + jobName + "': status is " + jobStatus);
+                return;
+            }
+
+            if (jobExecutionRecord.isSuspended()) {
+                jobExecutionRecord.setSuspended(false);
+                writeJobExecutionRecord(false);
+                jobStatus = NOT_RUNNING;
+            }
+
+            if (scheduleRestartIfQuorumAbsent() || scheduleRestartIfClusterIsNotSafe()) {
+                return;
+            }
+            executionStartTime = System.nanoTime();
+            jobStatus = STARTING;
+
+            // ensure JobExecutionRecord exists
+            writeJobExecutionRecord(true);
+
+            if (requestedTerminationMode != null) {
+                if (requestedTerminationMode.actionAfterTerminate() == RESTART) {
+                    // ignore restart, we are just starting
+                    requestedTerminationMode = null;
+                } else {
+                    exception = new JobTerminateRequestedException(requestedTerminationMode);
+                    break synchronized_block;
+                }
+            }
+
+            classLoader = coordinationService.getJetService().getClassLoader(jobId);
+            try {
+                dag = deserializeWithCustomClassLoader(nodeEngine.getSerializationService(), classLoader,
+                        jobRecord.getDag());
+            } catch (Exception e) {
+                logger.warning("DAG deserialization failed", e);
+                exception = e;
+                break synchronized_block;
+            }
+            // save a copy of the vertex list because it is going to change
+            vertices = new HashSet<>();
+            dotString = dag.toDotString();
+            dag.iterator().forEachRemaining(vertices::add);
+            executionId = executionIdSupplier.apply(jobId);
+
+            snapshotInProgress = false;
+            assert snapshotQueue.isEmpty() : "snapshotQueue not empty";
+            terminalSnapshotFuture = new CompletableFuture<>();
+            executionCompletionFuture = new CompletableFuture<>();
+        }
+
+        if (exception != null) {
+            // run the finalizeJob outside of the synchronized block
+            finalizeJob(exception);
             return;
         }
 
-        if (scheduleRestartIfQuorumAbsent() || scheduleRestartIfClusterIsNotSafe()) {
-            return;
-        }
-
-        DAG dag;
+        // find snapshot to restore
+        long snapshotToRestore = jobExecutionRecord.snapshotId();
         try {
-            dag = deserializeDAG();
+            jobRepository.clearSnapshotData(jobId, jobExecutionRecord.ongoingDataMapIndex());
         } catch (Exception e) {
-            logger.warning("DAG deserialization failed", e);
-            finalizeJob(e);
-            return;
+            logger.warning("Cannot delete old snapshots for " + jobName, e);
         }
-        // save a copy of the vertex list, because it is going to change
-        vertices = new HashSet<>();
-        dag.iterator().forEachRemaining(vertices::add);
-        executionId = executionIdSupplier.apply(jobId);
-
-        // last started snapshot complete or not complete. The next started snapshot must be greater than this number
-        long lastSnapshotId = NO_SNAPSHOT;
-        if (isSnapshottingEnabled()) {
-            Long snapshotIdToRestore = snapshotRepository.latestCompleteSnapshot(jobId);
-            snapshotRepository.deleteAllSnapshotsExceptOne(jobId, snapshotIdToRestore);
-            Long lastStartedSnapshot = snapshotRepository.latestStartedSnapshot(jobId);
-            if (snapshotIdToRestore != null) {
-                logger.info("State of " + jobIdString() + " will be restored from snapshot "
-                        + snapshotIdToRestore);
-                rewriteDagWithSnapshotRestore(dag, snapshotIdToRestore);
-            } else {
-                logger.info("No previous snapshot for " + jobIdString() + " found.");
+        String mapName = null;
+        if (snapshotToRestore >= 0) {
+            mapName = jobExecutionRecord.successfulSnapshotDataMapName(jobId);
+        } else if (jobConfig().getInitialSnapshotName() != null) {
+            mapName = EXPORTED_SNAPSHOTS_PREFIX + jobConfig().getInitialSnapshotName();
+        }
+        if (mapName != null) {
+            try {
+                rewriteDagWithSnapshotRestore(dag, snapshotToRestore, mapName);
+            } catch (Exception e) {
+                finalizeJob(e);
+                return;
             }
-            if (lastStartedSnapshot != null) {
-                lastSnapshotId = lastStartedSnapshot;
-            }
+        } else {
+            logger.info("No previous snapshot for " + jobIdString() + " found.");
         }
 
         MembersView membersView = getMembersView();
-        ClassLoader previousCL = swapContextClassLoader(coordinationService.getClassLoader(jobId));
+        ClassLoader previousCL = swapContextClassLoader(classLoader);
         try {
-            logger.info("Start executing " + jobIdString() + ", status " + jobStatus()
-                    + ", execution graph in DOT format:\n" + dag.toDotString()
+            logger.info("Start executing " + jobIdString()
+                    + ", execution graph in DOT format:\n" + dotString
                     + "\nHINT: You can use graphviz or http://viz-js.com to visualize the printed graph.");
             logger.fine("Building execution plan for " + jobIdString());
-            executionPlanMap = createExecutionPlans(nodeEngine, membersView, dag, getJobConfig(), lastSnapshotId);
+            executionPlanMap = createExecutionPlans(nodeEngine, membersView, dag, jobId, executionId,
+                    jobConfig(), jobExecutionRecord.ongoingSnapshotId());
         } catch (Exception e) {
             logger.severe("Exception creating execution plan for " + jobIdString(), e);
             finalizeJob(e);
@@ -218,70 +502,42 @@ public class MasterContext {
         Function<ExecutionPlan, Operation> operationCtor = plan ->
                 new InitExecutionOperation(jobId, executionId, membersView.getVersion(), participants,
                         nodeEngine.getSerializationService().toData(plan));
-        invoke(operationCtor, this::onInitStepCompleted, null);
+        invokeOnParticipants(operationCtor, this::onInitStepCompleted, null);
     }
 
-    private void rewriteDagWithSnapshotRestore(DAG dag, long snapshotId) {
-        logger.info(jobIdString() + ": restoring state from snapshotId=" + snapshotId);
-        for (Vertex vertex : dag) {
-            // We add the vertex even in case when the map is empty: this ensures, that
-            // Processor.finishSnapshotRestore() method is always called on all vertices in
-            // a job which is restored from a snapshot.
-            String mapName = snapshotDataMapName(jobId, snapshotId, vertex.getName());
-            Vertex readSnapshotVertex = dag.newVertex("__snapshot_read." + vertex.getName(), readMapP(mapName));
-            Vertex explodeVertex = dag.newVertex("__snapshot_explode." + vertex.getName(), ExplodeSnapshotP::new);
+    private void rewriteDagWithSnapshotRestore(DAG dag, long snapshotId, String mapName) {
+        IMap<Object, Object> snapshotMap = nodeEngine.getHazelcastInstance().getMap(mapName);
+        snapshotId = SnapshotValidator.validateSnapshot(snapshotId, jobIdString(), snapshotMap);
+        logger.info("State of " + jobIdString() + " will be restored from snapshot " + snapshotId + ", map=" + mapName);
 
-            readSnapshotVertex.localParallelism(vertex.getLocalParallelism());
-            explodeVertex.localParallelism(vertex.getLocalParallelism());
+        List<Vertex> originalVertices = new ArrayList<>();
+        dag.iterator().forEachRemaining(originalVertices::add);
 
-            int destOrdinal = dag.getInboundEdges(vertex.getName()).size();
-            dag.edge(between(readSnapshotVertex, explodeVertex).isolated())
-               .edge(new SnapshotRestoreEdge(explodeVertex, vertex, destOrdinal));
+        Map<String, Integer> vertexToOrdinal = new HashMap<>();
+        Vertex readSnapshotVertex = dag.newVertex(SNAPSHOT_VERTEX_PREFIX + "read",
+                readMapP(mapName));
+        long finalSnapshotId = snapshotId;
+        Vertex explodeVertex = dag.newVertex(SNAPSHOT_VERTEX_PREFIX + "explode",
+                () -> new ExplodeSnapshotP(vertexToOrdinal, finalSnapshotId));
+        dag.edge(between(readSnapshotVertex, explodeVertex).isolated());
+
+        int index = 0;
+        // add the edges
+        for (Vertex userVertex : originalVertices) {
+            vertexToOrdinal.put(userVertex.getName(), index);
+            int destOrdinal = dag.getInboundEdges(userVertex.getName()).size();
+            dag.edge(new SnapshotRestoreEdge(explodeVertex, index, userVertex, destOrdinal));
+            index++;
         }
-    }
-
-    /**
-     * Sets job status to starting.
-     * Returns false if the job start process cannot proceed.
-     */
-    private boolean setJobStatusToStarting() {
-        JobStatus status = jobStatus();
-        if (status == COMPLETED || status == FAILED) {
-            logger.severe("Cannot init job " + idToString(jobId) + ": it is already " + status);
-            return false;
-        }
-
-        if (cancellationToken.isCompleted()) {
-            logger.fine("Skipping init job " + idToString(jobId) + ": is already cancelled.");
-            finalizeJob(new CancellationException());
-            return false;
-        }
-
-        if (status == NOT_STARTED) {
-            if (!jobStatus.compareAndSet(NOT_STARTED, STARTING)) {
-                logger.fine("Cannot init job " + idToString(jobId) + ": someone else is just starting it");
-                return false;
-            }
-
-            jobStartTime = System.currentTimeMillis();
-        }
-
-        status = jobStatus();
-        if (!(status == STARTING || status == RESTARTING)) {
-            logger.severe("Cannot init job " + idToString(jobId) + ": status is " + status);
-            return false;
-        }
-
-        return true;
     }
 
     private boolean scheduleRestartIfQuorumAbsent() {
-        int quorumSize = jobRecord.getQuorumSize();
+        int quorumSize = jobExecutionRecord.getQuorumSize();
         if (coordinationService.isQuorumPresent(quorumSize)) {
             return false;
         }
 
-        logger.fine("Rescheduling restart of job " + idToString(jobId) + ": quorum size " + quorumSize + " is not met");
+        logger.fine("Rescheduling restart of job '" + jobName + "': quorum size " + quorumSize + " is not met");
         scheduleRestart();
         return true;
     }
@@ -291,13 +547,17 @@ public class MasterContext {
             return false;
         }
 
-        logger.fine("Rescheduling restart of job " + idToString(jobId) + ": cluster is not safe");
+        logger.fine("Rescheduling restart of job '" + jobName + "': cluster is not safe");
         scheduleRestart();
         return true;
     }
 
     private void scheduleRestart() {
-        jobStatus.compareAndSet(RUNNING, RESTARTING);
+        assertLockHeld();
+        if (jobStatus != NOT_RUNNING && jobStatus != STARTING && jobStatus != RUNNING) {
+            throw new IllegalStateException("Restart scheduled in an unexpected state: " + jobStatus);
+        }
+        jobStatus = NOT_RUNNING;
         coordinationService.scheduleRestart(jobId);
     }
 
@@ -306,21 +566,15 @@ public class MasterContext {
         return clusterService.getMembershipManager().getMembersView();
     }
 
-    private DAG deserializeDAG() {
-        ClassLoader cl = coordinationService.getClassLoader(jobId);
-        return deserializeWithCustomClassLoader(nodeEngine.getSerializationService(), cl, jobRecord.getDag());
-    }
-
     // Called as callback when all InitOperation invocations are done
     private void onInitStepCompleted(Map<MemberInfo, Object> responses) {
-        Throwable error = getInitResult(responses);
+        Throwable error = getResult("Init", responses);
 
         if (error == null) {
             JobStatus status = jobStatus();
 
-            if (!(status == STARTING || status == RESTARTING)) {
-                error = new IllegalStateException("Cannot execute " + jobIdString()
-                        + ": status is " + status);
+            if (status != STARTING) {
+                error = new IllegalStateException("Cannot execute " + jobIdString() + ": status is " + status);
             }
         }
 
@@ -329,40 +583,6 @@ public class MasterContext {
         } else {
             invokeCompleteExecution(error);
         }
-    }
-
-    /**
-     * If there is no failure, then returns null. If the job is cancelled, then returns CancellationException.
-     * If there is at least one non-restartable failure, such as an exception in user code, then returns that failure.
-     * Otherwise, the failure is because a job participant has left the cluster.
-     * In that case, TopologyChangeException is returned so that the job will be restarted.
-     */
-    private Throwable getInitResult(Map<MemberInfo, Object> responses) {
-        if (cancellationToken.isCompleted()) {
-            logger.fine(jobIdString() + " to be cancelled after init");
-            return new CancellationException();
-        }
-
-        Map<Boolean, List<Entry<MemberInfo, Object>>> grouped = groupResponses(responses);
-        Collection<MemberInfo> successfulMembers = grouped.get(false).stream().map(Entry::getKey).collect(toList());
-
-        if (successfulMembers.size() == executionPlanMap.size()) {
-            logger.fine("Init of " + jobIdString() + " is successful.");
-            return null;
-        }
-
-        List<Entry<MemberInfo, Object>> failures = grouped.get(true);
-        logger.fine("Init of " + jobIdString() + " failed with: " + failures);
-
-        // if there is at least one non-restartable failure, such as a user code failure, then fail the job
-        // otherwise, return TopologyChangedException so that the job will be restarted
-        return failures
-                .stream()
-                .map(e -> (Throwable) e.getValue())
-                .filter(t -> !isTopologicalFailure(t))
-                .findFirst()
-                .map(ExceptionUtil::peel)
-                .orElse(new TopologyChangedException());
     }
 
     // true -> failures, false -> success responses
@@ -385,196 +605,393 @@ public class MasterContext {
 
         long executionId = this.executionId;
 
-        ExecutionInvocationCallback callback = new ExecutionInvocationCallback(executionId);
-
-        cancellationToken.whenCompleted(callback::cancelInvocations);
-
-        CompletionToken executionRestartToken = new CompletionToken(logger);
-        executionRestartToken.whenCompleted(callback::cancelInvocations);
+        executionInvocationCallback = new ExecutionInvocationCallback(executionId);
+        if (requestedTerminationMode != null) {
+            handleTermination(requestedTerminationMode);
+        }
 
         Function<ExecutionPlan, Operation> operationCtor = plan -> new StartExecutionOperation(jobId, executionId);
-        Consumer<Map<MemberInfo, Object>> completionCallback = results -> {
-            this.executionRestartToken = null;
-            onExecuteStepCompleted(results, executionRestartToken.isCompleted());
-        };
+        Consumer<Map<MemberInfo, Object>> completionCallback = this::onExecuteStepCompleted;
 
-        // We must set executionRestartToken before we call invoke() method because once all invocations
-        // are done, executionRestartToken will be reset. Therefore, setting it after the invoke() call is racy.
-        this.executionRestartToken = executionRestartToken;
-        jobStatus.set(RUNNING);
+        jobStatus = RUNNING;
 
-        invoke(operationCtor, completionCallback, callback);
+        invokeOnParticipants(operationCtor, completionCallback, executionInvocationCallback);
 
         if (isSnapshottingEnabled()) {
-            coordinationService.scheduleSnapshot(jobId, executionId);
+            coordinationService.scheduleSnapshot(this, executionId);
         }
     }
 
-    private void cancelExecutionInvocations(long jobId, long executionId) {
-        nodeEngine.getExecutionService().execute(ExecutionService.ASYNC_EXECUTOR, () -> {
-            Function<ExecutionPlan, Operation> operationCtor = plan -> new CancelExecutionOperation(jobId, executionId);
-            invoke(operationCtor, responses -> { }, null);
-        });
+    private void handleTermination(@Nonnull TerminationMode mode) {
+        // this method can be called multiple times to handle the termination, it must
+        // be safe against it (idempotent).
+        if (mode.isWithTerminalSnapshot()) {
+            tryBeginSnapshot();
+        } else if (executionInvocationCallback != null) {
+            executionInvocationCallback.cancelInvocations(mode);
+        }
     }
 
-    /**
-     * Cancels the job execution invocations in order to restart it afterwards if the job is currently being executed
-     */
-    boolean restartExecution() {
-        CompletionToken restartToken = this.executionRestartToken;
-        if (restartToken != null) {
-            restartToken.complete();
-            return true;
+    void startScheduledSnapshot(long executionId) {
+        synchronized (lock) {
+            if (jobStatus != RUNNING) {
+                logger.fine("Not beginning snapshot, " + jobIdString() + " is not RUNNING, but " + jobStatus);
+                return;
+            }
+            if (this.executionId != executionId) {
+                // Current execution is completed and probably a new execution has started, but we don't
+                // cancel the scheduled snapshot from previous execution, so let's just ignore it.
+                logger.fine("Not beginning snapshot since unexpected execution ID received for " + jobIdString()
+                        + ". Received execution ID: " + idToString(executionId));
+                return;
+            }
+            snapshotQueue.add(tuple3(null, false, null));
         }
-
-        return false;
+        tryBeginSnapshot();
     }
 
-    void beginSnapshot(long executionId) {
-        if (this.executionId != executionId) {
-            // current execution is completed and probably a new execution has started
-            logger.warning("Not beginning snapshot since expected execution id " + idToString(this.executionId)
-                    + " does not match to " + jobAndExecutionId(jobId, executionId));
-            return;
+    private void cancelExecutionInvocations(long jobId, long executionId, TerminationMode mode) {
+        nodeEngine.getExecutionService().execute(ExecutionService.ASYNC_EXECUTOR, () ->
+                invokeOnParticipants(plan -> new TerminateExecutionOperation(jobId, executionId, mode), null, null));
+    }
+
+    private void tryBeginSnapshot() {
+        boolean isTerminal;
+        String snapshotMapName;
+        CompletableFuture<Void> future;
+        assertLockNotHeld();
+        synchronized (lock) {
+            if (jobStatus != RUNNING) {
+                logger.fine("Not beginning snapshot, " + jobIdString() + " is not RUNNING, but " + jobStatus);
+                return;
+            }
+            if (snapshotInProgress) {
+                logger.fine("Not beginning snapshot since one is already in progress " + jobIdString());
+                return;
+            }
+            if (terminalSnapshotFuture.isDone()) {
+                logger.fine("Not beginning snapshot since terminal snapshot is already completed " + jobIdString());
+                return;
+            }
+
+            Tuple3<String, Boolean, CompletableFuture<Void>> requestedSnapshot = snapshotQueue.poll();
+            if (requestedSnapshot == null) {
+                return;
+            }
+            snapshotInProgress = true;
+            snapshotMapName = requestedSnapshot.f0();
+            isTerminal = requestedSnapshot.f1();
+            future = requestedSnapshot.f2();
+            jobExecutionRecord.startNewSnapshot(snapshotMapName);
         }
 
-        List<String> vertexNames = vertices.stream().map(Vertex::getName).collect(Collectors.toList());
-        long newSnapshotId = snapshotRepository.registerSnapshot(jobId, vertexNames);
+        writeJobExecutionRecord(false);
+        long newSnapshotId = jobExecutionRecord.ongoingSnapshotId();
+        boolean isExport = snapshotMapName != null;
+        String finalMapName = isExport ? exportedSnapshotMapName(snapshotMapName)
+                : snapshotDataMapName(jobId, jobExecutionRecord.ongoingDataMapIndex());
+        if (isExport) {
+            nodeEngine.getHazelcastInstance().getMap(finalMapName).clear();
+        }
+        logger.info(String.format("Starting snapshot %d for %s", newSnapshotId, jobIdString())
+                + (isTerminal ? ", terminal" : "")
+                + (isExport ? ", exporting to '" + snapshotMapName + '\'' : ""));
 
-        logger.info(String.format("Starting snapshot %s for %s", newSnapshotId, jobAndExecutionId(jobId, executionId)));
         Function<ExecutionPlan, Operation> factory =
-                plan -> new SnapshotOperation(jobId, executionId, newSnapshotId);
+                plan -> new SnapshotOperation(jobId, executionId, newSnapshotId, finalMapName, isTerminal);
 
-        invoke(factory, responses -> onSnapshotCompleted(responses, executionId, newSnapshotId), null);
+        // Need to take a copy of executionId: we don't cancel the scheduled task when the execution
+        // finalizes. If a new execution is started in the meantime, we'll use the execution ID to detect it.
+        long localExecutionId = executionId;
+        invokeOnParticipants(factory, responses -> onSnapshotCompleted(
+                        responses, localExecutionId, newSnapshotId, finalMapName, isExport, isTerminal, future),
+                null);
     }
 
-    private void onSnapshotCompleted(Map<MemberInfo, Object> responses, long executionId, long snapshotId) {
+    private void onSnapshotCompleted(
+            Map<MemberInfo, Object> responses,
+            long executionId,
+            long snapshotId,
+            String snapshotMapName,
+            boolean wasExport,
+            boolean wasTerminal,
+            @Nullable CompletableFuture<Void> future
+    ) {
+        // Note: this method can be called after finalizeJob() is called or even after new execution started.
+        // We only wait for snapshot completion if the job completed with a terminal snapshot and the job
+        // was successful.
         SnapshotOperationResult mergedResult = new SnapshotOperationResult();
         for (Object response : responses.values()) {
+            // the response is either SnapshotOperationResult or an exception, see #invokeOnParticipants() method
+            if (response instanceof Throwable) {
+                response = new SnapshotOperationResult(0, 0, 0, (Throwable) response);
+            }
             mergedResult.merge((SnapshotOperationResult) response);
+        }
+
+        IMap<Object, Object> snapshotMap = nodeEngine.getHazelcastInstance().getMap(snapshotMapName);
+        try {
+            SnapshotValidationRecord validationRecord = new SnapshotValidationRecord(snapshotId,
+                    mergedResult.getNumChunks(), mergedResult.getNumBytes(),
+                    jobExecutionRecord.ongoingSnapshotStartTime(), jobId, jobName, jobRecord.getDagJson());
+            Object oldValue = snapshotMap.put(SnapshotValidationRecord.KEY, validationRecord);
+            if (snapshotMapName.startsWith(EXPORTED_SNAPSHOTS_PREFIX)) {
+                String snapshotName = snapshotMapName.substring(EXPORTED_SNAPSHOTS_PREFIX.length());
+                jobRepository.cacheValidationRecord(snapshotName, validationRecord);
+            }
+            if (oldValue != null) {
+                logger.severe("SnapshotValidationRecord overwritten after writing to '" + snapshotMapName + "' for "
+                        + jobIdString() + ": snapshot data might be corrupted");
+            }
+        } catch (Exception e) {
+            mergedResult.merge(new SnapshotOperationResult(0, 0, 0, e));
         }
 
         boolean isSuccess = mergedResult.getError() == null;
         if (!isSuccess) {
-            logger.warning(jobAndExecutionId(jobId, executionId) + " snapshot " + snapshotId + " has failure, " +
-                    "first failure: " + mergedResult.getError());
+            logger.warning(jobIdString() + " snapshot " + snapshotId + " failed on some member(s), " +
+                    "one of the failures: " + mergedResult.getError());
+            try {
+                snapshotMap.clear();
+            } catch (Exception e) {
+                logger.warning(jobIdString() + ": failed to clear snapshot map '" + snapshotMapName + "' after a failure",
+                        e);
+            }
         }
-        coordinationService.completeSnapshot(jobId, executionId, snapshotId, isSuccess,
-                mergedResult.getNumBytes(), mergedResult.getNumKeys(), mergedResult.getNumChunks());
+        SnapshotStats stats = jobExecutionRecord.ongoingSnapshotDone(
+                mergedResult.getNumBytes(), mergedResult.getNumKeys(), mergedResult.getNumChunks(),
+                mergedResult.getError());
+        writeJobExecutionRecord(false);
+        logger.info(String.format("Snapshot %d for %s completed with status %s in %dms, " +
+                        "%,d bytes, %,d keys in %,d chunks, stored in '%s'",
+                snapshotId, jobIdString(), isSuccess ? "SUCCESS" : "FAILURE",
+                stats.duration(), stats.numBytes(),
+                stats.numKeys(), stats.numChunks(),
+                snapshotMapName));
+        jobRepository.clearSnapshotData(jobId, jobExecutionRecord.ongoingDataMapIndex());
+        if (future != null) {
+            if (isSuccess) {
+                future.complete(null);
+            } else {
+                future.completeExceptionally(new JetException(mergedResult.getError()));
+            }
+        }
+
+        synchronized (lock) {
+            if (this.executionId != executionId) {
+                logger.fine("Not completing terminalSnapshotFuture on " + jobIdString() + ", new execution " +
+                        "already started, snapshot was for executionId=" + idToString(executionId));
+                return;
+            }
+            assert snapshotInProgress : "snapshot not in progress";
+            snapshotInProgress = false;
+            if (wasTerminal) {
+                // after a terminal snapshot, no more snapshots are scheduled in this execution
+                boolean completedNow = terminalSnapshotFuture.complete(null);
+                assert completedNow : "terminalSnapshotFuture was already completed";
+            } else if (!wasExport) {
+                // if this snapshot was an automatic snapshot, schedule the next one
+                coordinationService.scheduleSnapshot(this, executionId);
+            }
+        }
+        tryBeginSnapshot();
     }
 
     // Called as callback when all ExecuteOperation invocations are done
-    private void onExecuteStepCompleted(Map<MemberInfo, Object> responses, boolean isRestartRequested) {
-        invokeCompleteExecution(getExecuteResult(responses, isRestartRequested));
+    private void onExecuteStepCompleted(Map<MemberInfo, Object> responses) {
+        invokeCompleteExecution(getResult("Execution", responses));
     }
 
     /**
      * <ul>
-     * <li>Returns null if there is no failure.
-     * <li>Returns CancellationException if the job is cancelled.
-     * <li>Returns JobRestartRequestedException if the current execution is cancelled
-     * <li>If there is at least one non-restartable failure, such as an exception in user code, then returns that failure.
-     * <li>Otherwise, the failure is because a job participant has left the cluster.
-     *   In that case, {@code TopologyChangeException} is returned so that the job will be restarted.
+     * <li>Returns {@code null} if there is no failure
+     * <li>Returns a {@link CancellationException} if the job is cancelled
+     *     forcefully.
+     * <li>Returns a {@link JobTerminateRequestedException} if the current
+     *     execution is stopped due to a requested termination, except for
+     *     CANCEL_GRACEFUL, in which case CancellationException is returned.
+     * <li>If there is at least one user failure, such as an exception in user
+     *     code (restartable or not), then returns that failure.
+     * <li>Otherwise, the failure is because a job participant has left the
+     *     cluster. In that case, it returns {@code TopologyChangeException} so
+     *     that the job will be restarted
      * </ul>
      */
-    private Throwable getExecuteResult(Map<MemberInfo, Object> responses, boolean isRestartRequested) {
-        if (cancellationToken.isCompleted()) {
-            logger.fine(jobIdString() + " to be cancelled after execute");
+    private Throwable getResult(String opName, Map<MemberInfo, Object> responses) {
+        if (isCancelled()) {
+            logger.fine(jobIdString() + " to be cancelled after " + opName);
             return new CancellationException();
-        } else if (isRestartRequested) {
-            return new JobRestartRequestedException();
         }
 
         Map<Boolean, List<Entry<MemberInfo, Object>>> grouped = groupResponses(responses);
         Collection<MemberInfo> successfulMembers = grouped.get(false).stream().map(Entry::getKey).collect(toList());
 
+        List<Entry<MemberInfo, Object>> failures = grouped.get(true);
+        if (!failures.isEmpty()) {
+            logger.fine(opName + " of " + jobIdString() + " has failures: " + failures);
+        }
+
         if (successfulMembers.size() == executionPlanMap.size()) {
-            logger.fine("Execute of " + jobIdString() + " is successful.");
+            logger.fine(opName + " of " + jobIdString() + " was successful");
             return null;
         }
 
-        List<Entry<MemberInfo, Object>> failures = grouped.get(true);
-        logger.fine("Execute of " + jobIdString() + " has failures: " + failures);
+        // Handle TerminatedWithSnapshotException. If only part of the members
+        // threw it and others completed normally, the terminal snapshot will fail,
+        // but we still handle it as if terminal snapshot was done. If there are
+        // other exceptions, ignore this and handle the other exception.
+        if (failures.stream().allMatch(entry -> entry.getValue() instanceof TerminatedWithSnapshotException)) {
+            assert opName.equals("Execution") : "opName is '" + opName + "', expected 'Execution'";
+            logger.fine(opName + " of " + jobIdString() + " terminated after a terminal snapshot");
+            TerminationMode mode = requestedTerminationMode;
+            assert mode != null && mode.isWithTerminalSnapshot() : "mode=" + mode;
+            return mode == CANCEL_GRACEFUL ? new CancellationException() : new JobTerminateRequestedException(mode);
+        }
 
-        // If there is no user-code exception, it means at least one job participant has left the cluster.
-        // In that case, all remaining participants return a CancellationException.
+        // If there is no user-code exception, it means at least one job
+        // participant has left the cluster. In that case, all remaining
+        // participants return a TopologyChangedException.
         return failures
                 .stream()
-                .map(e -> (Throwable) e.getValue())
-                .filter(t -> !(t instanceof CancellationException || isTopologicalFailure(t)))
+                .peek(entry -> {
+                    if (entry.getValue() instanceof ShutdownInProgressException) {
+                        coordinationService.addShuttingDownMember(entry.getKey().getUuid());
+                    }
+                })
+                .map(entry -> (Throwable) entry.getValue())
+                .filter(e -> !(e instanceof CancellationException
+                               || e instanceof TerminatedWithSnapshotException
+                               || isTopologyException(e)))
                 .findFirst()
                 .map(ExceptionUtil::peel)
-                .orElse(new TopologyChangedException());
+                .orElseGet(TopologyChangedException::new);
     }
 
     private void invokeCompleteExecution(Throwable error) {
         JobStatus status = jobStatus();
 
         Throwable finalError;
-        if (status == STARTING || status == RESTARTING || status == RUNNING) {
-            logger.fine("Completing " + jobIdString());
+        if (status == STARTING || status == RUNNING) {
+            logger.fine("Sending CompleteExecutionOperation for " + jobIdString());
             finalError = error;
         } else {
-            if (error != null) {
-                logger.severe("Cannot properly complete failed " + jobIdString()
-                        + ": status is " + status, error);
-            } else {
-                logger.severe("Cannot properly complete " + jobIdString()
-                        + ": status is " + status);
-            }
-
-            finalError = new IllegalStateException("Job coordination failed.");
+            logCannotComplete(error);
+            finalError = new IllegalStateException("Job coordination failed");
         }
 
-        Function<ExecutionPlan, Operation> operationCtor = plan -> new CompleteExecutionOperation(executionId, finalError);
-        invoke(operationCtor, responses -> finalizeJob(error), null);
+        Function<ExecutionPlan, Operation> operationCtor = plan ->
+                new CompleteExecutionOperation(executionId, finalError);
+        invokeOnParticipants(operationCtor, responses -> onCompleteExecutionCompleted(error), null);
+    }
+
+    private void logCannotComplete(Throwable error) {
+        if (error != null) {
+            logger.severe("Cannot properly complete failed " + jobIdString()
+                    + ": status is " + jobStatus(), error);
+        } else {
+            logger.severe("Cannot properly complete " + jobIdString()
+                    + ": status is " + jobStatus());
+        }
+    }
+
+    private void onCompleteExecutionCompleted(Throwable error) {
+        if (error instanceof JobTerminateRequestedException
+                && ((JobTerminateRequestedException) error).mode().isWithTerminalSnapshot()) {
+            // have to use Async version, the future is completed inside a synchronized block
+            terminalSnapshotFuture.whenCompleteAsync(withTryCatch(logger, (r, e) -> finalizeJob(error)));
+        } else {
+            finalizeJob(error);
+        }
     }
 
     // Called as callback when all CompleteOperation invocations are done
-    private void finalizeJob(@Nullable Throwable failure) {
-        if (assertJobNotAlreadyDone(failure)) {
-            return;
+    void finalizeJob(@Nullable Throwable failure) {
+        Runnable nonSynchronizedAction = () -> { };
+        assertLockNotHeld();
+        synchronized (lock) {
+            JobStatus status = jobStatus();
+            if (status == COMPLETED || status == FAILED) {
+                logIgnoredCompletion(failure, status);
+                return;
+            }
+            completeVertices(failure);
+
+            boolean isSuccess = isSuccess(failure);
+
+            // reset state for the next execution
+            requestedTerminationMode = null;
+            executionInvocationCallback = null;
+            ActionAfterTerminate terminationModeAction = failure instanceof JobTerminateRequestedException
+                    ? ((JobTerminateRequestedException) failure).mode().actionAfterTerminate() : null;
+            for (Tuple3<String, Boolean, CompletableFuture<Void>> snapshotTuple : snapshotQueue) {
+                if (snapshotTuple.f2() != null) {
+                    snapshotTuple.f2().completeExceptionally(
+                            new JetException("Execution completed before snapshot executed"));
+                }
+            }
+            snapshotQueue.clear();
+
+            // if restart was requested, restart immediately
+            if (terminationModeAction == RESTART) {
+                jobStatus = NOT_RUNNING;
+                nonSynchronizedAction = () -> coordinationService.restartJob(jobId);
+            } else if (isRestartableException(failure) && jobRecord.getConfig().isAutoScaling()) {
+                // if restart is due to a failure, schedule a restart after a delay
+                scheduleRestart();
+            } else if (terminationModeAction == SUSPEND
+                    || isRestartableException(failure)
+                            && !jobRecord.getConfig().isAutoScaling()
+                            && jobRecord.getConfig().getProcessingGuarantee() != NONE) {
+                jobStatus = SUSPENDED;
+                jobExecutionRecord.setSuspended(true);
+                nonSynchronizedAction = () -> writeJobExecutionRecord(false);
+            } else {
+                jobStatus = isSuccess ? COMPLETED : FAILED;
+
+                if (failure instanceof LocalMemberResetException) {
+                    logger.fine("Cancelling job " + jobIdString() + " locally: member (local or remote) reset. " +
+                            "We don't delete job metadata: job will restart on majority cluster");
+                    setFinalResult(new CancellationException());
+                    return;
+                }
+
+                nonSynchronizedAction = () -> {
+                    try {
+                        coordinationService.completeJob(this, System.currentTimeMillis(), failure);
+                    } catch (RuntimeException e) {
+                        logger.warning("Completion of " + jobIdString() + " failed", e);
+                    } finally {
+                        setFinalResult(failure);
+                    }
+                };
+            }
         }
-
-        completeVertices(failure);
-
-        if (shouldRestart(failure)) {
-            scheduleRestart();
-            return;
-        }
-
-        long elapsed = System.currentTimeMillis() - jobStartTime;
-        if (isSuccess(failure)) {
-            logger.info(String.format("Execution of %s completed in %,d ms", jobIdString(), elapsed));
-        } else {
-            logger.warning(String.format("Execution of %s failed after %,d ms", jobIdString(), elapsed), failure);
-        }
-
-        JobStatus status = isSuccess(failure) ? COMPLETED : FAILED;
-        jobStatus.set(status);
-
-        try {
-            coordinationService.completeJob(this, executionId, System.currentTimeMillis(), failure);
-        } catch (RuntimeException e) {
-            logger.warning("Completion of " + jobIdString() + " failed", e);
-        } finally {
-            setFinalResult(failure);
-        }
+        executionCompletionFuture.complete(null);
+        nonSynchronizedAction.run();
     }
 
-    private boolean assertJobNotAlreadyDone(@Nullable Throwable failure) {
-        JobStatus status = jobStatus();
-        if (status == COMPLETED || status == FAILED) {
-            if (failure != null) {
-                logger.severe("Ignoring failure completion of " + idToString(jobId) + " because status is "
-                        + status, failure);
-            } else {
-                logger.severe("Ignoring completion of " + idToString(jobId) + " because status is " + status);
-            }
+    private boolean isSuccess(@Nullable Throwable failure) {
+        long elapsed = NANOSECONDS.toMillis(System.nanoTime() - executionStartTime);
+        if (failure == null) {
+            logger.info(String.format("Execution of %s completed in %,d ms", jobIdString(), elapsed));
             return true;
         }
+        if (failure instanceof CancellationException || failure instanceof JobTerminateRequestedException) {
+            logger.info(String.format("Execution of %s completed in %,d ms, reason=%s",
+                    jobIdString(), elapsed, failure));
+            return false;
+        }
+        logger.warning(String.format("Execution of %s failed after %,d ms", jobIdString(), elapsed), failure);
         return false;
+    }
+
+    private void logIgnoredCompletion(@Nullable Throwable failure, JobStatus status) {
+        if (failure != null) {
+            logger.severe("Ignoring failure completion of " + idToString(jobId) + " because status is " + status,
+                    failure);
+        } else {
+            logger.severe("Ignoring completion of " + idToString(jobId) + " because status is " + status);
+        }
     }
 
     private void completeVertices(@Nullable Throwable failure) {
@@ -590,85 +1007,173 @@ public class MasterContext {
         }
     }
 
-    private boolean shouldRestart(Throwable t) {
-        return t instanceof JobRestartRequestedException ||
-                (t instanceof TopologyChangedException && jobRecord.getConfig().isAutoRestartOnMemberFailureEnabled());
-    }
-
     void setFinalResult(Throwable failure) {
         if (failure == null) {
-            completionFuture.internalComplete();
+            jobCompletionFuture.internalComplete();
         } else {
-            completionFuture.internalCompleteExceptionally(failure);
+            jobCompletionFuture.internalCompleteExceptionally(failure);
         }
     }
 
-    private boolean isSuccess(Throwable failure) {
-        return (failure == null || failure instanceof CancellationException);
-    }
-
-    private void invoke(Function<ExecutionPlan, Operation> operationCtor,
-                        Consumer<Map<MemberInfo, Object>> completionCallback,
-                        ExecutionCallback<Object> callback) {
-        CompletableFuture<Void> doneFuture = new CompletableFuture<>();
-        Map<MemberInfo, InternalCompletableFuture<Object>> futures = new ConcurrentHashMap<>();
-        invokeOnParticipants(futures, doneFuture, operationCtor);
-
-        // once all invocations return, notify the completion callback
-        doneFuture.whenComplete(withTryCatch(logger, (aVoid, throwable) -> {
-            Map<MemberInfo, Object> responses = new HashMap<>();
-            for (Entry<MemberInfo, InternalCompletableFuture<Object>> entry : futures.entrySet()) {
-                Object val;
-                try {
-                    val = entry.getValue().get();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    val = e;
-                } catch (Exception e) {
-                    val = peel(e);
-                }
-                responses.put(entry.getKey(), val);
-            }
-            completionCallback.accept(responses);
-        }));
-
-        if (callback != null) {
-            futures.values().forEach(f -> f.andThen(callback));
+    void updateQuorumSize(int newQuorumSize) {
+        // This method can be called in parallel if multiple members are added. We don't synchronize here,
+        // but the worst that can happen is that we write the JobRecord out unnecessarily.
+        if (jobExecutionRecord.getQuorumSize() < newQuorumSize) {
+            jobExecutionRecord.setLargerQuorumSize(newQuorumSize);
+            writeJobExecutionRecord(false);
+            logger.info("Current quorum size: " + jobExecutionRecord.getQuorumSize() + " of job "
+                    + idToString(jobRecord.getJobId()) + " is updated to: " + newQuorumSize);
         }
     }
 
-    private void invokeOnParticipants(Map<MemberInfo, InternalCompletableFuture<Object>> futures,
-                                      CompletableFuture<Void> doneFuture,
-                                      Function<ExecutionPlan, Operation> opCtor) {
+    private void writeJobExecutionRecord(boolean canCreate) {
+        try {
+            coordinationService.jobRepository().writeJobExecutionRecord(jobRecord.getJobId(), jobExecutionRecord,
+                    canCreate);
+        } catch (RuntimeException e) {
+            // We don't bubble up the exceptions, if we can't write the record out, the universe is
+            // probably crumbling apart anyway. And we don't depend on it, we only write out for
+            // others to know or for the case should the master we fail.
+            logger.warning("Failed to update JobExecutionRecord", e);
+        }
+    }
+
+    /**
+     * @param completionCallback a consumer that will receive a map of responses, one for each member,
+     *                           after all have been received. The value will be either the response or
+     *                           an exception thrown from the operation
+     * @param callback A callback that will be called after each individual operation for each
+     *                 member completes
+     */
+    private void invokeOnParticipants(
+            Function<ExecutionPlan, Operation> operationCtor,
+            @Nullable Consumer<Map<MemberInfo, Object>> completionCallback,
+            @Nullable ExecutionCallback<Object> callback
+    ) {
+        ConcurrentMap<MemberInfo, Object> responses = new ConcurrentHashMap<>();
         AtomicInteger remainingCount = new AtomicInteger(executionPlanMap.size());
-        for (Entry<MemberInfo, ExecutionPlan> e : executionPlanMap.entrySet()) {
-            MemberInfo member = e.getKey();
-            Operation op = opCtor.apply(e.getValue());
+        for (Entry<MemberInfo, ExecutionPlan> entry : executionPlanMap.entrySet()) {
+            MemberInfo member = entry.getKey();
+            Operation op = operationCtor.apply(entry.getValue());
             InternalCompletableFuture<Object> future = nodeEngine.getOperationService()
-                 .createInvocationBuilder(JetService.SERVICE_NAME, op, member.getAddress())
-                 .setDoneCallback(() -> {
-                     if (remainingCount.decrementAndGet() == 0) {
-                         doneFuture.complete(null);
-                     }
-                 })
-                 .invoke();
-            futures.put(member, future);
+                    .createInvocationBuilder(JetService.SERVICE_NAME, op, member.getAddress())
+                    .invoke();
+
+            if (completionCallback != null) {
+                future.andThen(callbackOf((r, throwable) -> {
+                    Object response = r != null ? r : throwable != null ? peel(throwable) : NULL_OBJECT;
+                    Object oldResponse = responses.put(member, response);
+                    assert oldResponse == null :
+                            "Duplicate response for " + member + ". Old=" + oldResponse + ", new=" + response;
+                    if (remainingCount.decrementAndGet() == 0) {
+                        completionCallback.accept(responses);
+                    }
+                }));
+            }
+
+            if (callback != null) {
+                future.andThen(callback);
+            }
         }
     }
 
     private boolean isSnapshottingEnabled() {
-        return getJobConfig().getProcessingGuarantee() != ProcessingGuarantee.NONE;
+        return jobConfig().getProcessingGuarantee() != NONE;
     }
 
-    private String jobIdString() {
-        return jobAndExecutionId(jobId, executionId);
+    String jobName() {
+        return jobName;
+    }
+
+    String jobIdString() {
+        return jobNameAndExecutionId(jobName, executionId);
     }
 
     private static ClassLoader swapContextClassLoader(ClassLoader jobClassLoader) {
         Thread currentThread = Thread.currentThread();
-        ClassLoader contextClassLoader = currentThread.getContextClassLoader();
+        ClassLoader previous = currentThread.getContextClassLoader();
         currentThread.setContextClassLoader(jobClassLoader);
-        return contextClassLoader;
+        return previous;
+    }
+
+    void resumeJob(Function<Long, Long> executionIdSupplier) {
+        synchronized (lock) {
+            if (jobStatus != SUSPENDED) {
+                logger.info("Not resuming " + jobIdString() + ": not " + SUSPENDED + ", but " + jobStatus);
+                return;
+            }
+            jobStatus = NOT_RUNNING;
+        }
+        logger.fine("Resuming job " + jobName);
+        tryStartJob(executionIdSupplier);
+    }
+
+    private boolean hasParticipant(String uuid) {
+        // a member is a participant when it is a master member (that's we) or it's in the execution plan
+        return nodeEngine.getLocalMember().getUuid().equals(uuid)
+               || executionPlanMap != null && executionPlanMap.keySet().stream().anyMatch(mi -> mi.getUuid().equals(uuid));
+    }
+
+    /**
+     * Called when job participant is going to gracefully shut down. Will
+     * initiate terminal snapshot and when it's done, it will complete the
+     * returned future.
+     *
+     * @return a future to wait for, which may be already completed
+     */
+    @Nonnull
+    CompletableFuture<Void> onParticipantGracefulShutdown(String uuid) {
+        return hasParticipant(uuid) ? gracefullyTerminate() : completedFuture(null);
+    }
+
+    @Nonnull
+    CompletableFuture<Void> gracefullyTerminate() {
+        return requestTermination(RESTART_GRACEFUL, false).f0();
+    }
+
+    /**
+     * Checks if the job is running on all members and maybe restart it.
+     *
+     * <p>Returns {@code false}, if this method should be scheduled to
+     * be called later. That is, when the job is running, but we've
+     * failed to request the restart.
+     *
+     * <p>Returns {@code true}, if the job is not running, has
+     * auto-scaling disabled, is already running on all members or if
+     * we've managed to request a restart.
+     */
+    boolean maybeScaleUp(int dataMembersWithPartitionsCount) {
+        if (!jobConfig().isAutoScaling()) {
+            return true;
+        }
+
+        // We only compare the number of our participating members and current members.
+        // If there is any member in our participants that is not among current data members,
+        // this job will be restarted anyway. If it's the other way, then the sizes won't match.
+        if (executionPlanMap == null || executionPlanMap.size() == dataMembersWithPartitionsCount) {
+            LoggingUtil.logFine(logger, "Not scaling %s up: not running or already running on all members",
+                    jobIdString());
+            return true;
+        }
+
+        JobStatus localStatus = jobStatus;
+        if (localStatus == RUNNING && requestTermination(TerminationMode.RESTART_GRACEFUL, false).f1() == null) {
+            logger.info("Requested restart of " + jobIdString() + " to make use of added member(s). Job was running on " +
+                    executionPlanMap.size() + " members, cluster now has " + dataMembersWithPartitionsCount
+                    + " data members with assigned partitions");
+            return true;
+        }
+
+        // if status was not RUNNING or requestTermination didn't succeed, we'll try again later.
+        return false;
+    }
+
+    private void assertLockHeld() {
+        assert Thread.holdsLock(lock) : "the lock should be held at this place";
+    }
+
+    private void assertLockNotHeld() {
+        assert !Thread.holdsLock(lock) : "the lock should not be held at this place";
     }
 
     /**
@@ -676,8 +1181,8 @@ public class MasterContext {
      */
     private static class SnapshotRestoreEdge extends Edge {
 
-        SnapshotRestoreEdge(Vertex source, Vertex destination, int destOrdinal) {
-            super(source, 0, destination, destOrdinal);
+        SnapshotRestoreEdge(Vertex source, int sourceOrdinal, Vertex destination, int destOrdinal) {
+            super(source, sourceOrdinal, destination, destOrdinal);
             distributed();
             partitioned(entryKey());
         }
@@ -694,7 +1199,6 @@ public class MasterContext {
     private class ExecutionInvocationCallback implements ExecutionCallback<Object> {
 
         private final AtomicBoolean invocationsCancelled = new AtomicBoolean();
-
         private final long executionId;
 
         ExecutionInvocationCallback(long executionId) {
@@ -708,14 +1212,15 @@ public class MasterContext {
 
         @Override
         public void onFailure(Throwable t) {
-            cancelInvocations();
+            if (!(peel(t) instanceof TerminatedWithSnapshotException)) {
+                cancelInvocations(null);
+            }
         }
 
-        void cancelInvocations() {
+        void cancelInvocations(TerminationMode mode) {
             if (invocationsCancelled.compareAndSet(false, true)) {
-                cancelExecutionInvocations(jobId, executionId);
+                cancelExecutionInvocations(jobId, executionId, mode);
             }
         }
     }
-
 }

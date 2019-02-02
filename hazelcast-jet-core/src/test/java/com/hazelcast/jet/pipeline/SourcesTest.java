@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.jet.IMapJet;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.core.JobStatus;
-import com.hazelcast.jet.function.DistributedFunction;
+import com.hazelcast.projection.Projections;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Ignore;
@@ -78,28 +78,27 @@ public class SourcesTest extends PipelineTestSupport {
         putToBatchSrcMap(input);
 
         // When
-        p.<Integer>drawFrom(Sources.batchFromProcessor("test",
-                readMapP(srcName, truePredicate(),
-                        (DistributedFunction<Entry<String, Integer>, Integer>) Entry::getValue)))
-                .drainTo(sink);
-        execute();
+        BatchSource<Integer> source = Sources.batchFromProcessor("test",
+                readMapP(srcName, truePredicate(), Entry::getValue));
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         assertEquals(toBag(input), sinkToBag());
     }
 
     @Test
-    public void map() {
+    public void map_byName() {
         // Given
         List<Integer> input = sequence(itemCount);
         putToBatchSrcMap(input);
 
         // When
-        p.drawFrom(Sources.map(srcName))
-         .drainTo(sink);
-        execute();
+        BatchSource<Entry<String, Integer>> source = Sources.map(srcName);
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
                                                      .collect(toList());
@@ -107,34 +106,86 @@ public class SourcesTest extends PipelineTestSupport {
     }
 
     @Test
-    public void mapWithFilterAndProjection() {
+    public void map_byRef() {
         // Given
         List<Integer> input = sequence(itemCount);
         putToBatchSrcMap(input);
 
         // When
-        p.drawFrom(Sources.map(srcName, truePredicate(), singleAttribute("value")))
-         .drainTo(sink);
-        execute();
+        BatchSource<Entry<String, Integer>> source = Sources.map(srcMap);
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
+        List<Entry<String, Integer>> expected = input.stream()
+                                                     .map(i -> entry(String.valueOf(i), i))
+                                                     .collect(toList());
+        assertEquals(toBag(expected), sinkToBag());
+    }
+
+    @Test
+    public void mapWithFilterAndProjection_byName() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        putToBatchSrcMap(input);
+
+        // When
+        BatchSource<Object> source = Sources.map(srcName, truePredicate(), singleAttribute("value"));
+
+        // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         assertEquals(toBag(input), sinkToBag());
     }
 
     @Test
-    public void mapWithFilterAndProjectionFn() {
+    public void mapWithFilterAndProjection_byRef() {
         // Given
         List<Integer> input = sequence(itemCount);
         putToBatchSrcMap(input);
 
         // When
-        p.drawFrom(Sources.map(
-                srcName, truePredicate(),
-                (DistributedFunction<Entry<String, Integer>, Integer>) Entry::getValue))
-         .drainTo(sink);
-        execute();
+        BatchSource<Integer> source = Sources.map(srcMap, truePredicate(), Projections.singleAttribute("value"));
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
+        assertEquals(toBag(input), sinkToBag());
+    }
+
+    @Test
+    public void mapWithFilterAndProjectionFn_byName() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        putToBatchSrcMap(input);
+
+        // When
+        BatchSource<Integer> source = Sources.map(
+                srcName,
+                truePredicate(),
+                Entry<String, Integer>::getValue);
+
+        // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
+        assertEquals(toBag(input), sinkToBag());
+    }
+
+    @Test
+    public void mapWithFilterAndProjectionFn_byRef() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        putToBatchSrcMap(input);
+
+        // When
+        BatchSource<Integer> source = Sources.map(
+                srcMap,
+                truePredicate(),
+                Entry::getValue);
+
+        // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         assertEquals(toBag(input), sinkToBag());
     }
 
@@ -144,14 +195,13 @@ public class SourcesTest extends PipelineTestSupport {
         String mapName = randomName();
         IMapJet<Integer, Entry<Integer, String>> sourceMap = jet().getMap(mapName);
         range(0, itemCount).forEach(i -> sourceMap.put(i, entry(i, i % 2 == 0 ? null : String.valueOf(i))));
-        BatchSource<String> source = Sources.map(mapName, truePredicate(), singleAttribute("value"));
 
         // when
-        p.drawFrom(source)
-         .drainTo(sink);
-        jet().newJob(p);
+        BatchSource<String> source = Sources.map(mapName, truePredicate(), singleAttribute("value"));
 
         // then
+        p.drawFrom(source).drainTo(sink);
+        jet().newJob(p);
         assertTrueEventually(() -> assertEquals(
                 range(0, itemCount)
                         .filter(i -> i % 2 != 0)
@@ -172,11 +222,11 @@ public class SourcesTest extends PipelineTestSupport {
         putToMap(remoteHz.getMap(srcName), input);
 
         // When
-        p.drawFrom(Sources.remoteMap(srcName, clientConfig))
-         .drainTo(sink);
-        execute();
+        BatchSource<Entry<Object, Object>> source = Sources.remoteMap(srcName, clientConfig);
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
                                                      .collect(toList());
@@ -190,11 +240,12 @@ public class SourcesTest extends PipelineTestSupport {
         putToMap(remoteHz.getMap(srcName), input);
 
         // When
-        p.drawFrom(Sources.remoteMap(srcName, clientConfig, truePredicate(), singleAttribute("value")))
-         .drainTo(sink);
-        execute();
+        BatchSource<Object> source = Sources.remoteMap(
+                srcName, clientConfig, truePredicate(), singleAttribute("value"));
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         assertEquals(toBag(input), sinkToBag());
     }
 
@@ -205,35 +256,32 @@ public class SourcesTest extends PipelineTestSupport {
         putToMap(remoteHz.getMap(srcName), input);
 
         // When
-        p.drawFrom(Sources.remoteMap(
-                srcName, clientConfig, truePredicate(),
-                (DistributedFunction<Entry<String, Integer>, Integer>) Entry::getValue))
-         .drainTo(sink);
-        execute();
+        BatchSource<Integer> source = Sources.remoteMap(
+                srcName, clientConfig, truePredicate(), Entry<String, Integer>::getValue);
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         assertEquals(toBag(input), sinkToBag());
     }
 
-
     @Test
-    public void cache() {
+    public void cache_byName() {
         // Given
         List<Integer> input = sequence(itemCount);
         putToBatchSrcCache(input);
 
         // When
-        p.drawFrom(Sources.cache(srcName))
-         .drainTo(sink);
-        execute();
+        BatchSource<Entry<String, Integer>> source = Sources.cache(srcName);
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
                                                      .collect(toList());
         assertEquals(toBag(expected), sinkToBag());
     }
-
 
     @Test
     public void remoteCache() {
@@ -242,30 +290,44 @@ public class SourcesTest extends PipelineTestSupport {
         putToCache(remoteHz.getCacheManager().getCache(srcName), input);
 
         // When
-        p.drawFrom(Sources.remoteCache(srcName, clientConfig))
-         .drainTo(sink);
-        execute();
+        BatchSource<Entry<Object, Object>> source = Sources.remoteCache(srcName, clientConfig);
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
                                                      .collect(toList());
         assertEquals(toBag(expected), sinkToBag());
     }
 
-
     @Test
-    public void list() {
+    public void list_byName() {
         // Given
         List<Integer> input = sequence(itemCount);
         addToSrcList(input);
 
         // When
-        p.drawFrom(Sources.list(srcName))
-         .drainTo(sink);
-        execute();
+        BatchSource<Integer> source = Sources.list(srcName);
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
+        assertEquals(input, sinkList);
+    }
+
+    @Test
+    public void list_byRef() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        addToSrcList(input);
+
+        // When
+        BatchSource<Object> source = Sources.list(srcList);
+
+        // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         assertEquals(input, sinkList);
     }
 
@@ -276,11 +338,11 @@ public class SourcesTest extends PipelineTestSupport {
         remoteHz.getList(srcName).addAll(input);
 
         // When
-        p.drawFrom(Sources.remoteList(srcName, clientConfig))
-         .drainTo(sink);
-        execute();
+        BatchSource<Object> source = Sources.remoteList(srcName, clientConfig);
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         assertEquals(input, sinkList);
     }
 
@@ -288,7 +350,7 @@ public class SourcesTest extends PipelineTestSupport {
     public void socket() throws Exception {
         // Given
         try (ServerSocket socket = new ServerSocket(8176)) {
-            new Thread(() -> uncheckRun(() -> {
+            spawn(() -> uncheckRun(() -> {
                 Socket accept1 = socket.accept();
                 Socket accept2 = socket.accept();
                 PrintWriter writer1 = new PrintWriter(accept1.getOutputStream());
@@ -303,17 +365,16 @@ public class SourcesTest extends PipelineTestSupport {
                 writer2.write("world2 \n");
                 writer2.write("jet2 \n");
                 writer2.flush();
-
                 accept1.close();
                 accept2.close();
-            })).start();
+            }));
 
             // When
-            p.drawFrom(Sources.socket("localhost", 8176, UTF_8))
-             .drainTo(sink);
-            execute();
+            StreamSource<String> source = Sources.socket("localhost", 8176, UTF_8);
 
             // Then
+            p.drawFrom(source).withoutTimestamps().drainTo(sink);
+            execute();
             assertEquals(6, sinkList.size());
         }
     }
@@ -322,18 +383,17 @@ public class SourcesTest extends PipelineTestSupport {
     public void files() throws Exception {
         // Given
         File directory = createTempDirectory();
-
         File file1 = new File(directory, randomName());
         appendToFile(file1, "hello", "world");
         File file2 = new File(directory, randomName());
         appendToFile(file2, "hello2", "world2");
 
         // When
-        p.drawFrom(Sources.files(directory.getPath()))
-         .drainTo(sink);
-        execute();
+        BatchSource<String> source = Sources.files(directory.getPath());
 
         // Then
+        p.drawFrom(source).drainTo(sink);
+        execute();
         int nodeCount = jet().getCluster().getMembers().size();
         assertEquals(4 * nodeCount, sinkList.size());
     }
@@ -349,21 +409,18 @@ public class SourcesTest extends PipelineTestSupport {
         sleepAtLeastMillis(50);
 
         // When
-        p.drawFrom(Sources.fileWatcher(directory.getPath()))
-         .drainTo(sink);
-        Job job = jet().newJob(p);
-
-        // wait for the processor to initialize
-        assertTrueEventually(() -> assertEquals(JobStatus.RUNNING, job.getStatus()));
+        StreamSource<String> source = Sources.fileWatcher(directory.getPath());
 
         // Then
+        p.drawFrom(source).withoutTimestamps().drainTo(sink);
+        Job job = jet().newJob(p);
+        // wait for the processor to initialize
+        assertJobStatusEventually(job, JobStatus.RUNNING);
         // pre-existing file should not be picked up
         assertEquals(0, sinkList.size());
         appendToFile(file, "third line");
-
         // now, only new line should be picked up
         int nodeCount = jet().getCluster().getMembers().size();
         assertTrueEventually(() -> assertEquals(nodeCount, sinkList.size()));
     }
-
 }

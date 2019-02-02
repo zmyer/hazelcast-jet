@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.hazelcast.jet.impl.util.Util.uncheckCall;
 import static com.hazelcast.jet.impl.util.Util.uncheckRun;
+import static com.hazelcast.jet.pipeline.SinkBuilder.sinkBuilder;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -50,9 +51,19 @@ public class SinkBuilderTest extends PipelineTestSupport {
         BatchStage<Integer> stage = p.drawFrom(Sources.list(srcName));
 
         // When
-        stage.drainTo(buildRandomFileSink(listName));
+        Sink<Integer> sink = sinkBuilder("file-sink",
+                        context -> {
+                            File directory = createTempDirectory();
+                            File file = new File(directory, randomName());
+                            assertTrue(file.createNewFile());
+                            context.jetInstance().getList(listName).add(directory.toPath().toString());
+                            return file;
+                        })
+                .receiveFn((File sink1, Integer item) -> appendToFile(sink1, item.toString()))
+                .build();
 
         //Then
+        stage.drainTo(sink);
         execute();
         List<String> paths = new ArrayList<>(jet().getList(listName));
         long count = paths.stream().map(Paths::get)
@@ -74,10 +85,8 @@ public class SinkBuilderTest extends PipelineTestSupport {
                 while (!serverSocket.isClosed()) {
                     Socket socket = serverSocket.accept();
                     spawn(() -> uncheckRun(() -> {
-                        try (BufferedReader reader =
-                                     new BufferedReader(new InputStreamReader(socket.getInputStream()))
-                        ) {
-                            while (reader.readLine() != null) {
+                        try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+                            while (in.readLine() != null) {
                                 counter.incrementAndGet();
                             }
                         } finally {
@@ -89,32 +98,18 @@ public class SinkBuilderTest extends PipelineTestSupport {
             BatchStage<Integer> stage = p.drawFrom(Sources.list(srcName));
 
             // When
-            int portNumber = serverSocket.getLocalPort();
-            Sink<Integer> sink = Sinks.<PrintWriter, Integer>builder("socket-sink", jet -> uncheckCall(() ->
-                    getSocketWriter(portNumber)))
-                    .onReceiveFn(PrintWriter::println)
-                    .flushFn(s -> uncheckRun(s::flush))
-                    .destroyFn(s -> uncheckRun(s::close))
+            int localPort = serverSocket.getLocalPort();
+            Sink<Integer> sink = sinkBuilder("socket-sink", jet -> getSocketWriter(localPort))
+                    .receiveFn((PrintWriter w, Integer x) -> w.println(x))
+                    .flushFn(PrintWriter::flush)
+                    .destroyFn(PrintWriter::close)
                     .build();
-            stage.drainTo(sink);
 
             //Then
+            stage.drainTo(sink);
             execute();
             assertTrueEventually(() -> assertEquals(itemCount, counter.get()));
         }
-    }
-
-    private static Sink<Integer> buildRandomFileSink(String listName) {
-        return Sinks.<File, Integer>builder("file-sink", context ->
-                uncheckCall(() -> {
-                    File directory = createTempDirectory();
-                    File file = new File(directory, randomName());
-                    assertTrue(file.createNewFile());
-                    context.jetInstance().getList(listName).add(directory.toPath().toString());
-                    return file;
-                }))
-                .onReceiveFn((sink, item) -> uncheckRun(() -> appendToFile(sink, item.toString())))
-                .build();
     }
 
     private static PrintWriter getSocketWriter(int localPort) throws IOException {

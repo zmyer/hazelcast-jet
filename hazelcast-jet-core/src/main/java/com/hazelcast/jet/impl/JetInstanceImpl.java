@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,9 +21,11 @@ import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.DAG;
-import com.hazelcast.jet.core.JobNotFoundException;
 import com.hazelcast.jet.impl.operation.GetJobIdsByNameOperation;
 import com.hazelcast.jet.impl.operation.GetJobIdsOperation;
+import com.hazelcast.jet.impl.util.Util;
+import com.hazelcast.logging.ILogger;
+import com.hazelcast.map.impl.MapService;
 import com.hazelcast.nio.Address;
 import com.hazelcast.spi.NodeEngine;
 import com.hazelcast.spi.impl.NodeEngineImpl;
@@ -33,8 +35,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Future;
 
-import static com.hazelcast.jet.impl.util.ExceptionUtil.peel;
-import static com.hazelcast.jet.impl.util.Util.uncheckCall;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
 import static java.util.stream.Collectors.toList;
 
 /**
@@ -44,7 +45,7 @@ public class JetInstanceImpl extends AbstractJetInstance {
     private final NodeEngine nodeEngine;
     private final JetConfig config;
 
-    public JetInstanceImpl(HazelcastInstanceImpl hazelcastInstance, JetConfig config) {
+    JetInstanceImpl(HazelcastInstanceImpl hazelcastInstance, JetConfig config) {
         super(hazelcastInstance);
         this.nodeEngine = hazelcastInstance.node.getNodeEngine();
         this.config = config;
@@ -56,52 +57,82 @@ public class JetInstanceImpl extends AbstractJetInstance {
     }
 
     @Nonnull @Override
-    public Job newJob(@Nonnull DAG dag, @Nonnull JobConfig config) {
-        long jobId = uploadResourcesAndAssignId(config);
-        return new JobProxy((NodeEngineImpl) nodeEngine, jobId, dag, config);
-    }
-
-    @Nonnull @Override
     public List<Job> getJobs() {
         Address masterAddress = nodeEngine.getMasterAddress();
         Future<Set<Long>> future = nodeEngine
                 .getOperationService()
                 .createInvocationBuilder(JetService.SERVICE_NAME, new GetJobIdsOperation(), masterAddress)
                 .invoke();
-        return uncheckCall(() ->
-                future.get().stream().map(jobId -> new JobProxy((NodeEngineImpl) nodeEngine, jobId)).collect(toList())
-        );
-    }
 
-    @Override
-    public Job getJob(long jobId) {
         try {
-            Job job = new JobProxy((NodeEngineImpl) nodeEngine, jobId);
-            job.getStatus();
-            return job;
-        } catch (Exception e) {
-            if (peel(e) instanceof JobNotFoundException) {
-                return null;
-            }
-            throw e;
+            return future.get()
+                         .stream()
+                         .map(jobId -> new JobProxy((NodeEngineImpl) nodeEngine, jobId))
+                         .collect(toList());
+        } catch (Throwable t) {
+            throw rethrow(t);
         }
     }
 
-    @Nonnull @Override
-    public List<Job> getJobs(@Nonnull String name) {
-        return getJobIdsByName(name).stream()
-                                    .map(jobId -> new JobProxy((NodeEngineImpl) nodeEngine, jobId))
-                                    .collect(toList());
-    }
-
-    private List<Long> getJobIdsByName(String name) {
+    @Override
+    public List<Long> getJobIdsByName(String name) {
         Address masterAddress = nodeEngine.getMasterAddress();
         Future<List<Long>> future = nodeEngine
                 .getOperationService()
                 .createInvocationBuilder(JetService.SERVICE_NAME, new GetJobIdsByNameOperation(name), masterAddress)
                 .invoke();
 
-        return uncheckCall(future::get);
+        try {
+            return future.get();
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
     }
 
+    @Override
+    public void shutdown() {
+        try {
+            JetService jetService = nodeEngine.getService(JetService.SERVICE_NAME);
+            jetService.shutDownJobs();
+            super.shutdown();
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    /**
+     * Tells whether this member knows of the given object name.
+     * <p>
+     * Notes:
+     * <ul><li>
+     *     this member might not know it exists if the proxy creation operation went wrong
+     * </li><li>
+     *     this member might not know it was destroyed if the destroy operation went wrong
+     * </li><li>
+     *     it might be racy with respect to other create/destroy operations
+     * </li></ul>
+     *
+     * @param serviceName for example, {@link MapService#SERVICE_NAME}
+     * @param objectName  object name
+     * @return true, if this member knows of the object
+     */
+    @Override
+    public boolean existsDistributedObject(@Nonnull String serviceName, @Nonnull String objectName) {
+        return Util.existsDistributedObject(nodeEngine, serviceName, objectName);
+    }
+
+    @Override
+    public Job newJobProxy(long jobId) {
+        return new JobProxy((NodeEngineImpl) nodeEngine, jobId);
+    }
+
+    @Override
+    public Job newJobProxy(long jobId, DAG dag, JobConfig config) {
+        return new JobProxy((NodeEngineImpl) nodeEngine, jobId, dag, config);
+    }
+
+    @Override
+    public ILogger getLogger() {
+        return nodeEngine.getLogger(getClass());
+    }
 }

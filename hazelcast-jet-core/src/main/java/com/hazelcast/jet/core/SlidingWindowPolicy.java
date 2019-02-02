@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -156,7 +156,9 @@ public class SlidingWindowPolicy implements Serializable {
      * @param slideBy the amount to slide the window by
      */
     public static SlidingWindowPolicy slidingWinPolicy(long windowSize, long slideBy) {
-        Preconditions.checkTrue(windowSize % slideBy == 0, "windowSize must be a multiple of slideBy");
+        Preconditions.checkPositive(windowSize, "windowSize must be >= 1");
+        Preconditions.checkPositive(slideBy, "slideBy must be >= 1");
+        Preconditions.checkTrue(windowSize % slideBy == 0, "windowSize must be an integer multiple of slideBy");
         return new SlidingWindowPolicy(slideBy, 0, windowSize / slideBy);
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package com.hazelcast.jet.pipeline;
 
 import com.hazelcast.jet.function.DistributedFunction;
 
-import java.io.Serializable;
 import java.util.Map.Entry;
 
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
@@ -49,7 +48,7 @@ import static com.hazelcast.jet.impl.util.Util.checkSerializable;
  * @param <T1> the type of the right-hand stream item
  * @param <T1_OUT> the result type of the right-hand projection function
  */
-public final class JoinClause<K, T0, T1, T1_OUT> implements Serializable {
+public final class JoinClause<K, T0, T1, T1_OUT> {
     private final DistributedFunction<? super T0, ? extends K> leftKeyFn;
     private final DistributedFunction<? super T1, ? extends K> rightKeyFn;
     private final DistributedFunction<? super T1, ? extends T1_OUT> rightProjectFn;

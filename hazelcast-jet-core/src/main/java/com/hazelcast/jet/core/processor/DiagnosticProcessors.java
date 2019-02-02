@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import javax.annotation.Nonnull;
 import java.util.Map.Entry;
 
 import static com.hazelcast.jet.core.ProcessorMetaSupplier.preferLocalParallelismOne;
-import static com.hazelcast.jet.function.DistributedFunctions.alwaysTrue;
+import static com.hazelcast.jet.function.DistributedPredicate.alwaysTrue;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 
 /**
@@ -101,7 +101,7 @@ public final class DiagnosticProcessors {
      * @param toStringFn  a function that returns the string representation of the item.
      *                    You can use {@code Object::toString}.
      * @param shouldLogFn a function to filter the logged items. You can use {@link
-     *                    com.hazelcast.jet.function.DistributedFunctions#alwaysTrue()
+     *                    DistributedPredicate#alwaysTrue()
      *                    alwaysTrue()} as a pass-through filter when you don't need any
      *                    filtering.
      * @param wrapped The wrapped meta-supplier.
@@ -220,7 +220,7 @@ public final class DiagnosticProcessors {
      * @param toStringFn  a function that returns the string representation of the item.
      *                    You can use {@code Object::toString}.
      * @param shouldLogFn a function to filter the logged items. You can use {@link
-     *                    com.hazelcast.jet.function.DistributedFunctions#alwaysTrue()
+     *                    DistributedPredicate#alwaysTrue()
      *                    alwaysTrue()} as a pass-through filter when you don't need any
      *                    filtering.
      * @param wrapped The wrapped meta-supplier.
@@ -320,7 +320,7 @@ public final class DiagnosticProcessors {
      * @param toStringFn  a function that returns the string representation of the item.
      *                    You can use {@code Object::toString}
      * @param shouldLogFn a function to filter the logged items. You can use {@link
-     *                    com.hazelcast.jet.function.DistributedFunctions#alwaysTrue()
+     *                    DistributedPredicate#alwaysTrue()
      *                    alwaysTrue()} as a pass-through filter when you don't need any
      *                    filtering.
      * @param wrapped The wrapped meta-supplier.

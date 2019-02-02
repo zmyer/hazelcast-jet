@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,6 +48,7 @@ import java.util.Map.Entry;
 import java.util.stream.LongStream;
 
 import static com.hazelcast.jet.Util.entry;
+import static com.hazelcast.jet.core.JetTestSupport.wm;
 import static com.hazelcast.jet.core.SlidingWindowPolicy.slidingWinPolicy;
 import static com.hazelcast.jet.core.processor.Processors.aggregateToSlidingWindowP;
 import static com.hazelcast.jet.core.processor.Processors.combineToSlidingWindowP;
@@ -96,7 +97,7 @@ public class SlidingWindowPTest {
                 .andAccumulate((LongAccumulator acc, Entry<?, Long> item) -> acc.add(item.getValue()))
                 .andCombine(LongAccumulator::add)
                 .andDeduct(hasDeduct ? LongAccumulator::subtract : null)
-                .andFinish(LongAccumulator::get);
+                .andExportFinish(LongAccumulator::get);
 
         DistributedFunction<?, Long> keyFn = t -> KEY;
         DistributedToLongFunction<Entry<Long, Long>> timestampFn = Entry::getKey;
@@ -135,6 +136,7 @@ public class SlidingWindowPTest {
     public void simple_smokeTest() {
         verifyProcessor(supplier)
                 .disableCompleteCall()
+                .disableLogging()
                 .input(asList(
                         event(0, 1),
                         wm(3)))
@@ -264,6 +266,7 @@ public class SlidingWindowPTest {
         ));
         verifyProcessor(supplier)
                 .disableCompleteCall()
+                .disableLogging()
                 .input(inbox)
                 .expectOutput(expectedOutbox);
     }
@@ -318,9 +321,5 @@ public class SlidingWindowPTest {
 
     private static TimestampedEntry<Long, ?> outboxFrame(long ts, long value) {
         return new TimestampedEntry<>(ts, KEY, value);
-    }
-
-    private static Watermark wm(long timestamp) {
-        return new Watermark(timestamp);
     }
 }

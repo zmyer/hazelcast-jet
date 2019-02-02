@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ package com.hazelcast.jet.pipeline;
 import javax.annotation.Nonnull;
 
 /**
- * Represents a finite source of data for a Jet pipeline. Finite sources
- * are the only kind that can be used to aggregate data without windowing.
+ * A finite source of data for a Jet pipeline. Finite sources are the only
+ * kind that can be used to aggregate data without windowing.
  *
  * @see Sources source factory methods
  *

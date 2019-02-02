@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,11 +17,13 @@
 package com.hazelcast.jet.impl.processor;
 
 import com.hazelcast.jet.accumulator.LongAccumulator;
+import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.TimestampKind;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.datamodel.TimestampedEntry;
 import com.hazelcast.jet.function.DistributedFunction;
+import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.function.DistributedToLongFunction;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import com.hazelcast.test.annotation.ParallelTest;
@@ -33,14 +35,15 @@ import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map.Entry;
 
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.aggregate.AggregateOperations.summingLong;
+import static com.hazelcast.jet.core.JetTestSupport.wm;
 import static com.hazelcast.jet.core.SlidingWindowPolicy.slidingWinPolicy;
 import static com.hazelcast.jet.core.test.TestSupport.verifyProcessor;
-import static com.hazelcast.jet.function.DistributedFunction.identity;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static org.junit.Assert.assertTrue;
@@ -54,31 +57,38 @@ public class SlidingWindowP_stage1Test {
     @Rule
     public ExpectedException exception = ExpectedException.none();
 
-    private SlidingWindowP processor;
+    private List<SlidingWindowP> suppliedProcessors = new ArrayList<>();
+    private DistributedSupplier<Processor> supplier;
 
     @Before
     @SuppressWarnings("unchecked")
     public void before() {
         DistributedFunction<Entry<Long, Long>, Object> keyFn = x -> KEY;
         DistributedToLongFunction<Entry<Long, Long>> timestampFn = Entry::getKey;
-        processor = (SlidingWindowP) Processors.accumulateByFrameP(
-                singletonList(keyFn),
-                singletonList(timestampFn),
-                TimestampKind.EVENT,
-                slidingWinPolicy(16, 4),
-                summingLong(Entry<Long, Long>::getValue).withFinishFn(identity())
-        ).get();
+        supplier = () -> {
+            SlidingWindowP res = (SlidingWindowP) Processors.accumulateByFrameP(
+                    singletonList(keyFn),
+                    singletonList(timestampFn),
+                    TimestampKind.EVENT,
+                    slidingWinPolicy(16, 4),
+                    summingLong(Entry<Long, Long>::getValue).withIdentityFinish()
+            ).get();
+            suppliedProcessors.add(res);
+            return res;
+        };
     }
 
     @After
     public void after() {
-        assertTrue("map not empty after emitting everything: " + processor.tsToKeyToAcc,
-                processor.tsToKeyToAcc.isEmpty());
+        for (SlidingWindowP processor : suppliedProcessors) {
+            assertTrue("map not empty after emitting everything: " + processor.tsToKeyToAcc,
+                    processor.tsToKeyToAcc.isEmpty());
+        }
     }
 
     @Test
     public void smokeTest() {
-        verifyProcessor(processor)
+        verifyProcessor(supplier)
                 .disableSnapshots()
                 .disableCompleteCall()
                 .input(asList(
@@ -109,7 +119,7 @@ public class SlidingWindowP_stage1Test {
 
     @Test
     public void when_gapInWmAfterEvent_then_frameAndWmEmitted() {
-        verifyProcessor(processor)
+        verifyProcessor(supplier)
                 .disableSnapshots()
                 .disableCompleteCall()
                 .input(asList(
@@ -131,7 +141,7 @@ public class SlidingWindowP_stage1Test {
                 wm(12)
         );
 
-        verifyProcessor(processor)
+        verifyProcessor(supplier)
                 .disableSnapshots()
                 .disableCompleteCall()
                 .input(someWms)
@@ -140,7 +150,7 @@ public class SlidingWindowP_stage1Test {
 
     @Test
     public void when_batch_then_emitEverything() {
-        verifyProcessor(processor)
+        verifyProcessor(supplier)
                 .disableSnapshots()
                 .input(asList(
                         entry(0L, 1L), // to frame 4
@@ -160,7 +170,7 @@ public class SlidingWindowP_stage1Test {
 
     @Test
     public void when_wmNeverReceived_then_emitEverythingInComplete() {
-        verifyProcessor(processor)
+        verifyProcessor(supplier)
                 .disableSnapshots()
                 .input(asList(entry(0L, 1L), // to frame 4
                         entry(4L, 1L) // to frame 8
@@ -175,7 +185,7 @@ public class SlidingWindowP_stage1Test {
 
     @Test
     public void when_lateEvent_then_ignore() {
-        verifyProcessor(processor)
+        verifyProcessor(supplier)
                 .disableSnapshots()
                 .disableCompleteCall()
                 .input(asList(wm(16),
@@ -186,9 +196,5 @@ public class SlidingWindowP_stage1Test {
 
     private static TimestampedEntry<Long, LongAccumulator> frame(long timestamp, long value) {
         return new TimestampedEntry<>(timestamp, KEY, new LongAccumulator(value));
-    }
-
-    private static Watermark wm(long timestamp) {
-        return new Watermark(timestamp);
     }
 }

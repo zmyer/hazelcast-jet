@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@ import com.hazelcast.jet.impl.util.ReflectionUtils;
 import com.hazelcast.logging.ILogger;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -94,13 +93,13 @@ public class StreamFilesP<R> extends AbstractProcessor {
     private final Charset charset;
     private final PathMatcher glob;
     private final boolean sharedFileSystem;
-    private final DistributedBiFunction<String, String, R> mapOutputFn;
+    private final DistributedBiFunction<? super String, ? super String, ? extends R> mapOutputFn;
 
     private final Queue<Path> eventQueue = new ArrayDeque<>();
 
     private WatchService watcher;
     private StringBuilder lineBuilder = new StringBuilder();
-    private R pendingLine;
+    private R pendingItem;
     private Path currentFile;
     private String currentFileName;
     private FileInputStream currentInputStream;
@@ -108,15 +107,23 @@ public class StreamFilesP<R> extends AbstractProcessor {
     private int parallelism;
     private int processorIndex;
 
-    StreamFilesP(@Nonnull String watchedDirectory, @Nonnull Charset charset, @Nonnull String glob,
-                 boolean sharedFileSystem, @Nonnull DistributedBiFunction<String, String, R> mapOutputFn
+    StreamFilesP(
+            @Nonnull String watchedDirectory,
+            @Nonnull Charset charset,
+            @Nonnull String glob,
+            boolean sharedFileSystem,
+            @Nonnull DistributedBiFunction<? super String, ? super String, ? extends R> mapOutputFn
     ) {
         this.watchedDirectory = Paths.get(watchedDirectory);
         this.charset = charset;
         this.glob = FileSystems.getDefault().getPathMatcher("glob:" + glob);
         this.sharedFileSystem = sharedFileSystem;
         this.mapOutputFn = mapOutputFn;
-        setCooperative(false);
+    }
+
+    @Override
+    public boolean isCooperative() {
+        return false;
     }
 
     @Override
@@ -138,7 +145,7 @@ public class StreamFilesP<R> extends AbstractProcessor {
     }
 
     @Override
-    public void close(@Nullable Throwable error) {
+    public void close() {
         try {
             closeCurrentFile();
             getLogger().fine("Closing StreamFilesP");
@@ -221,19 +228,19 @@ public class StreamFilesP<R> extends AbstractProcessor {
                 return;
             }
             for (int i = 0; i < LINES_IN_ONE_BATCH; i++) {
-                if (pendingLine == null) {
+                if (pendingItem == null) {
                     String line = readCompleteLine(currentReader);
-                    pendingLine = line != null ? mapOutputFn.apply(currentFileName, line) : null;
+                    pendingItem = line != null ? mapOutputFn.apply(currentFileName, line) : null;
                 }
-                if (pendingLine == null) {
+                if (pendingItem == null) {
                     fileOffsets.put(currentFile,
                             new FileOffset(currentInputStream.getChannel().position(), lineBuilder.toString()));
                     lineBuilder.setLength(0);
                     closeCurrentFile();
                     break;
                 }
-                if (tryEmit(pendingLine)) {
-                    pendingLine = null;
+                if (tryEmit(pendingItem)) {
+                    pendingItem = null;
                 } else {
                     break;
                 }
@@ -270,11 +277,11 @@ public class StreamFilesP<R> extends AbstractProcessor {
     }
 
     /**
-     * Reads the file until the end of line is found.
+     * Searches for the end-of-line marker in the input stream.
      *
-     * @return whether it was found
+     * @return whether the end-of-line marker was found
      */
-    private boolean findEndOfLine(Reader in) throws IOException {
+    private static boolean findEndOfLine(Reader in) throws IOException {
         while (true) {
             int ch = in.read();
             if (ch < 0) {
@@ -349,7 +356,7 @@ public class StreamFilesP<R> extends AbstractProcessor {
             @Nonnull String charset,
             @Nonnull String glob,
             boolean sharedFileSystem,
-            @Nonnull DistributedBiFunction<String, String, ?> mapOutputFn
+            @Nonnull DistributedBiFunction<? super String, ? super String, ?> mapOutputFn
     ) {
         return ProcessorMetaSupplier.of(() ->
                 new StreamFilesP<>(watchedDirectory, Charset.forName(charset), glob, sharedFileSystem, mapOutputFn), 2);

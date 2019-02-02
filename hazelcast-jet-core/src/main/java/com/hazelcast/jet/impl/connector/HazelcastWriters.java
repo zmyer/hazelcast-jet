@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,18 @@ package com.hazelcast.jet.impl.connector;
 
 import com.hazelcast.cache.ICache;
 import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.client.impl.clientside.HazelcastClientProxy;
+import com.hazelcast.client.proxy.ClientMapProxy;
+import com.hazelcast.client.spi.ClientPartitionService;
 import com.hazelcast.core.ExecutionCallback;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.HazelcastInstanceNotActiveException;
+import com.hazelcast.core.ICompletableFuture;
 import com.hazelcast.core.IList;
 import com.hazelcast.core.IMap;
+import com.hazelcast.instance.HazelcastInstanceImpl;
+import com.hazelcast.jet.JetException;
+import com.hazelcast.jet.RestartableException;
 import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
@@ -36,9 +43,15 @@ import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.impl.SerializationConstants;
 import com.hazelcast.map.EntryBackupProcessor;
 import com.hazelcast.map.EntryProcessor;
+import com.hazelcast.map.impl.proxy.MapProxyImpl;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.nio.serialization.Data;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
+import com.hazelcast.spi.partition.IPartitionService;
+import com.hazelcast.spi.serialization.SerializationService;
+import com.hazelcast.spi.serialization.SerializationServiceAware;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -52,17 +65,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static com.hazelcast.client.HazelcastClient.newHazelcastClient;
 import static com.hazelcast.jet.core.ProcessorMetaSupplier.preferLocalParallelismOne;
-import static com.hazelcast.jet.function.DistributedFunctions.noopConsumer;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
+import static com.hazelcast.jet.impl.util.Util.asClientConfig;
+import static com.hazelcast.jet.impl.util.Util.asXmlString;
 import static com.hazelcast.jet.impl.util.Util.callbackOf;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static com.hazelcast.jet.impl.util.Util.tryIncrement;
+import static com.hazelcast.util.MapUtil.createHashMap;
 import static java.util.stream.Collectors.toList;
 
 /**
@@ -79,8 +95,8 @@ public final class HazelcastWriters {
     public static <T, K, V> ProcessorMetaSupplier mergeMapSupplier(
             @Nonnull String name,
             @Nullable ClientConfig clientConfig,
-            @Nonnull DistributedFunction<T, K> toKeyFn,
-            @Nonnull DistributedFunction<T, V> toValueFn,
+            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
+            @Nonnull DistributedFunction<? super T, ? extends V> toValueFn,
             @Nonnull DistributedBinaryOperator<V> mergeFn
     ) {
         checkSerializable(toKeyFn, "toKeyFn");
@@ -99,58 +115,158 @@ public final class HazelcastWriters {
     @Nonnull
     @SuppressWarnings("unchecked")
     public static <T, K, V> ProcessorMetaSupplier updateMapSupplier(
-            @Nonnull String name,
+            @Nonnull String mapName,
             @Nullable ClientConfig clientConfig,
-            @Nonnull DistributedFunction<T, K> toKeyFn,
-            @Nonnull DistributedBiFunction<V, T, V> updateFn
+            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
+            @Nonnull DistributedBiFunction<? super V, ? super T, ? extends V> updateFn
     ) {
         checkSerializable(toKeyFn, "toKeyFn");
         checkSerializable(updateFn, "updateFn");
 
         boolean isLocal = clientConfig == null;
-        return preferLocalParallelismOne(new HazelcastWriterSupplier<>(
-                serializableConfig(clientConfig),
-                index -> new ArrayList<>(),
-                ArrayList::add,
-                instance -> {
-                    IMap map = instance.getMap(name);
-                    Map<K, T> tmpMap = new HashMap<>();
-                    ApplyFnEntryProcessor<K, V, T> entryProcessor = new ApplyFnEntryProcessor<>(tmpMap, updateFn);
-
-                    return buffer -> {
-                        try {
-                            if (buffer.isEmpty()) {
-                                return;
-                            }
-                            for (Object object : buffer) {
-                                T item = (T) object;
-                                K key = toKeyFn.apply(item);
-                                // on duplicate key, we'll flush immediately
-                                if (tmpMap.containsKey(key)) {
-                                    map.executeOnKeys(tmpMap.keySet(), entryProcessor);
-                                    tmpMap.clear();
-                                }
-                                tmpMap.put(key, item);
-                            }
-                            map.executeOnKeys(tmpMap.keySet(), entryProcessor);
-                            tmpMap.clear();
-                        } catch (HazelcastInstanceNotActiveException e) {
-                            handleInstanceNotActive(instance, e, isLocal);
-                        }
-                        buffer.clear();
-                    };
-                },
-                noopConsumer()
+        return preferLocalParallelismOne(new HazelcastWriterSupplier<UpdateMapContext<K, V, T>, T>(
+                asXmlString(clientConfig),
+                instance -> procContext -> new UpdateMapContext<>(instance, mapName, toKeyFn, updateFn, isLocal),
+                UpdateMapContext::add,
+                instance -> UpdateMapContext::flush,
+                UpdateMapContext::finish
         ));
     }
+
+    private static final class UpdateMapContext<K, V, T> {
+        private static final int MAX_PARALLEL_ASYNC_OPS = 1000;
+
+        private final DistributedFunction<? super T, ? extends K> toKeyFn;
+        private final DistributedBiFunction<? super V, ? super T, ? extends V> updateFn;
+        private final boolean isLocal;
+        private final IPartitionService memberPartitionService;
+        private final ClientPartitionService clientPartitionService;
+        private final SerializationService serializationService;
+
+        private final Semaphore concurrentAsyncOpsSemaphore = new Semaphore(MAX_PARALLEL_ASYNC_OPS);
+        private final AtomicReference<Throwable> firstError = new AtomicReference<>();
+        private final IMap<K, V> map;
+
+        // one map per partition to store the temporary values
+        private final Map<Data, Object>[] tmpMaps;
+
+        UpdateMapContext(
+                HazelcastInstance instance,
+                String mapName,
+                @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
+                @Nonnull DistributedBiFunction<? super V, ? super T, ? extends V> updateFn,
+                boolean isLocal) {
+            this.toKeyFn = toKeyFn;
+            this.updateFn = updateFn;
+            this.isLocal = isLocal;
+
+            map = instance.getMap(mapName);
+            int partitionCount;
+            if (isLocal) {
+                HazelcastInstanceImpl castedInstance = (HazelcastInstanceImpl) instance;
+                clientPartitionService = null;
+                memberPartitionService = castedInstance.node.nodeEngine.getPartitionService();
+                serializationService = castedInstance.getSerializationService();
+                partitionCount = memberPartitionService.getPartitionCount();
+            } else {
+                HazelcastClientProxy clientProxy = (HazelcastClientProxy) instance;
+                clientPartitionService = clientProxy.client.getClientPartitionService();
+                memberPartitionService = null;
+                serializationService = clientProxy.getSerializationService();
+                partitionCount = clientPartitionService.getPartitionCount();
+            }
+            tmpMaps = new Map[partitionCount];
+            for (int i = 0; i < partitionCount; i++) {
+                tmpMaps[i] = new HashMap<>();
+            }
+        }
+
+        void add(T item) {
+            K key = toKeyFn.apply(item);
+            int partitionId;
+            Data keyData;
+            if (isLocal) {
+                // We pre-serialize the key and value to avoid double serialization when partitionId
+                // is calculated and when the value for backup operation is re-serialized
+                keyData = serializationService.toData(key, ((MapProxyImpl) map).getPartitionStrategy());
+                partitionId = memberPartitionService.getPartitionId(keyData);
+            } else {
+                // We ignore partition strategy for remote connection, the client doesn't know it.
+                // TODO we might be able to fix this after https://github.com/hazelcast/hazelcast/issues/13950 is fixed
+                // The functionality should work, but will be ineffective: the submitOnKey calls will have wrongly
+                // partitioned data.
+                keyData = serializationService.toData(key);
+                partitionId = clientPartitionService.getPartitionId(keyData);
+            }
+            Data itemData = serializationService.toData(item);
+            tmpMaps[partitionId].merge(keyData, itemData, (o, n) -> ApplyFnEntryProcessor.append(o, (Data) n));
+        }
+
+        void flush() {
+            try {
+                if (firstError.get() != null) {
+                    if (firstError.get() instanceof HazelcastInstanceNotActiveException) {
+                        throw handleInstanceNotActive((HazelcastInstanceNotActiveException) firstError.get(), isLocal);
+                    }
+                    throw sneakyThrow(firstError.get());
+                }
+                for (int partitionId = 0; partitionId < tmpMaps.length; partitionId++) {
+                    if (tmpMaps[partitionId].isEmpty()) {
+                        continue;
+                    }
+                    ApplyFnEntryProcessor<K, V, T> entryProcessor =
+                            new ApplyFnEntryProcessor<>(tmpMaps[partitionId], updateFn);
+                    try {
+                        // block until we get a permit
+                        concurrentAsyncOpsSemaphore.acquire();
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+
+                    submitToKeys(map, tmpMaps[partitionId].keySet(), entryProcessor)
+                            .andThen(callbackOf(r -> concurrentAsyncOpsSemaphore.release(), t -> {
+                                firstError.compareAndSet(null, t);
+                                concurrentAsyncOpsSemaphore.release();
+                            }));
+                    tmpMaps[partitionId] = new HashMap<>();
+                }
+            } catch (HazelcastInstanceNotActiveException e) {
+                throw handleInstanceNotActive(e, isLocal);
+            }
+        }
+
+        public void finish() {
+            try {
+                // Acquire all initial permits. These won't be available until all async ops finish.
+                concurrentAsyncOpsSemaphore.acquire(MAX_PARALLEL_ASYNC_OPS);
+            } catch (InterruptedException ignored) {
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <K, V> ICompletableFuture<Map<K, V>> submitToKeys(
+            IMap<K, V> map, Set<Data> keys, EntryProcessor<K, V> entryProcessor) {
+        // TODO remove this method once submitToKeys is public API
+        // we force Set<Data> instead of Set<K> to avoid re-serialization of keys
+        // this relies on an implementation detail of submitToKeys method.
+        if (map instanceof MapProxyImpl) {
+            return ((MapProxyImpl) map).submitToKeys(keys, entryProcessor);
+        } else if (map instanceof ClientMapProxy) {
+            return ((ClientMapProxy) map).submitToKeys(keys, entryProcessor);
+        } else {
+            throw new RuntimeException("Unexpected map class: " + map.getClass().getName());
+        }
+    }
+
 
     @Nonnull
     @SuppressWarnings("unchecked")
     public static <T, K, V> ProcessorMetaSupplier updateMapSupplier(
             @Nonnull String name,
             @Nullable ClientConfig clientConfig,
-            @Nonnull DistributedFunction<T, K> toKeyFn,
-            @Nonnull DistributedFunction<T, EntryProcessor<K, V>> toEntryProcessorFn
+            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
+            @Nonnull DistributedFunction<? super T, ? extends EntryProcessor<K, V>> toEntryProcessorFn
     ) {
         checkSerializable(toKeyFn, "toKeyFn");
         checkSerializable(toEntryProcessorFn, "toEntryProcessorFn");
@@ -158,7 +274,7 @@ public final class HazelcastWriters {
         boolean isLocal = clientConfig == null;
         return preferLocalParallelismOne(new EntryProcessorWriterSupplier<>(
                         name,
-                        serializableConfig(clientConfig),
+                        asXmlString(clientConfig),
                         toKeyFn,
                         toEntryProcessorFn,
                         isLocal
@@ -166,14 +282,13 @@ public final class HazelcastWriters {
         );
     }
 
-
     @Nonnull
     @SuppressWarnings("unchecked")
     public static ProcessorMetaSupplier writeMapSupplier(@Nonnull String name, @Nullable ClientConfig clientConfig) {
         boolean isLocal = clientConfig == null;
         return preferLocalParallelismOne(new HazelcastWriterSupplier<>(
-                serializableConfig(clientConfig),
-                index -> new ArrayMap(),
+                asXmlString(clientConfig),
+                instance -> procContext -> new ArrayMap(),
                 ArrayMap::add,
                 instance -> {
                     IMap map = instance.getMap(name);
@@ -181,12 +296,12 @@ public final class HazelcastWriters {
                         try {
                             map.putAll(buffer);
                         } catch (HazelcastInstanceNotActiveException e) {
-                            handleInstanceNotActive(instance, e, isLocal);
+                            throw handleInstanceNotActive(e, isLocal);
                         }
                         buffer.clear();
                     };
                 },
-                noopConsumer()
+                DistributedConsumer.noop()
         ));
     }
 
@@ -194,11 +309,11 @@ public final class HazelcastWriters {
     public static ProcessorMetaSupplier writeCacheSupplier(@Nonnull String name, @Nullable ClientConfig clientConfig) {
         boolean isLocal = clientConfig == null;
         return preferLocalParallelismOne(new HazelcastWriterSupplier<>(
-                serializableConfig(clientConfig),
-                index -> new ArrayMap(),
+                asXmlString(clientConfig),
+                instance -> procContext -> new ArrayMap(),
                 ArrayMap::add,
                 CacheFlush.flushToCache(name, isLocal),
-                noopConsumer()
+                DistributedConsumer.noop()
         ));
     }
 
@@ -206,8 +321,8 @@ public final class HazelcastWriters {
     public static ProcessorMetaSupplier writeListSupplier(@Nonnull String name, @Nullable ClientConfig clientConfig) {
         boolean isLocal = clientConfig == null;
         return preferLocalParallelismOne(new HazelcastWriterSupplier<>(
-                serializableConfig(clientConfig),
-                index -> new ArrayList<>(),
+                asXmlString(clientConfig),
+                instance -> procContext -> new ArrayList<>(),
                 ArrayList::add,
                 instance -> {
                     IList<Object> list = instance.getList(name);
@@ -215,31 +330,18 @@ public final class HazelcastWriters {
                         try {
                             list.addAll(buffer);
                         } catch (HazelcastInstanceNotActiveException e) {
-                            handleInstanceNotActive(instance, e, isLocal);
+                            throw handleInstanceNotActive(e, isLocal);
                         }
                         buffer.clear();
                     };
                 },
-                noopConsumer()
+                DistributedConsumer.noop()
         ));
     }
 
-    private static void handleInstanceNotActive(
-            HazelcastInstance instance, HazelcastInstanceNotActiveException e, boolean isLocal
-    ) {
-        if (isLocal) {
-            // if we are writing to a local instance, we can safely ignore this exception
-            // as the job will eventually restart on its own.
-            instance.getLoggingService().getLogger(HazelcastWriters.class).fine(
-                    "Ignoring HazelcastInstanceNotActiveException from local cluster as the job will be" +
-                            " restarted automatically.", e);
-            return;
-        }
-        throw e;
-    }
-
-    private static SerializableClientConfig serializableConfig(ClientConfig clientConfig) {
-        return clientConfig != null ? new SerializableClientConfig(clientConfig) : null;
+    private static RuntimeException handleInstanceNotActive(HazelcastInstanceNotActiveException e, boolean isLocal) {
+        // if we are writing to a local instance, restarting the job should resolve the error
+        return isLocal ? new RestartableException(e) : e;
     }
 
     /**
@@ -248,6 +350,7 @@ public final class HazelcastWriters {
      */
     private static class CacheFlush {
 
+        @SuppressWarnings("unchecked")
         static DistributedFunction<HazelcastInstance, DistributedConsumer<ArrayMap>> flushToCache(
                 String name, boolean isLocal
         ) {
@@ -257,7 +360,7 @@ public final class HazelcastWriters {
                     try {
                         cache.putAll(buffer);
                     } catch (HazelcastInstanceNotActiveException e) {
-                        handleInstanceNotActive(instance, e, isLocal);
+                        throw handleInstanceNotActive(e, isLocal);
                     }
                     buffer.clear();
                 };
@@ -306,11 +409,11 @@ public final class HazelcastWriters {
         private static final int MAX_PARALLEL_ASYNC_OPS = 1000;
         private final AtomicInteger numConcurrentOps = new AtomicInteger();
 
-        private final IMap<K, V> map;
-        private final DistributedFunction<T, K> toKeyFn;
-        private final DistributedFunction<T, EntryProcessor<K, V>> toEntryProcessorFn;
+        private final boolean isLocal;
+        private final IMap<? super K, ? extends V> map;
+        private final DistributedFunction<? super T, ? extends K> toKeyFn;
+        private final DistributedFunction<? super T, ? extends EntryProcessor<K, V>> toEntryProcessorFn;
         private final AtomicReference<Throwable> lastError = new AtomicReference<>();
-        private final HazelcastInstance instance;
         private final ExecutionCallback callback = callbackOf(
                 response -> numConcurrentOps.decrementAndGet(),
                 exception -> {
@@ -319,14 +422,14 @@ public final class HazelcastWriters {
                         lastError.compareAndSet(null, exception);
                     }
                 });
-        private final boolean isLocal;
 
-
-        private EntryProcessorWriter(HazelcastInstance instance, String name,
-                                     DistributedFunction toKeyFn,
-                                     DistributedFunction<T, EntryProcessor<K, V>> toEntryProcessorFn,
-                                     boolean isLocal) {
-            this.instance = instance;
+        private EntryProcessorWriter(
+                @Nonnull HazelcastInstance instance,
+                @Nonnull String name,
+                @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
+                @Nonnull DistributedFunction<? super T, ? extends EntryProcessor<K, V>> toEntryProcessorFn,
+                boolean isLocal
+        ) {
             this.map = instance.getMap(name);
             this.toKeyFn = toKeyFn;
             this.toEntryProcessorFn = toEntryProcessorFn;
@@ -351,14 +454,14 @@ public final class HazelcastWriters {
                 return false;
             }
             try {
+                @SuppressWarnings("unchecked")
                 T item = (T) object;
                 EntryProcessor<K, V> entryProcessor = toEntryProcessorFn.apply(item);
                 K key = toKeyFn.apply(item);
                 map.submitToKey(key, entryProcessor, callback);
                 return true;
             } catch (HazelcastInstanceNotActiveException e) {
-                handleInstanceNotActive(instance, e, isLocal);
-                return false;
+                throw handleInstanceNotActive(e, isLocal);
             }
         }
 
@@ -391,29 +494,31 @@ public final class HazelcastWriters {
         static final long serialVersionUID = 1L;
 
         private final String name;
-        private final SerializableClientConfig clientConfig;
-        private final DistributedFunction<T, K> toKeyFn;
-        private final DistributedFunction<T, EntryProcessor<K, V>> toEntryProcessorFn;
+        private final String clientXml;
+        private final DistributedFunction<? super T, ? extends K> toKeyFn;
+        private final DistributedFunction<? super T, ? extends EntryProcessor<K, V>> toEntryProcessorFn;
         private final boolean isLocal;
         private transient HazelcastInstance client;
         private transient HazelcastInstance instance;
 
-        private EntryProcessorWriterSupplier(String name, SerializableClientConfig clientConfig,
-                                             DistributedFunction<T, K> toKeyFn,
-                                             DistributedFunction<T, EntryProcessor<K, V>> toEntryProcessorFn,
-                                             boolean isLocal) {
+        private EntryProcessorWriterSupplier(
+                @Nonnull String name,
+                @Nullable String clientXml,
+                @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
+                @Nonnull DistributedFunction<? super T, ? extends EntryProcessor<K, V>> toEntryProcessorFn,
+                boolean isLocal
+        ) {
             this.name = name;
-            this.clientConfig = clientConfig;
+            this.clientXml = clientXml;
             this.toKeyFn = toKeyFn;
             this.toEntryProcessorFn = toEntryProcessorFn;
             this.isLocal = isLocal;
         }
 
-
         @Override
         public void init(@Nonnull Context context) {
-            if (isRemote()) {
-                instance = client = newHazelcastClient(clientConfig.asClientConfig());
+            if (clientXml != null) {
+                instance = client = newHazelcastClient(asClientConfig(clientXml));
             } else {
                 instance = context.jetInstance().getHazelcastInstance();
             }
@@ -424,10 +529,6 @@ public final class HazelcastWriters {
             if (client != null) {
                 client.shutdown();
             }
-        }
-
-        private boolean isRemote() {
-            return clientConfig != null;
         }
 
         @Override @Nonnull
@@ -443,25 +544,27 @@ public final class HazelcastWriters {
 
         static final long serialVersionUID = 1L;
 
-        private final SerializableClientConfig clientConfig;
+        private final String clientXml;
         private final DistributedFunction<HazelcastInstance, DistributedConsumer<B>> instanceToFlushBufferFn;
-        private final DistributedFunction<Processor.Context, B> newBufferFn;
+        private final DistributedFunction<HazelcastInstance, DistributedFunction<Processor.Context, B>>
+                instanceToNewBufferFn;
         private final DistributedBiConsumer<B, T> addToBufferFn;
         private final DistributedConsumer<B> disposeBufferFn;
 
-        private transient DistributedConsumer<B> flushBuffer;
+        private transient DistributedFunction<Processor.Context, B> newBufferFn;
+        private transient DistributedConsumer<B> flushBufferFn;
         private transient HazelcastInstance client;
 
         HazelcastWriterSupplier(
-                SerializableClientConfig clientConfig,
-                DistributedFunction<Processor.Context, B> newBufferFn,
+                String clientXml,
+                DistributedFunction<HazelcastInstance, DistributedFunction<Processor.Context, B>> instanceToNewBufferFn,
                 DistributedBiConsumer<B, T> addToBufferFn,
                 DistributedFunction<HazelcastInstance, DistributedConsumer<B>> instanceToFlushBufferFn,
                 DistributedConsumer<B> disposeBufferFn
         ) {
-            this.clientConfig = clientConfig;
+            this.clientXml = clientXml;
             this.instanceToFlushBufferFn = instanceToFlushBufferFn;
-            this.newBufferFn = newBufferFn;
+            this.instanceToNewBufferFn = instanceToNewBufferFn;
             this.addToBufferFn = addToBufferFn;
             this.disposeBufferFn = disposeBufferFn;
         }
@@ -470,11 +573,12 @@ public final class HazelcastWriters {
         public void init(@Nonnull Context context) {
             HazelcastInstance instance;
             if (isRemote()) {
-                instance = client = newHazelcastClient(clientConfig.asClientConfig());
+                instance = client = newHazelcastClient(asClientConfig(clientXml));
             } else {
                 instance = context.jetInstance().getHazelcastInstance();
             }
-            flushBuffer = instanceToFlushBufferFn.apply(instance);
+            flushBufferFn = instanceToFlushBufferFn.apply(instance);
+            newBufferFn = instanceToNewBufferFn.apply(instance);
         }
 
         @Override
@@ -485,36 +589,63 @@ public final class HazelcastWriters {
         }
 
         private boolean isRemote() {
-            return clientConfig != null;
+            return clientXml != null;
         }
 
         @Override @Nonnull
         public List<Processor> get(int count) {
-            return Stream.generate(() -> new WriteBufferedP<>(newBufferFn, addToBufferFn, flushBuffer, disposeBufferFn))
+            return Stream.generate(() -> new WriteBufferedP<>(newBufferFn, addToBufferFn, flushBufferFn, disposeBufferFn))
                          .limit(count).collect(toList());
         }
     }
 
-    public static class ApplyFnEntryProcessor<K, V, T> implements EntryProcessor<K, V>, EntryBackupProcessor<K, V>,
-            IdentifiedDataSerializable {
-        private Map<K, T> keysToUpdate;
-        private DistributedBiFunction<V, T, V> updateFn;
+    @SuppressFBWarnings(value = {"SE_BAD_FIELD", "SE_NO_SERIALVERSIONID"},
+            justification = "the class is never java-serialized")
+    public static class ApplyFnEntryProcessor<K, V, T>
+            implements EntryProcessor<K, V>, EntryBackupProcessor<K, V>, IdentifiedDataSerializable,
+            SerializationServiceAware {
+        private Map<Data, Object> keysToUpdate;
+        private DistributedBiFunction<? super V, ? super T, ? extends V> updateFn;
+        private SerializationService serializationService;
 
         public ApplyFnEntryProcessor() {
         }
 
-        public ApplyFnEntryProcessor(Map<K, T> keysToUpdate, DistributedBiFunction<V, T, V> updateFn) {
+        ApplyFnEntryProcessor(
+                Map<Data, Object> keysToUpdate,
+                DistributedBiFunction<? super V, ? super T, ? extends V> updateFn
+        ) {
             this.keysToUpdate = keysToUpdate;
             this.updateFn = updateFn;
         }
 
         @Override
         public Object process(Entry<K, V> entry) {
+            // it should not matter that we don't take the PartitionStrategy here into account
+            Data keyData = serializationService.toData(entry.getKey());
+            Object item = keysToUpdate.get(keyData);
+            if (item == null && !keysToUpdate.containsKey(keyData)) {
+                // Implementing equals/hashCode is not required for IMap keys since serialized version is used
+                // instead. After serializing/deserializing the keys they will have different identity. And since they
+                // don't implement the methods, they key can't be found in the map.
+                throw new JetException("The new item not found in the map - is equals/hashCode " +
+                        "correctly implemented for the key? Key type: " + entry.getKey().getClass().getName());
+            }
+            if (item instanceof List) {
+                for (Data o : ((List<Data>) item)) {
+                    handle(entry, o);
+                }
+            } else {
+                handle(entry, (Data) item);
+            }
+            return null;
+        }
+
+        private void handle(Entry<K, V> entry, Data itemData) {
+            T item = serializationService.toObject(itemData);
             V oldValue = entry.getValue();
-            T item = keysToUpdate.get(entry.getKey());
             V newValue = updateFn.apply(oldValue, item);
             entry.setValue(newValue);
-            return null;
         }
 
         @Override
@@ -523,20 +654,57 @@ public final class HazelcastWriters {
         }
 
         @Override
+        public void processBackup(Entry<K, V> entry) {
+            process(entry);
+        }
+
+        @Override
+        public void setSerializationService(SerializationService serializationService) {
+            this.serializationService = serializationService;
+        }
+
+        @Override
         public void writeData(ObjectDataOutput out) throws IOException {
-            out.writeObject(keysToUpdate);
+            out.writeInt(keysToUpdate.size());
+            for (Entry<Data, Object> en : keysToUpdate.entrySet()) {
+                out.writeData(en.getKey());
+                Object value = en.getValue();
+                if (value instanceof Data) {
+                    out.writeInt(1);
+                    out.writeData((Data) value);
+                } else if (value instanceof List) {
+                    List<Data> list = (List<Data>) value;
+                    out.writeInt(list.size());
+                    for (Data data : list) {
+                        out.writeData(data);
+                    }
+                } else {
+                    assert false : "Unknown value type: " + value.getClass();
+                }
+            }
             out.writeObject(updateFn);
         }
 
         @Override
         public void readData(ObjectDataInput in) throws IOException {
-            keysToUpdate = in.readObject();
+            int keysToUpdateSize = in.readInt();
+            keysToUpdate = createHashMap(keysToUpdateSize);
+            for (int i = 0; i < keysToUpdateSize; i++) {
+                Data key = in.readData();
+                int size = in.readInt();
+                Object value;
+                if (size == 1) {
+                    value = in.readData();
+                } else {
+                    List<Data> list = new ArrayList<>(size);
+                    for (int j = 0; j < size; j++) {
+                        list.add(in.readData());
+                    }
+                    value = list;
+                }
+                keysToUpdate.put(key, value);
+            }
             updateFn = in.readObject();
-        }
-
-        @Override
-        public void processBackup(Entry<K, V> entry) {
-            process(entry);
         }
 
         @Override
@@ -548,6 +716,18 @@ public final class HazelcastWriters {
         public int getId() {
             return SerializationConstants.APPLY_FN_ENTRY_PROCESSOR;
         }
-    }
 
+        // used to group entries when more than one entry exists for the same key
+        public static Object append(Object value, Data item) {
+            List<Data> list;
+            if (value instanceof List) {
+                list = (List) value;
+            } else {
+                list = new ArrayList<>();
+                list.add((Data) value);
+            }
+            list.add(item);
+            return list;
+        }
+    }
 }

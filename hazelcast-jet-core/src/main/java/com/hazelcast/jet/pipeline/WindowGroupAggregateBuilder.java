@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,8 +33,12 @@ import static com.hazelcast.jet.aggregate.AggregateOperations.coAggregateOperati
  * Offers a step-by-step API to build a pipeline stage that performs a
  * windowed co-grouping and aggregation of the data from several input
  * stages. To obtain it, call {@link
- * StageWithGroupingAndWindow#aggregateBuilder()} on one of the stages to
+ * StageWithKeyAndWindow#aggregateBuilder()} on one of the stages to
  * co-aggregate and refer to that method's Javadoc for further details.
+ * <p>
+ * <strong>Note:</strong> this is not a builder of {@code
+ * AggregateOperation}. If that' s what you are looking for, go {@link
+ * AggregateOperation#withCreate here}.
  *
  * @param <K> type of the key
  * @param <R0> type of the aggregation result for stream-0
@@ -44,7 +48,7 @@ public class WindowGroupAggregateBuilder<K, R0> {
     private final CoAggregateOperationBuilder aggrOpBuilder = coAggregateOperationBuilder();
 
     <T0> WindowGroupAggregateBuilder(
-            @Nonnull StageWithGroupingAndWindow<T0, K> stage0,
+            @Nonnull StageWithKeyAndWindow<T0, K> stage0,
             @Nonnull AggregateOperation1<? super T0, ?, ? extends R0> aggrOp0
     ) {
         grAggBuilder = new GrAggBuilder<>(stage0);
@@ -70,7 +74,7 @@ public class WindowGroupAggregateBuilder<K, R0> {
      */
     @Nonnull
     public <T, R> Tag<R> add(
-            @Nonnull StreamStageWithGrouping<T, K> stage,
+            @Nonnull StreamStageWithKey<T, K> stage,
             @Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp
     ) {
         Tag<T> tag = grAggBuilder.add(stage);

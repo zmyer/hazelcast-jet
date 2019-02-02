@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,10 +33,6 @@ public class MockAsyncSnapshotWriter implements AsyncSnapshotWriter {
     private boolean isFlushed = true;
 
     @Override
-    public void setCurrentMap(String mapName) {
-    }
-
-    @Override
     public boolean offer(Entry<? extends Data, ? extends Data> entry) {
         if (!ableToOffer) {
             return false;
@@ -47,12 +43,16 @@ public class MockAsyncSnapshotWriter implements AsyncSnapshotWriter {
     }
 
     @Override
-    public boolean flush() {
+    public boolean flushAndResetMap() {
         if (ableToFlushRemaining) {
             hasPendingFlushes = !isFlushed;
             isFlushed = true;
         }
         return ableToFlushRemaining;
+    }
+
+    @Override
+    public void resetStats() {
     }
 
     @Override

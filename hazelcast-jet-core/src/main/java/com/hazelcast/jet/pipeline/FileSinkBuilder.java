@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ public final class FileSinkBuilder<T> {
 
     private final String directoryName;
 
-    private DistributedFunction<T, String> toStringFn = Object::toString;
+    private DistributedFunction<? super T, String> toStringFn = Object::toString;
     private Charset charset = StandardCharsets.UTF_8;
     private boolean append;
 
@@ -49,7 +49,7 @@ public final class FileSinkBuilder<T> {
      * Each item is followed with a platform-specific line separator. Default
      * value is {@link Object#toString}.
      */
-    public FileSinkBuilder<T> toStringFn(@Nonnull DistributedFunction<T, String> toStringFn) {
+    public FileSinkBuilder<T> toStringFn(@Nonnull DistributedFunction<? super T, String> toStringFn) {
         this.toStringFn = toStringFn;
         return this;
     }

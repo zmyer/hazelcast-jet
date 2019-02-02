@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ package com.hazelcast.jet.pipeline;
 import javax.annotation.Nonnull;
 
 /**
- * Represents an infinite source of data for a Jet pipeline. To aggregate
- * the data from an infinite source, you must specify how to {@link
+ * An infinite source of data for a Jet pipeline. To aggregate the data
+ * from an infinite source, you must specify how to {@link
  * StreamStage#window window} it into finite subsets over which Jet will
  * perform the aggregation.
  *
@@ -34,4 +34,10 @@ public interface StreamSource<T> {
      */
     @Nonnull
     String name();
+
+    /**
+     * Returns true if this source supports {@linkplain
+     * StreamSourceStage#withNativeTimestamps(long) native timestamps}.
+     */
+    boolean supportsNativeTimestamps();
 }

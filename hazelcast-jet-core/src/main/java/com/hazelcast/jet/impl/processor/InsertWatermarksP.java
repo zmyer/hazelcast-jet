@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ package com.hazelcast.jet.impl.processor;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.BroadcastKey;
-import com.hazelcast.jet.core.WatermarkGenerationParams;
-import com.hazelcast.jet.core.WatermarkSourceUtil;
+import com.hazelcast.jet.core.EventTimeMapper;
+import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.processor.Processors;
 
 import javax.annotation.Nonnull;
@@ -36,15 +36,15 @@ import static com.hazelcast.jet.impl.util.LoggingUtil.logFine;
  */
 public class InsertWatermarksP<T> extends AbstractProcessor {
 
-    private final WatermarkSourceUtil<T> wsu;
+    private final EventTimeMapper<? super T> eventTimeMapper;
     private Traverser<Object> traverser;
 
     // value to be used temporarily during snapshot restore
     private long minRestoredWm = Long.MAX_VALUE;
 
-    public InsertWatermarksP(WatermarkGenerationParams<T> wmGenParams) {
-        wsu = new WatermarkSourceUtil<>(wmGenParams);
-        wsu.increasePartitionCount(1);
+    public InsertWatermarksP(EventTimePolicy<? super T> eventTimePolicy) {
+        eventTimeMapper = new EventTimeMapper<>(eventTimePolicy);
+        eventTimeMapper.increasePartitionCount(1);
     }
 
     @Override
@@ -57,9 +57,10 @@ public class InsertWatermarksP<T> extends AbstractProcessor {
         return tryProcessInternal(item);
     }
 
+    @SuppressWarnings("unchecked")
     private boolean tryProcessInternal(@Nullable Object item) {
         if (traverser == null) {
-            traverser = wsu.handleEvent((T) item, 0);
+            traverser = eventTimeMapper.flatMapEvent((T) item, 0, EventTimeMapper.NO_NATIVE_TIME);
         }
         if (emitFromTraverser(traverser)) {
             traverser = null;
@@ -70,7 +71,7 @@ public class InsertWatermarksP<T> extends AbstractProcessor {
 
     @Override
     public boolean saveToSnapshot() {
-        return tryEmitToSnapshot(broadcastKey(Keys.LAST_EMITTED_WM), wsu.getWatermark(0));
+        return tryEmitToSnapshot(broadcastKey(Keys.LAST_EMITTED_WM), eventTimeMapper.getWatermark(0));
     }
 
     @Override
@@ -82,7 +83,7 @@ public class InsertWatermarksP<T> extends AbstractProcessor {
 
     @Override
     public boolean finishSnapshotRestore() {
-        wsu.restoreWatermark(0, minRestoredWm);
+        eventTimeMapper.restoreWatermark(0, minRestoredWm);
         logFine(getLogger(), "restored lastEmittedWm=%s", minRestoredWm);
         return true;
     }

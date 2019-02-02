@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,15 @@ import com.hazelcast.jet.function.DistributedFunction;
 import javax.annotation.Nonnull;
 
 /**
- * Specialization of {@link AggregateOperation} to the "arity-3" case with
- * three data streams being aggregated over. This example constructs an operation
- * that sums up {@code long} values from three streams:
- *
+ * Specialization of {@code AggregateOperation} (refer to its {@linkplain
+ * AggregateOperation extensive documentation}) to the "arity-3" case with
+ * three data streams being aggregated over. {@link AggregateOperations}
+ * contains factories for the built-in implementations and you can create
+ * your own using the {@linkplain AggregateOperation#withCreate aggregate
+ * operation builder}.
+ * <p>
+ * This example constructs an operation that sums up {@code long} values
+ * from three streams:
  * <pre>{@code
  * AggregateOperation3<Long, Long, Long, LongAccumulator, Long> aggrOp = AggregateOperation
  *     .withCreate(LongAccumulator::new)
@@ -91,9 +96,11 @@ public interface AggregateOperation3<T0, T1, T2, A, R> extends AggregateOperatio
             @Nonnull DistributedBiConsumer<? super A, ? super T2_NEW> newAccFn2
     );
 
-    // Override with a narrowed return type
+    // Narrows the return type
     @Nonnull @Override
-    <R1> AggregateOperation3<T0, T1, T2, A, R1> withFinishFn(
-            @Nonnull DistributedFunction<? super A, R1> finishFn
-    );
+    AggregateOperation3<T0, T1, T2, A, A> withIdentityFinish();
+
+    // Narrows the return type
+    @Nonnull @Override
+    <R_NEW> AggregateOperation3<T0, T1, T2, A, R_NEW> andThen(DistributedFunction<? super R, ? extends R_NEW> thenFn);
 }

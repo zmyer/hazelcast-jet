@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -83,6 +83,11 @@ public final class ReadHdfsP<K, V, R> extends AbstractProcessor {
     }
 
     @Override
+    public boolean isCooperative() {
+        return false;
+    }
+
+    @Override
     public boolean complete() {
         return emitFromTraverser(trav);
     }
@@ -104,11 +109,6 @@ public final class ReadHdfsP<K, V, R> extends AbstractProcessor {
                 throw sneakyThrow(e);
             }
         };
-    }
-
-    @Override
-    public boolean isCooperative() {
-        return false;
     }
 
     public static class MetaSupplier<K, V, R> implements ProcessorMetaSupplier {
@@ -133,22 +133,18 @@ public final class ReadHdfsP<K, V, R> extends AbstractProcessor {
         }
 
         @Override
-        public void init(@Nonnull Context context) {
+        public void init(@Nonnull Context context) throws Exception {
             logger = context.jetInstance().getHazelcastInstance().getLoggingService().getLogger(ReadHdfsP.class);
-            try {
-                int totalParallelism = context.totalParallelism();
-                InputFormat inputFormat = jobConf.getInputFormat();
-                InputSplit[] splits = inputFormat.getSplits(jobConf, totalParallelism);
-                IndexedInputSplit[] indexedInputSplits = new IndexedInputSplit[splits.length];
-                Arrays.setAll(indexedInputSplits, i -> new IndexedInputSplit(i, splits[i]));
+            int totalParallelism = context.totalParallelism();
+            InputFormat inputFormat = jobConf.getInputFormat();
+            InputSplit[] splits = inputFormat.getSplits(jobConf, totalParallelism);
+            IndexedInputSplit[] indexedInputSplits = new IndexedInputSplit[splits.length];
+            Arrays.setAll(indexedInputSplits, i -> new IndexedInputSplit(i, splits[i]));
 
-                Address[] addrs = context.jetInstance().getCluster().getMembers()
-                        .stream().map(Member::getAddress).toArray(Address[]::new);
-                assigned = assignSplitsToMembers(indexedInputSplits, addrs);
-                printAssignments(assigned);
-            } catch (IOException e) {
-                throw rethrow(e);
-            }
+            Address[] addrs = context.jetInstance().getCluster().getMembers()
+                    .stream().map(Member::getAddress).toArray(Address[]::new);
+            assigned = assignSplitsToMembers(indexedInputSplits, addrs);
+            printAssignments(assigned);
         }
 
 

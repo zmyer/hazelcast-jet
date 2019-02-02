@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,15 +57,14 @@ public class JobConfigTest {
     }
 
     @Test
-    public void when_enableAutoRestartOnMember_thenReturnsEnabled() {
+    public void when_enableAutoScaling_thenReturnsEnabled() {
         // When
         JobConfig config = new JobConfig();
-        config.setAutoRestartOnMemberFailure(true);
+        config.setAutoScaling(true);
 
         // Then
-        assertTrue(config.isAutoRestartOnMemberFailureEnabled());
+        assertTrue(config.isAutoScaling());
     }
-
 
     @Test
     public void when_setProcessingGuarantee_thenReturnsProcessingGuarantee() {
@@ -75,16 +74,6 @@ public class JobConfigTest {
 
         // Then
         assertEquals(EXACTLY_ONCE, config.getProcessingGuarantee());
-    }
-
-    @Test
-    public void when_setMaxWatermarkRetainMillis_thenReturnsMaxWatermarkRetainMillis() {
-        // When
-        JobConfig config = new JobConfig();
-        config.setMaxWatermarkRetainMillis(500);
-
-        // Then
-        assertEquals(500, config.getMaxWatermarkRetainMillis());
     }
 
     @Test
@@ -226,7 +215,7 @@ public class JobConfigTest {
         assertEquals("my.txt", resourceConfig.getId());
     }
 
-    public ResourceConfig assertAndGet(JobConfig config) {
+    private ResourceConfig assertAndGet(JobConfig config) {
         List<ResourceConfig> resourceConfigs = config.getResourceConfigs();
         assertNotNull(resourceConfigs);
         assertEquals(1, resourceConfigs.size());

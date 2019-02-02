@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 package com.hazelcast.jet.core;
 
 import com.hazelcast.core.IMap;
-import com.hazelcast.jet.IMapJet;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.Traverser;
@@ -26,23 +25,18 @@ import com.hazelcast.jet.accumulator.LongAccumulator;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
-import com.hazelcast.jet.config.ProcessingGuarantee;
+import com.hazelcast.jet.core.TestProcessors.DummyStatefulP;
 import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.core.processor.SinkProcessors;
-import com.hazelcast.jet.core.test.TestProcessorMetaSupplierContext;
-import com.hazelcast.jet.core.test.TestSupport;
 import com.hazelcast.jet.datamodel.TimestampedEntry;
+import com.hazelcast.jet.datamodel.Tuple3;
 import com.hazelcast.jet.function.DistributedFunction;
+import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.jet.impl.JobExecutionRecord;
 import com.hazelcast.jet.impl.JobRepository;
-import com.hazelcast.jet.impl.SnapshotRepository;
-import com.hazelcast.jet.impl.execution.ExecutionContext;
-import com.hazelcast.jet.impl.execution.SnapshotContext;
-import com.hazelcast.jet.impl.execution.SnapshotRecord;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
-import com.hazelcast.nio.Address;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -51,41 +45,42 @@ import org.junit.runner.RunWith;
 import javax.annotation.Nonnull;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.Iterator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.aggregate.AggregateOperations.counting;
+import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
 import static com.hazelcast.jet.core.BroadcastKey.broadcastKey;
 import static com.hazelcast.jet.core.Edge.between;
+import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
 import static com.hazelcast.jet.core.TestUtil.throttle;
-import static com.hazelcast.jet.core.WatermarkEmissionPolicy.emitByFrame;
-import static com.hazelcast.jet.core.WatermarkGenerationParams.wmGenParams;
-import static com.hazelcast.jet.core.WatermarkPolicies.limitingLag;
+import static com.hazelcast.jet.core.WatermarkPolicy.limitingLag;
 import static com.hazelcast.jet.core.processor.Processors.combineToSlidingWindowP;
 import static com.hazelcast.jet.core.processor.Processors.insertWatermarksP;
 import static com.hazelcast.jet.core.processor.Processors.mapP;
-import static com.hazelcast.jet.core.processor.Processors.noopP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeListP;
-import static com.hazelcast.jet.function.DistributedFunction.identity;
+import static com.hazelcast.jet.datamodel.Tuple3.tuple3;
 import static com.hazelcast.jet.function.DistributedFunctions.entryKey;
+import static com.hazelcast.jet.impl.JobRepository.snapshotDataMapName;
 import static com.hazelcast.jet.impl.util.Util.arrayIndexOf;
 import static com.hazelcast.test.PacketFiltersUtil.delayOperationsFrom;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
-import static java.util.Comparator.comparing;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.stream.Collectors.joining;
-import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 @RunWith(HazelcastSerialClassRunner.class)
 public class JobRestartWithSnapshotTest extends JetTestSupport {
@@ -117,25 +112,30 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
         when_nodeDown_then_jobRestartsFromSnapshot(true);
     }
 
-    public void when_nodeDown_then_jobRestartsFromSnapshot(boolean twoStage) throws Exception {
+    private void when_nodeDown_then_jobRestartsFromSnapshot(boolean twoStage) throws Exception {
         /* Design of this test:
 
-        It uses random partitioned generator of source events. The events are Map.Entry(partitionId, timestamp).
-        For each partition timestamps from 0..elementsInPartition are generated.
+        It uses a random partitioned generator of source events. The events are
+        Map.Entry(partitionId, timestamp). For each partition timestamps from
+        0..elementsInPartition are generated.
 
-        We start the test with two nodes and localParallelism(1) for source. Source instances generate items at
-        the same rate of 10 per second: this causes one instance to be twice as fast as the other in terms of
-        timestamp. The source processor saves partition offsets similarly to how streamKafka() and streamMap()
-        do.
+        We start the test with two nodes and localParallelism(1) and 3 partitions
+        for source. Source instances generate items at the same rate of 10 per
+        second: this causes one instance to be twice as fast as the other in terms of
+        timestamp. The source processor saves partition offsets similarly to how
+        KafkaSources.kafka() and Sources.mapJournal() do.
 
-        After some time we shut down one instance. The job restarts from snapshot and all partitions are restored
-        to single source processor instance. Partition offsets are very different, so the source is written in a way
-        that it emits from the most-behind partition in order to not emit late events from more ahead partitions.
+        After some time we shut down one instance. The job restarts from the
+        snapshot and all partitions are restored to single source processor
+        instance. Partition offsets are very different, so the source is written
+        in a way that it emits from the most-behind partition in order to not
+        emit late events from more ahead partitions.
 
-        Local parallelism of InsertWatermarkP is also 1 to avoid the edge case when different instances of
-        InsertWatermarkP might initialize with first event in different frame and make them start the no-gap
-        emission from different WM, which might cause the SlidingWindowP downstream to miss some of the
-        first windows.
+        Local parallelism of InsertWatermarkP is also 1 to avoid the edge case
+        when different instances of InsertWatermarkP might initialize with first
+        event in different frame and make them start the no-gap emission from
+        different WM, which might cause the SlidingWindowP downstream to miss
+        some of the first windows.
 
         The sink writes to an IMap which is an idempotent sink.
 
@@ -150,11 +150,14 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
         IMap<List<Long>, Long> result = instance1.getMap("result");
         result.clear();
 
-        SequencesInPartitionsMetaSupplier sup = new SequencesInPartitionsMetaSupplier(3, 200, true);
+        int numPartitions = 3;
+        int elementsInPartition = 250;
+        DistributedSupplier<Processor> sup = () ->
+                new SequencesInPartitionsGeneratorP(numPartitions, elementsInPartition, true);
         Vertex generator = dag.newVertex("generator", throttle(sup, 30))
                               .localParallelism(1);
-        Vertex insWm = dag.newVertex("insWm", insertWatermarksP(wmGenParams(
-                entry -> ((Entry<Integer, Integer>) entry).getValue(), limitingLag(0), emitByFrame(wDef), -1)))
+        Vertex insWm = dag.newVertex("insWm", insertWatermarksP(eventTimePolicy(
+                o -> ((Entry<Integer, Integer>) o).getValue(), limitingLag(0), wDef.frameSize(), wDef.frameOffset(), -1)))
                           .localParallelism(1);
         Vertex map = dag.newVertex("map",
                 mapP((TimestampedEntry e) -> entry(asList(e.getTimestamp(), (long) (int) e.getKey()), e.getValue())));
@@ -166,7 +169,7 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
                     singletonList(t1 -> ((Entry<Integer, Integer>) t1).getValue()),
                     TimestampKind.EVENT,
                     wDef,
-                    aggrOp.withFinishFn(identity())
+                    aggrOp.withIdentityFinish()
             ));
             Vertex aggregateStage2 = dag.newVertex("aggregateStage2",
                     combineToSlidingWindowP(wDef, aggrOp, TimestampedEntry::fromWindowResult));
@@ -196,35 +199,33 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
            .edge(between(map, writeMap));
 
         JobConfig config = new JobConfig();
-        config.setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE);
+        config.setProcessingGuarantee(EXACTLY_ONCE);
         config.setSnapshotIntervalMillis(1200);
         Job job = instance1.newJob(dag, config);
 
-        SnapshotRepository snapshotRepository = new SnapshotRepository(instance1);
+        JobRepository jobRepository = new JobRepository(instance1);
         int timeout = (int) (MILLISECONDS.toSeconds(config.getSnapshotIntervalMillis()) + 2);
 
-        // wait until we have at least one snapshot
-        IMapJet<Long, Object> snapshotsMap = snapshotRepository.getSnapshotMap(job.getId());
-
-        waitForFirstSnapshot(snapshotsMap, timeout);
-        waitForNextSnapshot(snapshotsMap, timeout);
+        waitForFirstSnapshot(jobRepository, job.getId(), timeout);
+        waitForNextSnapshot(jobRepository, job.getId(), timeout);
         // wait a little more to emit something, so that it will be overwritten in the sink map
         Thread.sleep(300);
 
-        instance2.shutdown();
+        instance2.getHazelcastInstance().getLifecycleService().terminate();
 
         // Now the job should detect member shutdown and restart from snapshot.
         // Let's wait until the next snapshot appears.
-        waitForNextSnapshot(snapshotsMap, (int) (MILLISECONDS.toSeconds(config.getSnapshotIntervalMillis()) + 10));
-        waitForNextSnapshot(snapshotsMap, timeout);
+        waitForNextSnapshot(jobRepository, job.getId(),
+                (int) (MILLISECONDS.toSeconds(config.getSnapshotIntervalMillis()) + 10));
+        waitForNextSnapshot(jobRepository, job.getId(), timeout);
 
         job.join();
 
         // compute expected result
         Map<List<Long>, Long> expectedMap = new HashMap<>();
-        for (long partition = 0; partition < sup.numPartitions; partition++) {
+        for (long partition = 0; partition < numPartitions; partition++) {
             long cnt = 0;
-            for (long value = 1; value <= sup.elementsInPartition; value++) {
+            for (long value = 1; value <= elementsInPartition; value++) {
                 cnt++;
                 if (value % wDef.frameSize() == 0) {
                     expectedMap.put(asList(value, partition), cnt);
@@ -232,7 +233,7 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
                 }
             }
             if (cnt > 0) {
-                expectedMap.put(asList(wDef.higherFrameTs(sup.elementsInPartition - 1), partition), cnt);
+                expectedMap.put(asList(wDef.higherFrameTs(elementsInPartition - 1), partition), cnt);
             }
         }
 
@@ -264,44 +265,10 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
             assertEquals(expectedMap, new HashMap<>(result));
         }
 
-        assertTrue("Snapshots map not empty after job finished", snapshotsMap.isEmpty());
-    }
-
-    @Test
-    public void when_snapshotDoneBeforeStarted_then_snapshotSuccessful() {
-        /*
-        Design of this test
-
-        The DAG is "source -> sink". Source completes immediately on  non-coordinator (worker)
-        and is infinite on coordinator. Edge between source and sink is distributed. This
-        situation will cause that after the source completes on member, the sink on worker
-        will only have the remote source. This will allow that we can receive the barrier
-        from remote coordinator before worker even starts the snapshot. This is the very
-        purpose of this test. To ensure that this happens, we postpone handling of SnapshotOperation
-        on the worker.
-        */
-
-        // instance1 is always coordinator
-        delayOperationsFrom(
-                hz(instance1),
-                JetInitDataSerializerHook.FACTORY_ID,
-                singletonList(JetInitDataSerializerHook.SNAPSHOT_OPERATION)
-        );
-
-        DAG dag = new DAG();
-        Vertex source = dag.newVertex("source", new NonBalancedSource(getAddress(instance2).toString()));
-        Vertex sink = dag.newVertex("sink", writeListP("sink"));
-        dag.edge(between(source, sink).distributed());
-
-        JobConfig config = new JobConfig();
-        config.setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE);
-        config.setSnapshotIntervalMillis(500);
-        Job job = instance1.newJob(dag, config);
-
-        assertTrueEventually(() -> assertNotNull(getSnapshotContext(job)));
-        SnapshotContext ssContext = getSnapshotContext(job);
-        assertTrueEventually(() -> assertTrue("numRemainingTasklets was not negative, the tested scenario did not happen",
-                ssContext.getNumRemainingTasklets().get() < 0), 3);
+        for (int i = 0; i <= 1; i++) {
+            assertTrue("Snapshots map " + i + " not empty after job finished",
+                    instance1.getMap(snapshotDataMapName(job.getId(), i)).isEmpty());
+        }
     }
 
     @Test
@@ -316,160 +283,159 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
         dag.newVertex("p", FirstSnapshotProcessor::new).localParallelism(1);
 
         JobConfig config = new JobConfig();
-        config.setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE);
+        config.setProcessingGuarantee(EXACTLY_ONCE);
         config.setSnapshotIntervalMillis(0);
         Job job = instance1.newJob(dag, config);
+        JobRepository repository = new JobRepository(instance1);
 
         // the first snapshot should succeed
         assertTrueEventually(() -> {
-            IMapJet<Long, SnapshotRecord> records = getSnapshotsMap(job);
-            SnapshotRecord record = records.get(0L);
-            assertNotNull("no record found for snapshot 0", record);
-            assertTrue("snapshot was not successful", record.isSuccessful());
+            JobExecutionRecord record = repository.getJobExecutionRecord(job.getId());
+            assertNotNull("null JobRecord", record);
+            assertEquals(0, record.snapshotId());
         }, 30);
     }
 
-    private IMapJet<Long, SnapshotRecord> getSnapshotsMap(Job job) {
-        SnapshotRepository snapshotRepository = new SnapshotRepository(instance1);
-        return snapshotRepository.getSnapshotMap(job.getId());
-    }
-
-    private SnapshotContext getSnapshotContext(Job job) {
-        IMapJet<Long, Long> randomIdsMap = instance1.getMap(JobRepository.RANDOM_IDS_MAP_NAME);
-        long executionId = randomIdsMap.entrySet().stream()
-                                       .filter(e -> e.getValue().equals(job.getId())
-                                               && !e.getValue().equals(e.getKey()))
-                                       .mapToLong(Entry::getKey)
-                                       .findAny()
-                                       .orElseThrow(() -> new AssertionError("ExecutionId not found"));
-        ExecutionContext executionContext = null;
-        // spin until the executionContext is available on the worker
-        while (executionContext == null) {
-            executionContext = getJetService(instance2).getJobExecutionService().getExecutionContext(executionId);
-        }
-        return executionContext.snapshotContext();
-    }
-
-    private void waitForFirstSnapshot(IMapJet<Long, Object> snapshotsMap, int timeout) {
-        assertTrueEventually(() -> assertTrue("No snapshot produced",
-                snapshotsMap.entrySet().stream()
-                            .anyMatch(en -> en.getValue() instanceof SnapshotRecord
-                                    && ((SnapshotRecord) en.getValue()).isSuccessful())), timeout);
-    }
-
-    private void waitForNextSnapshot(IMapJet<Long, Object> snapshotsMap, int timeoutSeconds) {
-        SnapshotRecord maxRecord = findMaxRecord(snapshotsMap);
-        assertNotNull("no snapshot found", maxRecord);
-        // wait until there is at least one more snapshot
+    private void waitForFirstSnapshot(JobRepository jr, long jobId, int timeout) {
+        long[] snapshotId = {-1};
         assertTrueEventually(() -> {
-            SnapshotRecord currentMaxRecord = findMaxRecord(snapshotsMap);
-            assertNotNull("No snapshot record found - job likely finished", currentMaxRecord);
-            assertTrue("No more snapshots produced after restart",
-                    currentMaxRecord.snapshotId() > maxRecord.snapshotId());
+            JobExecutionRecord record = jr.getJobExecutionRecord(jobId);
+            assertNotNull("null JobExecutionRecord", record);
+            assertTrue("No snapshot produced",
+                    record.dataMapIndex() >= 0 && record.snapshotId() >= 0);
+            assertTrue("stats are 0", record.snapshotStats().numBytes() > 0);
+            snapshotId[0] = record.snapshotId();
+        }, timeout);
+        logger.info("First snapshot found (id=" + snapshotId[0] + ")");
+    }
+
+    private void waitForNextSnapshot(JobRepository jr, long jobId, int timeoutSeconds) {
+        long originalSnapshotId = jr.getJobExecutionRecord(jobId).snapshotId();
+        // wait until there is at least one more snapshot
+        long[] snapshotId = {-1};
+        assertTrueEventually(() -> {
+            JobExecutionRecord record = jr.getJobExecutionRecord(jobId);
+            assertNotNull("jobExecutionRecord is null", record);
+            snapshotId[0] = record.snapshotId();
+            assertTrue("No more snapshots produced after restart in " + timeoutSeconds + " seconds",
+                    snapshotId[0] > originalSnapshotId);
+            assertTrue("stats are 0", record.snapshotStats().numBytes() > 0);
         }, timeoutSeconds);
-    }
-
-    private SnapshotRecord findMaxRecord(IMapJet<Long, Object> snapshotsMap) {
-        return snapshotsMap.entrySet().stream()
-                           .filter(en -> en.getValue() instanceof SnapshotRecord)
-                           .map(en -> (SnapshotRecord) en.getValue())
-                           .filter(SnapshotRecord::isSuccessful)
-                           .max(comparing(SnapshotRecord::snapshotId))
-                           .orElse(null);
+        logger.info("Next snapshot found (id=" + snapshotId[0] + ", previous id=" + originalSnapshotId + ")");
     }
 
     @Test
-    @Ignore("This is a \"test of a test\" - it checks, that SequencesInPartitionsGeneratorP generates correct output")
-    public void test_SequencesInPartitionsGeneratorP() throws Exception {
-        SequencesInPartitionsMetaSupplier pms = new SequencesInPartitionsMetaSupplier(3, 2, true);
-        pms.init(new TestProcessorMetaSupplierContext().setLocalParallelism(1).setTotalParallelism(2));
-        Address a1 = new Address("127.0.0.1", 0);
-        Address a2 = new Address("127.0.0.2", 0);
-        Function<Address, ProcessorSupplier> supplierFunction = pms.get(asList(a1, a2));
-        Iterator<? extends Processor> processors1 = supplierFunction.apply(a1).get(1).iterator();
-        Processor p1 = processors1.next();
-        assertFalse(processors1.hasNext());
-        Iterator<? extends Processor> processors2 = supplierFunction.apply(a2).get(1).iterator();
-        Processor p2 = processors2.next();
-        assertFalse(processors2.hasNext());
+    public void when_jobRestartedGracefully_then_noOutputDuplicated() {
+        DAG dag = new DAG();
+        int elementsInPartition = 100;
+        DistributedSupplier<Processor> sup = () ->
+                new SequencesInPartitionsGeneratorP(3, elementsInPartition, true);
+        Vertex generator = dag.newVertex("generator", throttle(sup, 30))
+                              .localParallelism(1);
+        Vertex sink = dag.newVertex("sink", writeListP("sink"));
+        dag.edge(between(generator, sink));
 
-        TestSupport.verifyProcessor(p1).expectOutput(asList(
-                entry(0, 0),
-                entry(2, 0),
-                entry(0, 1),
-                entry(2, 1)
-        ));
+        JobConfig config = new JobConfig();
+        config.setProcessingGuarantee(EXACTLY_ONCE);
+        config.setSnapshotIntervalMillis(3600_000); // set long interval so that the first snapshot does not execute
+        Job job = instance1.newJob(dag, config);
 
-        TestSupport.verifyProcessor(p2).expectOutput(asList(
-                entry(1, 0),
-                entry(1, 1)
-        ));
+        // wait for the job to start producing output
+        List<Entry<Integer, Integer>> sinkList = instance1.getList("sink");
+        assertTrueEventually(() -> assertTrue(sinkList.size() > 10));
+
+        // When
+        job.restart();
+        job.join();
+
+        // Then
+        Set<Entry<Integer, Integer>> expected = IntStream.range(0, elementsInPartition)
+                 .boxed()
+                 .flatMap(i -> IntStream.range(0, 3).mapToObj(p -> entry(p, i)))
+                 .collect(Collectors.toSet());
+        assertEquals(expected, new HashSet<>(sinkList));
     }
 
     @Test
-    public void stressTest() throws Exception {
-        SnapshotRepository snapshotRepository = new SnapshotRepository(instance1);
+    public void stressTest_restart() throws Exception {
+        stressTest(tuple -> {
+            logger.info("restarting");
+            tuple.f2().restart();
+            logger.info("restarted");
+            // Sleep a little in order to not observe the RUNNING status from the execution
+            // before the restart.
+            LockSupport.parkNanos(MILLISECONDS.toNanos(500));
+            assertJobStatusEventually(tuple.f2(), JobStatus.RUNNING);
+            return tuple.f2();
+        });
+    }
+
+    @Test
+    public void stressTest_suspendAndResume() throws Exception {
+        stressTest(tuple -> {
+            logger.info("Suspending the job...");
+            tuple.f2().suspend();
+            logger.info("suspend() returned");
+            assertJobStatusEventually(tuple.f2(), JobStatus.SUSPENDED, 15);
+            // The Job.resume() call might overtake the suspension.
+            // resume() does nothing when job is not suspended. Without
+            // the sleep, the job might remain suspended.
+            sleepSeconds(1);
+            logger.info("Resuming the job...");
+            tuple.f2().resume();
+            logger.info("resume() returned");
+            assertJobStatusEventually(tuple.f2(), JobStatus.RUNNING, 15);
+            return tuple.f2();
+        });
+    }
+
+    @Test
+    public void stressTest_cancelWithSnapshotAndResubmit() throws Exception {
+        stressTest(tuple -> {
+            logger.info("Cancelling the job with snapshot...");
+            tuple.f2().cancelAndExportSnapshot("state");
+            logger.info("cancel() returned");
+            assertJobStatusEventually(tuple.f2(), JobStatus.FAILED, 15);
+            logger.info("Resubmitting the job...");
+            Job newJob = tuple.f0().newJob(tuple.f1(),
+                    new JobConfig()
+                            .setInitialSnapshotName("state")
+                            .setProcessingGuarantee(EXACTLY_ONCE)
+                            .setSnapshotIntervalMillis(10));
+            logger.info("newJob() returned");
+            assertJobStatusEventually(newJob, JobStatus.RUNNING, 15);
+            return newJob;
+        });
+    }
+
+    private void stressTest(Function<Tuple3<JetInstance, DAG, Job>, Job> action) throws Exception {
+        JobRepository jobRepository = new JobRepository(instance1);
+        TestProcessors.reset(2);
 
         DAG dag = new DAG();
-        dag.newVertex("generator", SnapshotStressSourceP::new)
+        dag.newVertex("generator", DummyStatefulP::new)
            .localParallelism(1);
 
-        Job job = instance1.newJob(dag,
+        Job[] job = {instance1.newJob(dag,
                 new JobConfig().setSnapshotIntervalMillis(10)
-                               .setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE));
+                               .setProcessingGuarantee(EXACTLY_ONCE))};
 
-        IMapJet<Long, Object> snapshotsMap = snapshotRepository.getSnapshotMap(job.getId());
-        waitForFirstSnapshot(snapshotsMap, 5);
+        logger.info("waiting for 1st snapshot");
+        waitForFirstSnapshot(jobRepository, job[0].getId(), 5);
+        logger.info("first snapshot found");
         spawn(() -> {
             for (int i = 0; i < 10; i++) {
-                job.restart();
-                waitForFirstSnapshot(snapshotsMap, 3);
-                waitForNextSnapshot(snapshotsMap, 5);
-                Thread.sleep(500);
+                job[0] = action.apply(tuple3(instance1, dag, job[0]));
+                waitForNextSnapshot(jobRepository, job[0].getId(), 5);
             }
             return null;
         }).get();
 
-        job.cancel();
+        job[0].cancel();
         try {
-            job.join();
+            job[0].join();
+            fail("CancellationException was expected");
         } catch (CancellationException expected) {
-        }
-    }
-
-    private static class SnapshotStressSourceP extends AbstractProcessor {
-        private static final int ITEMS_TO_SAVE = 100;
-
-        private Traverser<Map.Entry<BroadcastKey, Integer>> traverser;
-        private int numRestored;
-
-        @Override
-        public boolean complete() {
-            traverser = null;
-            return false;
-        }
-
-        @Override
-        public boolean saveToSnapshot() {
-            if (traverser == null) {
-                traverser = Traversers
-                        .traverseStream(IntStream.range(0, ITEMS_TO_SAVE)
-                                                 .mapToObj(i -> entry(broadcastKey(i), i)));
-            }
-            return emitFromTraverserToSnapshot(traverser);
-        }
-
-        @Override
-        protected void restoreFromSnapshot(@Nonnull Object key, @Nonnull Object value) {
-            numRestored++;
-        }
-
-        @Override
-        public boolean finishSnapshotRestore() {
-            // multiply expected count by 2 because the restored items are broadcast from 2 members
-            assertEquals(ITEMS_TO_SAVE * 2, numRestored);
-            numRestored = 0;
-            return true;
         }
     }
 
@@ -481,10 +447,12 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
      */
     static class SequencesInPartitionsGeneratorP extends AbstractProcessor {
 
-        private final int[] assignedPtions;
-        private final int[] ptionOffsets;
+        private final int numPartitions;
         private final int elementsInPartition;
         private final boolean assertJobRestart;
+
+        private int[] assignedPtions;
+        private int[] ptionOffsets;
 
         private int ptionCursor;
         private MyTraverser traverser;
@@ -492,9 +460,8 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
         private Entry<Integer, Integer> pendingItem;
         private boolean wasRestored;
 
-        SequencesInPartitionsGeneratorP(int[] assignedPtions, int elementsInPartition, boolean assertJobRestart) {
-            this.assignedPtions = assignedPtions;
-            this.ptionOffsets = new int[assignedPtions.length];
+        SequencesInPartitionsGeneratorP(int numPartitions, int elementsInPartition, boolean assertJobRestart) {
+            this.numPartitions = numPartitions;
             this.elementsInPartition = elementsInPartition;
             this.assertJobRestart = assertJobRestart;
 
@@ -503,6 +470,12 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
 
         @Override
         protected void init(@Nonnull Context context) {
+            this.assignedPtions = IntStream.range(0, numPartitions)
+                                           .filter(i -> i % context.totalParallelism() == context.globalProcessorIndex())
+                                           .toArray();
+            assert assignedPtions.length > 0 : "no assigned partitions";
+            this.ptionOffsets = new int[assignedPtions.length];
+
             getLogger().info("assignedPtions=" + Arrays.toString(assignedPtions));
         }
 
@@ -599,82 +572,9 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
         }
     }
 
-    static class SequencesInPartitionsMetaSupplier implements ProcessorMetaSupplier {
-
-        private final int numPartitions;
-        private final int elementsInPartition;
-        private final boolean assertJobRestart;
-
-        private int totalParallelism;
-        private int localParallelism;
-
-        SequencesInPartitionsMetaSupplier(int numPartitions, int elementsInPartition, boolean assertJobRestart) {
-            this.numPartitions = numPartitions;
-            this.elementsInPartition = elementsInPartition;
-            this.assertJobRestart = assertJobRestart;
-        }
-
-        @Override
-        public void init(@Nonnull Context context) {
-            totalParallelism = context.totalParallelism();
-            localParallelism = context.localParallelism();
-        }
-
-        @Nonnull
-        @Override
-        public Function<Address, ProcessorSupplier> get(@Nonnull List<Address> addresses) {
-            return address -> {
-                int startIndex = addresses.indexOf(address) * localParallelism;
-                return count -> IntStream.range(0, count)
-                                         .mapToObj(index -> new SequencesInPartitionsGeneratorP(
-                                                 assignedPtions(startIndex + index, totalParallelism, numPartitions),
-                                                 elementsInPartition, assertJobRestart))
-                                         .collect(toList());
-            };
-        }
-
-        private int[] assignedPtions(int processorIndex, int totalProcessors, int numPartitions) {
-            return IntStream.range(0, numPartitions)
-                            .filter(i -> i % totalProcessors == processorIndex)
-                            .toArray();
-        }
-    }
-
     /**
-     * Supplier of processors that emit nothing and complete immediately
-     * on designated member and never on others.
-     */
-    private static final class NonBalancedSource implements ProcessorMetaSupplier {
-        private final String finishingMemberAddress;
-
-        private NonBalancedSource(String finishingMemberAddress) {
-            this.finishingMemberAddress = finishingMemberAddress;
-        }
-
-        @Nonnull
-        @Override
-        public Function<Address, ProcessorSupplier> get(@Nonnull List<Address> addresses) {
-            return address -> {
-                String sAddress = address.toString();
-                return ProcessorSupplier.of(() -> sAddress.equals(finishingMemberAddress)
-                        ? noopP().get() : new StreamingNoopSourceP());
-            };
-        }
-    }
-
-    /**
-     * A source processor that emits nothing and never completes
-     */
-    private static final class StreamingNoopSourceP implements Processor {
-        @Override
-        public boolean complete() {
-            return false;
-        }
-    }
-
-    /**
-     * A source processor which never completes and
-     * only allows the first snapshot to finish
+     * A source processor which never completes and only allows the first
+     * snapshot to finish.
      */
     private static final class FirstSnapshotProcessor implements Processor {
         private boolean firstSnapshotDone;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package com.hazelcast.jet.core;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
 import com.hazelcast.logging.ILogger;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import javax.annotation.CheckReturnValue;
 import javax.annotation.Nonnull;
@@ -65,7 +66,6 @@ import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
  */
 public abstract class AbstractProcessor implements Processor {
 
-    private boolean isCooperative = true;
     private ILogger logger;
     private Outbox outbox;
 
@@ -74,30 +74,11 @@ public abstract class AbstractProcessor implements Processor {
 
     // final implementations of Processor API
 
-    /**
-     * Specifies what this processor's {@link #isCooperative()} method will return.
-     * The method will have no effect if called after the processor has been
-     * submitted to the execution service; therefore it should be called from the
-     * {@link ProcessorSupplier} that creates it or in processor's constructor.
-     */
-    public final void setCooperative(boolean isCooperative) {
-        this.isCooperative = isCooperative;
-    }
-
     @Override
-    public boolean isCooperative() {
-        return isCooperative;
-    }
-
-    @Override
-    public final void init(@Nonnull Outbox outbox, @Nonnull Context context) {
+    public final void init(@Nonnull Outbox outbox, @Nonnull Context context) throws Exception {
         this.outbox = outbox;
         this.logger = context.logger();
-        try {
-            init(context);
-        } catch (Exception e) {
-            throw sneakyThrow(e);
-        }
+        init(context);
     }
 
     /**
@@ -169,7 +150,8 @@ public abstract class AbstractProcessor implements Processor {
      * Tries to process the supplied input item, which was received from the
      * edge with the supplied ordinal. May choose to process only partially
      * and return {@code false}, in which case it will be called again later
-     * with the same {@code (ordinal, item)} combination.
+     * with the same {@code (ordinal, item)} combination before any other
+     * processing method is called.
      * <p>
      * The default implementation throws an {@code UnsupportedOperationException}.
      * <p>
@@ -184,14 +166,14 @@ public abstract class AbstractProcessor implements Processor {
      *         {@code false} otherwise.
      */
     protected boolean tryProcess(int ordinal, @Nonnull Object item) throws Exception {
-        throw new UnsupportedOperationException("Missing implementation");
+        throw new UnsupportedOperationException("Missing implementation in " + getClass());
     }
 
     /**
      * Tries to process the supplied input item, which was received from the
      * edge with ordinal 0. May choose to process only partially and return
      * {@code false}, in which case it will be called again later with the same
-     * item.
+     * item before any other processing method is called.
      * <p>
      * The default implementation delegates to {@link #tryProcess(int, Object)
      * tryProcess(0, item)}.
@@ -208,7 +190,7 @@ public abstract class AbstractProcessor implements Processor {
      * Tries to process the supplied input item, which was received from the
      * edge with ordinal 1. May choose to process only partially and return
      * {@code false}, in which case it will be called again later with the same
-     * item.
+     * item before any other processing method is called.
      * <p>
      * The default implementation delegates to {@link #tryProcess(int, Object)
      * tryProcess(1, item)}.
@@ -225,7 +207,7 @@ public abstract class AbstractProcessor implements Processor {
      * Tries to process the supplied input item, which was received from the
      * edge with ordinal 2. May choose to process only partially and return
      * {@code false}, in which case it will be called again later with the same
-     * item.
+     * item before any other processing method is called.
      * <p>
      * The default implementation delegates to {@link #tryProcess(int, Object)
      * tryProcess(2, item)}.
@@ -242,7 +224,7 @@ public abstract class AbstractProcessor implements Processor {
      * Tries to process the supplied input item, which was received from the
      * edge with ordinal 3. May choose to process only partially and return
      * {@code false}, in which case it will be called again later with the same
-     * item.
+     * item before any other processing method is called.
      * <p>
      * The default implementation delegates to {@link #tryProcess(int, Object)
      * tryProcess(3, item)}.
@@ -259,7 +241,7 @@ public abstract class AbstractProcessor implements Processor {
      * Tries to process the supplied input item, which was received from the
      * edge with ordinal 4. May choose to process only partially and return
      * {@code false}, in which case it will be called again later with the same
-     * item.
+     * item before any other processing method is called.
      * <p>
      * The default implementation delegates to {@link #tryProcess(int, Object)
      * tryProcess(4, item)}.
@@ -285,7 +267,15 @@ public abstract class AbstractProcessor implements Processor {
      * @param value    value of the entry from the snapshot
      */
     protected void restoreFromSnapshot(@Nonnull Object key, @Nonnull Object value) {
-        throw new UnsupportedOperationException("Missing implementation");
+        throw new UnsupportedOperationException("Missing implementation in " + getClass());
+    }
+
+    /**
+     * This basic implementation only forwards the passed watermark.
+     */
+    @Override
+    public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+        return tryEmit(watermark);
     }
 
 
@@ -368,6 +358,7 @@ public abstract class AbstractProcessor implements Processor {
      * @param traverser traverser over items to emit
      * @return whether the traverser has been exhausted
      */
+    @SuppressWarnings("unchecked")
     protected final <E> boolean emitFromTraverser(@Nonnull int[] ordinals, @Nonnull Traverser<E> traverser) {
         E item;
         if (pendingItem != null) {
@@ -506,6 +497,7 @@ public abstract class AbstractProcessor implements Processor {
      * all defined output ordinals.
      */
     @Nonnull
+    @SuppressFBWarnings("NP_NULL_PARAM_DEREF_NONVIRTUAL") // possible spotbugs bug
     protected final <T, R> FlatMapper<T, R> flatMapper(
             @Nonnull Function<? super T, ? extends Traverser<? extends R>> mapper
     ) {

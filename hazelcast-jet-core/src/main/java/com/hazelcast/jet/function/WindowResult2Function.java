@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.hazelcast.jet.function;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.Serializable;
 
 /**
@@ -42,7 +43,9 @@ import java.io.Serializable;
  */
 @FunctionalInterface
 public interface WindowResult2Function<R0, R1, OUT> extends Serializable {
-    @Nonnull OUT apply(long start, long end, @Nonnull R0 result0, @Nonnull R1 result1);
+
+    @Nullable
+    OUT apply(long start, long end, @Nonnull R0 result0, @Nonnull R1 result1);
 
     default KeyedWindowResult2Function<Object, R0, R1, OUT> toKeyedWindowResult2Fn() {
         return (start, end, k, result0, result1) -> apply(start, end, result0, result1);

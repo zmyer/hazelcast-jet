@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,8 @@ import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.nio.Address;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -30,16 +30,50 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static com.hazelcast.jet.Traversers.traverseArray;
+import static com.hazelcast.jet.Traversers.traverseItems;
 import static com.hazelcast.jet.Traversers.traverseIterable;
+import static com.hazelcast.jet.Traversers.traverseStream;
+import static com.hazelcast.jet.Util.entry;
+import static com.hazelcast.jet.core.BroadcastKey.broadcastKey;
 import static com.hazelcast.jet.core.ProcessorMetaSupplier.preferLocalParallelismOne;
 import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-public class TestProcessors {
+public final class TestProcessors {
+
+    private TestProcessors() { }
+
+    /**
+     * Reset the static counters in test processors. Call before starting each
+     * test that uses them.
+     *
+     * @param totalParallelism
+     */
+    public static void reset(int totalParallelism) {
+        MockPMS.initCalled.set(false);
+        MockPMS.closeCalled.set(false);
+        MockPMS.receivedCloseError.set(null);
+
+        MockPS.closeCount.set(0);
+        MockPS.initCount.set(0);
+        MockPS.receivedCloseErrors.clear();
+
+        MockP.initCount.set(0);
+        MockP.closeCount.set(0);
+
+        NoOutputSourceP.proceedLatch = new CountDownLatch(1);
+        NoOutputSourceP.executionStarted = new CountDownLatch(totalParallelism);
+        NoOutputSourceP.initCount.set(0);
+        NoOutputSourceP.failure.set(null);
+
+        DummyStatefulP.parallelism = totalParallelism;
+        DummyStatefulP.wasRestored = true;
+    }
 
     public static class Identity extends AbstractProcessor {
         @Override
@@ -48,39 +82,48 @@ public class TestProcessors {
         }
     }
 
-    public static final class StuckProcessor implements Processor {
+    /**
+     * A source processor (stream or batch) that outputs no items and allows to
+     * externally control when and whether to complete or fail.
+     */
+    public static final class NoOutputSourceP implements Processor {
         public static volatile CountDownLatch executionStarted;
         public static volatile CountDownLatch proceedLatch;
+        public static final AtomicReference<RuntimeException> failure = new AtomicReference<>();
+        public static final AtomicInteger initCount = new AtomicInteger();
 
         // how long time to wait during calls to complete()
         private final long timeoutMillis;
+        private boolean executionStartCountedDown;
 
-        public StuckProcessor() {
+        public NoOutputSourceP() {
             this(1);
         }
 
-        public StuckProcessor(long timeoutMillis) {
+        public NoOutputSourceP(long timeoutMillis) {
             this.timeoutMillis = timeoutMillis;
         }
 
         @Override
+        public void init(@Nonnull Outbox outbox, @Nonnull Context context) {
+            initCount.incrementAndGet();
+        }
+
+        @Override
         public boolean complete() {
-            executionStarted.countDown();
+            if (!executionStartCountedDown) {
+                executionStarted.countDown();
+                executionStartCountedDown = true;
+            }
             try {
+                RuntimeException localFailure = failure.getAndUpdate(e -> null);
+                if (localFailure != null) {
+                    throw localFailure;
+                }
                 return proceedLatch.await(timeoutMillis, TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 return false;
             }
-        }
-    }
-
-    /**
-     * A processor that emits nothing and never completes.
-     */
-    public static final class StuckForeverSourceP implements Processor {
-        @Override
-        public boolean complete() {
-            return false;
         }
     }
 
@@ -93,9 +136,9 @@ public class TestProcessors {
         private RuntimeException initError;
         private RuntimeException getError;
         private RuntimeException closeError;
-        private final DistributedSupplier<MockPS> supplierFn;
+        private final DistributedSupplier<ProcessorSupplier> supplierFn;
 
-        public MockPMS(DistributedSupplier<MockPS> supplierFn) {
+        public MockPMS(DistributedSupplier<ProcessorSupplier> supplierFn) {
             this.supplierFn = supplierFn;
         }
 
@@ -226,12 +269,17 @@ public class TestProcessors {
 
         static AtomicInteger initCount = new AtomicInteger();
         static AtomicInteger closeCount = new AtomicInteger();
-        static List<Throwable> receivedCloseErrors = new CopyOnWriteArrayList<>();
 
         private Exception initError;
         private Exception processError;
         private RuntimeException completeError;
         private Exception closeError;
+        private boolean isCooperative;
+
+        @Override
+        public boolean isCooperative() {
+            return isCooperative;
+        }
 
         public MockP setInitError(Exception initError) {
             this.initError = initError;
@@ -250,6 +298,11 @@ public class TestProcessors {
 
         public MockP setCloseError(Exception closeError) {
             this.closeError = closeError;
+            return this;
+        }
+
+        public MockP nonCooperative() {
+            isCooperative = false;
             return this;
         }
 
@@ -278,11 +331,8 @@ public class TestProcessors {
         }
 
         @Override
-        public void close(@Nullable Throwable error) throws Exception {
+        public void close() throws Exception {
             closeCount.incrementAndGet();
-            if (error != null) {
-                receivedCloseErrors.add(error);
-            }
             if (closeError != null) {
                 throw closeError;
             }
@@ -326,6 +376,8 @@ public class TestProcessors {
      */
     public static class MapWatermarksToString extends AbstractProcessor {
 
+        FlatMapper<Watermark, Object> flatMapper = flatMapper(wm -> traverseItems("wm(" + wm.timestamp() + ')', wm));
+
         @Override
         protected boolean tryProcess(int ordinal, @Nonnull Object item) {
             return tryEmit(item);
@@ -333,7 +385,52 @@ public class TestProcessors {
 
         @Override
         public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
-            return tryEmit("wm(" + watermark.timestamp() + ')');
+            return flatMapper.tryProcess(watermark);
+        }
+    }
+
+    /**
+     * A processor that saves dummy constant data to snapshot and asserts it
+     * receives the same data.
+     */
+    public static class DummyStatefulP extends AbstractProcessor {
+        public static volatile boolean wasRestored;
+        public static int parallelism;
+        private static final int ITEMS_TO_SAVE = 100;
+
+        private Traverser<Map.Entry<BroadcastKey<Integer>, Integer>> traverser;
+        private int[] restored;
+
+        @Override
+        public boolean complete() {
+            return false;
+        }
+
+        @Override
+        public boolean saveToSnapshot() {
+            if (traverser == null) {
+                traverser = traverseStream(IntStream.range(0, ITEMS_TO_SAVE)
+                                                    .mapToObj(i -> entry(broadcastKey(i), i)))
+                        .onFirstNull(() -> traverser = null);
+            }
+            return emitFromTraverserToSnapshot(traverser);
+        }
+
+        @Override
+        protected void restoreFromSnapshot(@Nonnull Object key, @Nonnull Object value) {
+            if (restored == null) {
+                restored = new int[ITEMS_TO_SAVE];
+            }
+            restored[(Integer) value]++;
+        }
+
+        @Override
+        public boolean finishSnapshotRestore() {
+            assertEquals(IntStream.generate(() -> parallelism).limit(ITEMS_TO_SAVE).boxed().collect(toList()),
+                    IntStream.of(restored).boxed().collect(toList()));
+            restored = null;
+            wasRestored = true;
+            return true;
         }
     }
 }

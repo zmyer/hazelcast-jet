@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,19 +17,19 @@
 package com.hazelcast.jet.function;
 
 /**
- * Represents a three-arity function that accepts three arguments
- * and produces a result.
- **/
+ * Represents a three-arity function that accepts three arguments and
+ * produces a result.
+ */
 @FunctionalInterface
-public interface TriFunction<T, U, V, R> {
+public interface TriFunction<T0, T1, T2, R> {
 
     /**
      * Applies this function to the given arguments.
      *
-     * @param t the first argument
-     * @param u the second argument
-     * @param v the third argument
+     * @param t0 the first argument
+     * @param t1 the second argument
+     * @param t2 the third argument
      * @return the function result
      */
-    R apply(T t, U u, V v);
+    R apply(T0 t0, T1 t1, T2 t2);
 }

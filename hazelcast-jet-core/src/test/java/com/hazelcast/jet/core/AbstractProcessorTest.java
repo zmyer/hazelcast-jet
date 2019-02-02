@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.hazelcast.jet.core;
 
 import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.core.AbstractProcessor.FlatMapper;
 import com.hazelcast.jet.core.TestProcessors.MockP;
 import com.hazelcast.jet.core.test.TestInbox;
@@ -33,10 +34,7 @@ import javax.annotation.Nonnull;
 import java.net.UnknownHostException;
 import java.util.Arrays;
 import java.util.Queue;
-import java.util.stream.Stream;
 
-import static java.lang.Boolean.FALSE;
-import static java.lang.Boolean.TRUE;
 import static java.util.stream.IntStream.range;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -68,7 +66,7 @@ public class AbstractProcessorTest {
     private NothingOverriddenP nothingOverriddenP;
 
     @Before
-    public void before() {
+    public void before() throws Exception {
         inbox = new TestInbox();
         inbox.add(MOCK_ITEM);
         int[] capacities = new int[OUTBOX_BUCKET_COUNT];
@@ -86,17 +84,6 @@ public class AbstractProcessorTest {
     }
 
     @Test
-    public void when_setCooperative_then_isCooperative() {
-        Stream.of(FALSE, TRUE).forEach(b -> {
-            // When
-            p.setCooperative(b);
-
-            // Then
-            assertEquals(b, p.isCooperative());
-        });
-    }
-
-    @Test
     public void when_init_then_customInitCalled() {
         assertTrue(tryProcessP.initCalled);
     }
@@ -111,7 +98,7 @@ public class AbstractProcessorTest {
     }
 
     @Test(expected = UnknownHostException.class)
-    public void when_customInitThrows_then_initRethrows() {
+    public void when_customInitThrows_then_initRethrows() throws Exception {
         new MockP().setInitError(new UnknownHostException())
                 .init(mock(Outbox.class), mock(Processor.Context.class));
     }
@@ -171,7 +158,7 @@ public class AbstractProcessorTest {
     }
 
     @Test(expected = UnknownHostException.class)
-    public void when_processNThrows_then_processRethrows() {
+    public void when_processNThrows_then_processRethrows() throws Exception {
         // Given
         AbstractProcessor p = new AbstractProcessor() {
             @Override
@@ -276,7 +263,7 @@ public class AbstractProcessorTest {
     @Test
     public void when_emitFromTraverserToAll_then_emittedToAll() {
         // Given
-        Traverser<Object> trav = Traverser.over(MOCK_ITEM);
+        Traverser<Object> trav = Traversers.singleton(MOCK_ITEM);
 
         // When
         boolean done = p.emitFromTraverser(trav);
@@ -289,7 +276,7 @@ public class AbstractProcessorTest {
     @Test
     public void when_emitFromTraverserTo1_then_emittedTo1() {
         // Given
-        Traverser<Object> trav = Traverser.over(MOCK_ITEM, MOCK_ITEM);
+        Traverser<Object> trav = Traversers.traverseItems(MOCK_ITEM, MOCK_ITEM);
 
         boolean done;
         do {
@@ -303,7 +290,7 @@ public class AbstractProcessorTest {
     @Test
     public void when_emitFromTraverserTo1And2_then_emittedTo1And2() {
         // Given
-        Traverser<Object> trav = Traverser.over(MOCK_ITEM, MOCK_ITEM);
+        Traverser<Object> trav = Traversers.traverseItems(MOCK_ITEM, MOCK_ITEM);
 
         boolean done;
         do {
@@ -319,7 +306,7 @@ public class AbstractProcessorTest {
         final Object item1 = 1;
         final Object item2 = 2;
         final int[] ordinals = {1, 2};
-        final FlatMapper<String, Object> flatMapper = p.flatMapper(ordinals, x -> Traverser.over(item1, item2));
+        final FlatMapper<String, Object> flatMapper = p.flatMapper(ordinals, x -> Traversers.traverseItems(item1, item2));
 
         // When
         boolean done = flatMapper.tryProcess(MOCK_ITEM);
@@ -340,7 +327,7 @@ public class AbstractProcessorTest {
     public void when_flatMapperTo1_then_emittedTo1() {
         // Given
         Object output = 42;
-        FlatMapper<Object, Object> m = p.flatMapper(ORDINAL_1, x -> Traverser.over(output));
+        FlatMapper<Object, Object> m = p.flatMapper(ORDINAL_1, x -> Traversers.singleton(output));
 
         // When
         boolean done = m.tryProcess(MOCK_ITEM);
@@ -354,7 +341,7 @@ public class AbstractProcessorTest {
     public void when_flatMapperToAll_then_emittedToAll() {
         // Given
         Object output = 42;
-        FlatMapper<Object, Object> m = p.flatMapper(x -> Traverser.over(output));
+        FlatMapper<Object, Object> m = p.flatMapper(x -> Traversers.singleton(output));
 
         // When
         boolean done = m.tryProcess(MOCK_ITEM);

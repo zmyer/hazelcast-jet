@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,17 +22,21 @@ import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.Watermark;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 
 /**
  * Base class for processor wrappers. Delegates all calls to the wrapped
  * processor.
  */
-public class ProcessorWrapper implements Processor {
-    protected final Processor wrapped;
+public abstract class ProcessorWrapper implements Processor {
+
+    private final Processor wrapped;
 
     protected ProcessorWrapper(Processor wrapped) {
         this.wrapped = wrapped;
+    }
+
+    public Processor getWrapped() {
+        return wrapped;
     }
 
     @Override
@@ -41,7 +45,7 @@ public class ProcessorWrapper implements Processor {
     }
 
     @Override
-    public void init(@Nonnull Outbox outbox, @Nonnull Context context) {
+    public void init(@Nonnull Outbox outbox, @Nonnull Context context) throws Exception {
         wrapped.init(outbox, context);
     }
 
@@ -86,7 +90,7 @@ public class ProcessorWrapper implements Processor {
     }
 
     @Override
-    public void close(@Nullable Throwable error) throws Exception {
-        wrapped.close(error);
+    public void close() throws Exception {
+        wrapped.close();
     }
 }

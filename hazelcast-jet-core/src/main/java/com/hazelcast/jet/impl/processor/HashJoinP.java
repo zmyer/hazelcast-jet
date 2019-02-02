@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -94,15 +94,17 @@ public class HashJoinP<E0> extends AbstractProcessor {
         E0 e0 = (E0) item;
         ordinal0consumed = true;
         if (tags.isEmpty()) {
-            return tryEmit(keyFns.size() == 2
+            Object result = keyFns.size() == 2
                     ? mapToOutputBiFn.apply(e0, lookupJoined(1, e0))
-                    : mapToOutputTriFn.apply(e0, lookupJoined(1, e0), lookupJoined(2, e0)));
+                    : mapToOutputTriFn.apply(e0, lookupJoined(1, e0), lookupJoined(2, e0));
+            return result == null || tryEmit(result);
         }
         ItemsByTag map = new ItemsByTag();
         for (int i = 1; i < keyFns.size(); i++) {
             map.put(tags.get(i), lookupJoined(i, e0));
         }
-        return tryEmit(mapToOutputBiFn.apply(e0, map));
+        Object result = mapToOutputBiFn.apply(e0, map);
+        return result == null || tryEmit(result);
     }
 
     @Nullable

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,12 @@
 package com.hazelcast.jet.impl.execution;
 
 import com.hazelcast.jet.JetException;
-import com.hazelcast.jet.impl.SnapshotRepository;
 import com.hazelcast.jet.impl.util.AsyncSnapshotWriter;
 import com.hazelcast.jet.impl.util.ProgressState;
 import com.hazelcast.jet.impl.util.ProgressTracker;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.nio.serialization.Data;
+import com.hazelcast.util.function.Predicate;
 
 import javax.annotation.Nonnull;
 import java.util.Map.Entry;
@@ -37,7 +37,6 @@ public class StoreSnapshotTasklet implements Tasklet {
     long pendingSnapshotId;
 
     private final SnapshotContext snapshotContext;
-    private final long jobId;
     private final InboundEdgeStream inboundEdgeStream;
     private final ILogger logger;
     private final String vertexName;
@@ -48,10 +47,10 @@ public class StoreSnapshotTasklet implements Tasklet {
     private State state = DRAIN;
     private boolean hasReachedBarrier;
     private Entry<Data, Data> pendingEntry;
+    private Predicate<Object> addToInboxFunction;
 
     public StoreSnapshotTasklet(
             SnapshotContext snapshotContext,
-            long jobId,
             InboundEdgeStream inboundEdgeStream,
             AsyncSnapshotWriter ssWriter,
             ILogger logger,
@@ -59,16 +58,14 @@ public class StoreSnapshotTasklet implements Tasklet {
             boolean isHigherPrioritySource
     ) {
         this.snapshotContext = snapshotContext;
-        this.jobId = jobId;
         this.inboundEdgeStream = inboundEdgeStream;
         this.logger = logger;
         this.vertexName = vertexName;
         this.isHigherPrioritySource = isHigherPrioritySource;
 
         this.ssWriter = ssWriter;
-        this.pendingSnapshotId = snapshotContext.lastSnapshotId() + 1;
-
-        resetCurrentMap();
+        this.pendingSnapshotId = snapshotContext.activeSnapshotId() + 1;
+        addToInboxFunction = this::addToInbox;
     }
 
     @Nonnull @Override
@@ -89,20 +86,7 @@ public class StoreSnapshotTasklet implements Tasklet {
                     progTracker.madeProgress();
                 }
                 pendingEntry = null;
-                ProgressState result = inboundEdgeStream.drainTo(o -> {
-                    if (o instanceof SnapshotBarrier) {
-                        SnapshotBarrier barrier = (SnapshotBarrier) o;
-                        assert pendingSnapshotId == barrier.snapshotId() : "Unexpected barrier, expected was " +
-                                pendingSnapshotId + ", but barrier was " + barrier.snapshotId() + ", this=" + this;
-                        hasReachedBarrier = true;
-                    } else {
-                        if (!ssWriter.offer((Entry<Data, Data>) o)) {
-                            pendingEntry = (Entry<Data, Data>) o;
-                            return false;
-                        }
-                    }
-                    return true;
-                });
+                ProgressState result = inboundEdgeStream.drainTo(addToInboxFunction);
                 if (result.isDone()) {
                     assert ssWriter.isEmpty() : "input is done, but we had some entries and not the barrier";
                     snapshotContext.taskletDone(pendingSnapshotId - 1, isHigherPrioritySource);
@@ -118,7 +102,7 @@ public class StoreSnapshotTasklet implements Tasklet {
 
             case FLUSH:
                 progTracker.notDone();
-                if (ssWriter.flush()) {
+                if (ssWriter.flushAndResetMap()) {
                     progTracker.madeProgress();
                     state = REACHED_BARRIER;
                 }
@@ -132,14 +116,14 @@ public class StoreSnapshotTasklet implements Tasklet {
                 // check for writing error
                 Throwable error = ssWriter.getError();
                 if (error != null) {
-                    logger.severe("Error writing to snapshot map '" + currMapName() + "'", error);
+                    logger.severe("Error writing to snapshot map", error);
                     snapshotContext.reportError(error);
                 }
                 progTracker.madeProgress();
                 snapshotContext.snapshotDoneForTasklet(ssWriter.getTotalPayloadBytes(), ssWriter.getTotalKeys(),
                         ssWriter.getTotalChunks());
+                ssWriter.resetStats();
                 pendingSnapshotId++;
-                resetCurrentMap();
                 hasReachedBarrier = false;
                 state = DRAIN;
                 progTracker.notDone();
@@ -151,12 +135,19 @@ public class StoreSnapshotTasklet implements Tasklet {
         }
     }
 
-    String currMapName() {
-        return SnapshotRepository.snapshotDataMapName(jobId, pendingSnapshotId, vertexName);
-    }
-
-    private void resetCurrentMap() {
-        ssWriter.setCurrentMap(currMapName());
+    private boolean addToInbox(Object o) {
+        if (o instanceof SnapshotBarrier) {
+            SnapshotBarrier barrier = (SnapshotBarrier) o;
+            assert pendingSnapshotId == barrier.snapshotId() : "Unexpected barrier, expected was " +
+                    pendingSnapshotId + ", but barrier was " + barrier.snapshotId() + ", this=" + this;
+            hasReachedBarrier = true;
+        } else {
+            if (!ssWriter.offer((Entry<Data, Data>) o)) {
+                pendingEntry = (Entry<Data, Data>) o;
+                return false;
+            }
+        }
+        return true;
     }
 
     @Override

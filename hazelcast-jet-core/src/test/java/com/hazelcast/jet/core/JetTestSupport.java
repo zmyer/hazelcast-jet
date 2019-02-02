@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.IList;
 import com.hazelcast.core.IMap;
@@ -25,14 +26,17 @@ import com.hazelcast.jet.IListJet;
 import com.hazelcast.jet.IMapJet;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.JetTestInstanceFactory;
+import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.impl.JetService;
+import com.hazelcast.jet.impl.util.Util.RunnableExc;
+import com.hazelcast.logging.ILogger;
+import com.hazelcast.logging.Logger;
 import com.hazelcast.nio.Address;
 import com.hazelcast.spi.impl.NodeEngineImpl;
 import com.hazelcast.test.AssertTask;
 import com.hazelcast.test.HazelcastTestSupport;
 import org.junit.After;
-import org.junit.Assume;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -41,11 +45,17 @@ import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static com.hazelcast.jet.Util.idToString;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+
 public abstract class JetTestSupport extends HazelcastTestSupport {
 
+    protected ILogger logger = Logger.getLogger(getClass());
     private JetTestInstanceFactory instanceFactory;
 
     @After
@@ -59,6 +69,10 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         return instanceFactory.newClient();
     }
 
+    protected JetInstance createJetClient(ClientConfig config) {
+        return instanceFactory.newClient(config);
+    }
+
     protected JetInstance createJetMember() {
         return this.createJetMember(new JetConfig());
     }
@@ -68,6 +82,10 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
             instanceFactory = new JetTestInstanceFactory();
         }
         return instanceFactory.newMember(config);
+    }
+
+    protected JetInstance[] createJetMembers(int nodeCount) {
+        return createJetMembers(new JetConfig(), nodeCount);
     }
 
     protected JetInstance[] createJetMembers(JetConfig config, int nodeCount) {
@@ -107,14 +125,6 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         return instance.getList(randomName());
     }
 
-    protected static void assumeNotWindows() {
-        Assume.assumeFalse(isWindows());
-    }
-
-    protected static boolean isWindows() {
-        return System.getProperty("os.name").toLowerCase().contains("windows");
-    }
-
     protected static void appendToFile(File file, String... lines) throws IOException {
         try (PrintWriter writer = new PrintWriter(new FileOutputStream(file, true))) {
             for (String payload : lines) {
@@ -123,26 +133,36 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         }
     }
 
-    protected static File createTempDirectory() throws Exception {
+    protected static File createTempDirectory() throws IOException {
         Path directory = Files.createTempDirectory("jet-test-temp");
         File file = directory.toFile();
         file.deleteOnExit();
         return file;
     }
 
-    public static void assertTrueEventually(UncheckedRunnable runnable) {
+    public static void assertJobStatusEventually(Job job, JobStatus expected) {
+        assertJobStatusEventually(job, expected, ASSERT_TRUE_EVENTUALLY_TIMEOUT);
+    }
+
+    public static void assertJobStatusEventually(Job job, JobStatus expected, int timeoutSeconds) {
+        assertNotNull(job);
+        assertTrueEventually(() ->
+                assertEquals("jobId=" + idToString(job.getId()), expected, job.getStatus()), timeoutSeconds);
+    }
+
+    public static void assertTrueEventually(RunnableExc runnable) {
         HazelcastTestSupport.assertTrueEventually(assertTask(runnable));
     }
 
-    public static void assertTrueEventually(UncheckedRunnable runnable, long timeoutSeconds) {
+    public static void assertTrueEventually(RunnableExc runnable, long timeoutSeconds) {
         HazelcastTestSupport.assertTrueEventually(assertTask(runnable), timeoutSeconds);
     }
 
-    public static void assertTrueAllTheTime(UncheckedRunnable runnable, long durationSeconds) {
+    public static void assertTrueAllTheTime(RunnableExc runnable, long durationSeconds) {
         HazelcastTestSupport.assertTrueAllTheTime(assertTask(runnable), durationSeconds);
     }
 
-    public static void assertTrueFiveSeconds(UncheckedRunnable runnable) {
+    public static void assertTrueFiveSeconds(RunnableExc runnable) {
         HazelcastTestSupport.assertTrueFiveSeconds(assertTask(runnable));
     }
 
@@ -166,7 +186,7 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         return getNodeEngineImpl(hz(instance));
     }
 
-    private static AssertTask assertTask(UncheckedRunnable runnable) {
+    private static AssertTask assertTask(RunnableExc runnable) {
         return new AssertTask() {
             @Override
             public void run() throws Exception {
@@ -183,8 +203,17 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         instanceFactory.terminate(instance);
     }
 
-    @FunctionalInterface
-    public interface UncheckedRunnable {
-        void run() throws Exception;
+    public Future spawnSafe(RunnableExc r) {
+        return spawn(() -> {
+            try {
+                r.run();
+            } catch (Exception e) {
+                logger.warning("Spawned Runnable failed", e);
+            }
+        });
+    }
+
+    public static Watermark wm(long timestamp) {
+        return new Watermark(timestamp);
     }
 }

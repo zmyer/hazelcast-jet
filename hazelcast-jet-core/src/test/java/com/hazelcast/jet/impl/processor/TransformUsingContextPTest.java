@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,24 +24,27 @@ import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.core.test.TestProcessorSupplierContext;
 import com.hazelcast.jet.function.DistributedTriFunction;
 import com.hazelcast.jet.pipeline.ContextFactory;
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
 import static com.hazelcast.jet.impl.processor.TransformUsingContextP.supplier;
 import static org.junit.Assert.assertEquals;
 
+@RunWith(HazelcastSerialClassRunner.class)
 public class TransformUsingContextPTest {
 
     @Test
-    public void when_sharedLocally_then_oneContextInstance() {
+    public void when_sharedLocally_then_oneContextInstance() throws Exception {
         testSharing(true);
     }
 
     @Test
-    public void when_notSharedLocally_then_multipleContextInstances() {
+    public void when_notSharedLocally_then_multipleContextInstances() throws Exception {
         testSharing(false);
     }
 
-    private void testSharing(boolean share) {
+    private void testSharing(boolean share) throws Exception {
         int[] createCounter = {0};
         int[] destroyCounter = {0};
         ContextFactory<String> contextFactory = ContextFactory.withCreateFn(jet -> "context-" + createCounter[0]++)
@@ -70,25 +73,25 @@ public class TransformUsingContextPTest {
         assertEquals("context-0", outbox1.queue(0).poll());
         assertEquals(share ? "context-0" : "context-1", outbox2.queue(0).poll());
 
-        processors[0].close(null);
+        processors[0].close();
         assertEquals(share ? 0 : 1, destroyCounter[0]);
-        processors[1].close(null);
+        processors[1].close();
         assertEquals(share ? 0 : 2, destroyCounter[0]);
         supplier.close(null);
         assertEquals(share ? 1 : 2, destroyCounter[0]);
     }
 
     @Test
-    public void when_nonCooperativeContextFactory_then_nonCooperativeProcessor() {
+    public void when_nonCooperativeContextFactory_then_nonCooperativeProcessor() throws Exception {
         testEqualCooperativity(false);
     }
 
     @Test
-    public void when_cooperativeContextFactory_then_cooperativeProcessor() {
+    public void when_cooperativeContextFactory_then_cooperativeProcessor() throws Exception {
         testEqualCooperativity(true);
     }
 
-    private void testEqualCooperativity(boolean cooperative) {
+    private void testEqualCooperativity(boolean cooperative) throws Exception {
         ContextFactory<String> contextFactory = ContextFactory.withCreateFn(jet -> "foo");
         if (!cooperative) {
             contextFactory = contextFactory.nonCooperative();

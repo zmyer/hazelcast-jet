@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,6 +37,10 @@ import static com.hazelcast.jet.aggregate.AggregateOperations.coAggregateOperati
  * stages. To obtain it, call {@link StageWithWindow#aggregateBuilder()} on
  * one of the stages to co-aggregate and refer to that method's Javadoc for
  * further details.
+ * <p>
+ * <strong>Note:</strong> this is not a builder of {@code
+ * AggregateOperation}. If that' s what you are looking for, go {@link
+ * AggregateOperation#withCreate here}.
  *
  * @param <R0> type of the aggregated result for stream-0
  */

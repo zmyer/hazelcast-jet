@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.client.config.XmlClientConfigBuilder;
 import com.hazelcast.config.AbstractConfigBuilder;
 import com.hazelcast.config.Config;
+import com.hazelcast.config.DomConfigHelper;
 import com.hazelcast.config.InvalidConfigurationException;
 import com.hazelcast.config.XmlConfigBuilder;
 import com.hazelcast.instance.BuildInfo;
@@ -40,8 +41,11 @@ import javax.annotation.Nullable;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.InputStream;
+import java.util.Optional;
 import java.util.Properties;
 
+import static com.hazelcast.config.DomConfigHelper.childElements;
+import static com.hazelcast.config.DomConfigHelper.cleanNodeName;
 import static com.hazelcast.jet.impl.config.XmlJetConfigLocator.getClientConfigStream;
 import static com.hazelcast.jet.impl.config.XmlJetConfigLocator.getJetConfigStream;
 import static com.hazelcast.jet.impl.config.XmlJetConfigLocator.getMemberConfigStream;
@@ -193,6 +197,9 @@ public final class XmlJetConfigBuilder extends AbstractConfigBuilder {
                 case "backup-count":
                     instanceConfig.setBackupCount(intValue(node));
                     break;
+                case "scale-up-delay-millis":
+                    instanceConfig.setScaleUpDelayMillis(longValue(node));
+                    break;
                 default:
                     throw new AssertionError("Unrecognized XML element: " + name);
             }
@@ -219,19 +226,23 @@ public final class XmlJetConfigBuilder extends AbstractConfigBuilder {
         }
     }
 
-    private void parseMetrics(Node edgeNode) {
+    private void parseMetrics(Node metricsNode) {
         MetricsConfig config = jetConfig.getMetricsConfig();
-        for (Node child : childElements(edgeNode)) {
+
+        getBooleanAttribute(metricsNode, "enabled").ifPresent(config::setEnabled);
+        getBooleanAttribute(metricsNode, "jmxEnabled").ifPresent(config::setJmxEnabled);
+
+        for (Node child : childElements(metricsNode)) {
             String name = cleanNodeName(child);
             switch (name) {
-                case "enabled":
-                    config.setEnabled(booleanValue(child));
-                    break;
                 case "retention-seconds":
                     config.setRetentionSeconds(intValue(child));
                     break;
-                case "enabled-for-data-structures":
-                    config.setEnabledForDataStructures(booleanValue(child));
+                case "collection-interval-seconds":
+                    config.setCollectionIntervalSeconds(intValue(child));
+                    break;
+                case "metrics-for-data-structures":
+                    config.setMetricsForDataStructuresEnabled(booleanValue(child));
                     break;
                 default:
                     throw new AssertionError("Unrecognized XML element: " + name);
@@ -243,11 +254,27 @@ public final class XmlJetConfigBuilder extends AbstractConfigBuilder {
         return Integer.parseInt(stringValue(node));
     }
 
+    private int longValue(Node node) {
+        return Integer.parseInt(stringValue(node));
+    }
+
     private String stringValue(Node node) {
         return getTextContent(node);
     }
 
     private boolean booleanValue(Node node) {
         return Boolean.parseBoolean(getTextContent(node));
+    }
+
+    private Optional<Boolean> getBooleanAttribute(Node node, String name) {
+        return Optional.ofNullable(node.getAttributes().getNamedItem(name)).map(this::booleanValue);
+    }
+
+    private String getTextContent(Node node) {
+        return DomConfigHelper.getTextContent(node, domLevel3);
+    }
+
+    public void fillProperties(Node node, Properties properties) {
+        DomConfigHelper.fillProperties(node, properties, domLevel3);
     }
 }

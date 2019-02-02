@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 package com.hazelcast.jet.impl.execution;
 
-import com.hazelcast.jet.core.Outbox;
+import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.impl.util.ProgressState;
 import com.hazelcast.jet.impl.util.ProgressTracker;
 import com.hazelcast.jet.impl.util.Util;
@@ -27,6 +27,7 @@ import javax.annotation.Nonnull;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Map.Entry;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.stream.IntStream;
 
@@ -34,7 +35,7 @@ import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.impl.util.Util.lazyIncrement;
 import static com.hazelcast.util.Preconditions.checkPositive;
 
-public class OutboxImpl implements Outbox {
+public class OutboxImpl implements OutboxInternal {
 
     private final OutboundCollector[] outstreams;
     private final ProgressTracker progTracker;
@@ -54,6 +55,9 @@ public class OutboxImpl implements Outbox {
     private int[] unfinishedItemOrdinals;
     private Object unfinishedSnapshotKey;
     private Object unfinishedSnapshotValue;
+    private final AtomicLong lastForwardedWm = new AtomicLong(Long.MIN_VALUE);
+
+    private boolean blocked;
 
     /**
      * @param outstreams The output queues
@@ -105,6 +109,9 @@ public class OutboxImpl implements Outbox {
     }
 
     private boolean offerInternal(@Nonnull int[] ordinals, @Nonnull Object item) {
+        if (shouldBlock()) {
+            return false;
+        }
         assert unfinishedItem == null || item.equals(unfinishedItem)
                 : "Different item offered after previous call returned false: expected=" + unfinishedItem
                         + ", got=" + item;
@@ -115,11 +122,18 @@ public class OutboxImpl implements Outbox {
         assert numRemainingInBatch != -1 : "Outbox.offer() called again after it returned false, without a " +
                 "call to reset(). You probably didn't return from Processor method after Outbox.offer() " +
                 "or AbstractProcessor.tryEmit() returned false";
+        if (item instanceof Watermark) {
+            lastForwardedWm.lazySet(((Watermark) item).timestamp());
+        }
         numRemainingInBatch--;
         boolean done = true;
         if (numRemainingInBatch == -1) {
             done = false;
         } else {
+            if (ordinals.length == 0) {
+                // edge case - emitting to outbox with 0 ordinals is a progress
+                progTracker.madeProgress();
+            }
             for (int i = 0; i < ordinals.length; i++) {
                 if (broadcastTracker.get(i)) {
                     continue;
@@ -130,8 +144,10 @@ public class OutboxImpl implements Outbox {
                 }
                 if (result.isDone()) {
                     broadcastTracker.set(i);
-                    // we are the only updating thread, no need for CAS operations
-                    lazyIncrement(counters, i);
+                    if (!(item instanceof BroadcastItem)) {
+                        // we are the only updating thread, no need for CAS operations
+                        lazyIncrement(counters, ordinals[i]);
+                    }
                 } else {
                     done = false;
                 }
@@ -162,6 +178,9 @@ public class OutboxImpl implements Outbox {
         if (snapshotEdge == null) {
             throw new IllegalStateException("Outbox does not have snapshot queue");
         }
+        if (shouldBlock()) {
+            return false;
+        }
 
         assert unfinishedSnapshotKey == null || unfinishedSnapshotKey.equals(key)
                 : "Different key offered after previous call returned false: expected="
@@ -191,11 +210,26 @@ public class OutboxImpl implements Outbox {
         return success;
     }
 
-    /**
-     * Resets the outbox so that it is available to receive another batch of
-     * items after any {@code offer()} method previously returned {@code
-     * false}.
-     */
+    @Override
+    public boolean hasUnfinishedItem() {
+        return unfinishedItem != null || unfinishedSnapshotKey != null;
+    }
+
+    @Override
+    public void block() {
+        blocked = true;
+    }
+
+    @Override
+    public void unblock() {
+        blocked = false;
+    }
+
+    private boolean shouldBlock() {
+        return blocked && !hasUnfinishedItem();
+    }
+
+    @Override
     public void reset() {
         numRemainingInBatch = batchSize;
     }
@@ -209,5 +243,10 @@ public class OutboxImpl implements Outbox {
 
     final boolean offerToEdgesAndSnapshot(Object item) {
         return offerInternal(allEdgesAndSnapshot, item);
+    }
+
+    @Override
+    public long lastForwardedWm() {
+        return lastForwardedWm.get();
     }
 }

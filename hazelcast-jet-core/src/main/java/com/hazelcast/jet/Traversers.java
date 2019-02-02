@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,15 +17,18 @@
 package com.hazelcast.jet;
 
 import com.hazelcast.jet.core.Processor;
+import com.hazelcast.jet.core.ResettableSingletonTraverser;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.util.Enumeration;
 import java.util.Iterator;
 import java.util.Spliterator;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
+
+import static java.util.Objects.requireNonNull;
 
 /**
  * Utility class with several {@link Traverser}s useful in {@link Processor}
@@ -45,6 +48,17 @@ public final class Traversers {
     }
 
     /**
+     * Returns a traverser over the given single item.
+     * <p>
+     * You can use {@link ResettableSingletonTraverser} for less GC litter,
+     * if you can reuse the traverser instance.
+     */
+    @Nonnull
+    public static <T> Traverser<T> singleton(@Nonnull T item) {
+        return new SingletonTraverser<>(item);
+    }
+
+    /**
      * Returns an adapter from {@code Iterator} to {@code Traverser}. The
      * iterator must return non-{@code null} items. Each time its {@code next()}
      * method is called, the traverser will take another item from the iterator
@@ -52,7 +66,7 @@ public final class Traversers {
      */
     @Nonnull
     public static <T> Traverser<T> traverseIterator(@Nonnull Iterator<? extends T> iterator) {
-        return () -> iterator.hasNext() ? ensureNotNull(iterator.next(), "Iterator returned a null item") : null;
+        return () -> iterator.hasNext() ? requireNonNull(iterator.next(), "Iterator returned a null item") : null;
     }
 
     /**
@@ -101,7 +115,7 @@ public final class Traversers {
     @Nonnull
     public static <T> Traverser<T> traverseEnumeration(@Nonnull Enumeration<T> enumeration) {
         return () -> enumeration.hasMoreElements()
-                ? ensureNotNull(enumeration.nextElement(), "Enumeration contains a null element")
+                ? requireNonNull(enumeration.nextElement(), "Enumeration contains a null element")
                 : null;
     }
 
@@ -133,6 +147,17 @@ public final class Traversers {
     }
 
     /**
+     * Returns a traverser over the supplied arguments (or item array).
+     *
+     * @param items the items to traverse over
+     * @param <T> type of the items
+     */
+    @SafeVarargs
+    public static <T> Traverser<T> traverseItems(T... items) {
+        return traverseArray(items);
+    }
+
+    /**
      * Flattens a supplier of traverser into a lazy-initialized traverser. It
      * obtains the traverser from this method's argument just once, upon the
      * first invocation of {@code get()}.
@@ -140,11 +165,6 @@ public final class Traversers {
     @Nonnull
     public static <T> Traverser<T> lazy(@Nonnull Supplier<Traverser<T>> supplierOfTraverser) {
         return new LazyTraverser<>(supplierOfTraverser);
-    }
-
-    private static <T> T ensureNotNull(@Nullable T t, String failureMsg) {
-        assert t != null : failureMsg;
-        return t;
     }
 
     private static final class LazyTraverser<T> implements Traverser<T> {
@@ -179,7 +199,7 @@ public final class Traversers {
 
         @Override
         public T next() {
-            return i >= 0 && i < array.length ? ensureNotNull(array[i++], "Array contains a null element") : null;
+            return i >= 0 && i < array.length ? requireNonNull(array[i++], "Array contains a null element") : null;
         }
     }
 
@@ -195,7 +215,9 @@ public final class Traversers {
         public T next() {
             try {
                 boolean advanced = spliterator.tryAdvance(this);
-                assert advanced == (nextItem != null) : "Spliterator emitted a null item";
+                if (advanced) {
+                    requireNonNull(nextItem);
+                }
                 return nextItem;
             } finally {
                 nextItem = null;
@@ -205,6 +227,32 @@ public final class Traversers {
         @Override
         public void accept(T t) {
             nextItem = t;
+        }
+    }
+
+    private static class SingletonTraverser<T> implements Traverser<T> {
+        private Object item;
+
+        SingletonTraverser(@Nonnull T item) {
+            this.item = item;
+        }
+
+        @Override
+        public T next() {
+            try {
+                return (T) item;
+            } finally {
+                item = null;
+            }
+        }
+
+        @Nonnull @Override
+        // an optimized version to map in-place
+        public <R> Traverser<R> map(@Nonnull Function<? super T, ? extends R> mapFn) {
+            if (item != null) {
+                item = mapFn.apply((T) item);
+            }
+            return (Traverser<R>) this;
         }
     }
 }

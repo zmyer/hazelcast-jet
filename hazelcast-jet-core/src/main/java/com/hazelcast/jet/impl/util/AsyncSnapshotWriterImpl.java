@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,14 @@
 package com.hazelcast.jet.impl.util;
 
 import com.hazelcast.core.ExecutionCallback;
+import com.hazelcast.core.HazelcastInstanceNotActiveException;
 import com.hazelcast.core.ICompletableFuture;
 import com.hazelcast.core.IMap;
 import com.hazelcast.core.PartitionAware;
 import com.hazelcast.internal.serialization.impl.HeapData;
 import com.hazelcast.internal.serialization.impl.SerializationConstants;
 import com.hazelcast.jet.impl.JetService;
+import com.hazelcast.jet.impl.execution.SnapshotContext;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.nio.Bits;
@@ -62,9 +64,12 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
     private final ILogger logger;
     private final NodeEngine nodeEngine;
     private final boolean useBigEndian;
+    private final SnapshotContext snapshotContext;
+    private final String vertexName;
     private final int memberCount;
-    private IMap<SnapshotDataKey, byte[]> currentMap;
-    private final AtomicReference<Throwable> lastError = new AtomicReference<>();
+    private IMap currentMap;
+    private long currentSnapshotId;
+    private final AtomicReference<Throwable> firstError = new AtomicReference<>();
     private final AtomicInteger numActiveFlushes = new AtomicInteger();
 
     // stats
@@ -82,23 +87,28 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
 
         @Override
         public void onFailure(Throwable t) {
-            logger.severe("Error writing to snapshot map '" + currentMap.getName() + "'", t);
-            lastError.compareAndSet(null, t);
+            logger.severe("Error writing to snapshot map", t);
+            firstError.compareAndSet(null, t);
             numActiveFlushes.decrementAndGet();
             numConcurrentAsyncOps.decrementAndGet();
         }
     };
 
-    public AsyncSnapshotWriterImpl(NodeEngine nodeEngine, int memberIndex, int memberCount) {
-        this(DEFAULT_CHUNK_SIZE, nodeEngine, memberIndex, memberCount);
+    public AsyncSnapshotWriterImpl(NodeEngine nodeEngine, SnapshotContext snapshotContext, String vertexName,
+                                   int memberIndex, int memberCount) {
+        this(DEFAULT_CHUNK_SIZE, nodeEngine, snapshotContext, vertexName, memberIndex, memberCount);
     }
 
     // for test
-    AsyncSnapshotWriterImpl(int chunkSize, NodeEngine nodeEngine, int memberIndex, int memberCount) {
+    AsyncSnapshotWriterImpl(int chunkSize, NodeEngine nodeEngine, SnapshotContext snapshotContext,
+                            String vertexName, int memberIndex, int memberCount) {
         this.nodeEngine = nodeEngine;
         this.partitionService = nodeEngine.getPartitionService();
         this.logger = nodeEngine.getLogger(getClass());
+        this.snapshotContext = snapshotContext;
+        this.vertexName = vertexName;
         this.memberCount = memberCount;
+        currentSnapshotId = snapshotContext.currentSnapshotId();
 
         useBigEndian = !nodeEngine.getHazelcastInstance().getConfig().getSerializationConfig().isUseNativeByteOrder()
                 || ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN;
@@ -123,21 +133,6 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
         valueTerminator = Arrays.copyOfRange(valueTerminatorWithHeader, HeapData.TYPE_OFFSET,
                 valueTerminatorWithHeader.length);
         usableChunkSize = chunkSize - valueTerminator.length;
-    }
-
-    @Override
-    public void setCurrentMap(String mapName) {
-        assert isEmpty() : "writer not empty";
-
-        if (currentMap != null && logger.isFineEnabled()) {
-            logger.fine(String.format("Stats for %s: keys=%,d, chunks=%,d, bytes=%,d",
-                    currentMap.getName(), totalKeys, totalChunks, totalPayloadBytes));
-        }
-
-        currentMap = nodeEngine.getHazelcastInstance().getMap(mapName);
-
-        // reset stats
-        totalKeys = totalChunks = totalPayloadBytes = 0;
     }
 
     @Override
@@ -169,7 +164,7 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
         }
 
         // if the buffer will exceed usableChunkSize after adding this entry, flush it first
-        if (buffers[partitionId].size() + length > usableChunkSize && !flush(partitionId)) {
+        if (buffers[partitionId].size() + length > usableChunkSize && !flushPartition(partitionId)) {
             return false;
         }
 
@@ -195,7 +190,7 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
     }
 
     @CheckReturnValue
-    private boolean flush(int partitionId) {
+    private boolean flushPartition(int partitionId) {
         return containsOnlyHeader(buffers[partitionId])
                 || putAsyncToMap(partitionId, () -> getBufferContentsAndClear(buffers[partitionId]));
     }
@@ -223,34 +218,71 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
 
     @CheckReturnValue
     private boolean putAsyncToMap(int partitionId, Supplier<Data> dataSupplier) {
-        if (!Util.tryIncrement(numConcurrentAsyncOps, 1, JetService.MAX_PARALLEL_ASYNC_OPS)) {
+        if (!initCurrentMap()) {
             return false;
         }
 
-        // we put a Data instance to the map directly to avoid the serialization of the byte array
-        ICompletableFuture<Object> future = ((IMap) currentMap).putAsync(
-                new SnapshotDataKey(partitionKeys[partitionId], partitionSequence), dataSupplier.get());
-        partitionSequence += memberCount;
-        future.andThen(callback);
-        numActiveFlushes.incrementAndGet();
+        if (!Util.tryIncrement(numConcurrentAsyncOps, 1, JetService.MAX_PARALLEL_ASYNC_OPS)) {
+            return false;
+        }
+        try {
+            // we put a Data instance to the map directly to avoid the serialization of the byte array
+            ICompletableFuture<Object> future = currentMap.putAsync(
+                    new SnapshotDataKey(partitionKeys[partitionId], currentSnapshotId, vertexName, partitionSequence),
+                    dataSupplier.get());
+            partitionSequence += memberCount;
+            future.andThen(callback);
+            numActiveFlushes.incrementAndGet();
+        } catch (HazelcastInstanceNotActiveException ignored) {
+            return false;
+        }
+        return true;
+    }
+
+    private boolean initCurrentMap() {
+        if (currentMap == null) {
+            String mapName = snapshotContext.currentMapName();
+            if (mapName == null) {
+                return false;
+            }
+            currentMap = nodeEngine.getHazelcastInstance().getMap(mapName);
+            this.currentSnapshotId = snapshotContext.currentSnapshotId();
+        }
         return true;
     }
 
     /**
-     * Flush all partitions.
+     * Flush all partitions and reset current map. No further items can be
+     * offered until new snapshot is seen in {@link #snapshotContext}.
      *
      * @return {@code true} on success, {@code false} if we weren't able to
      * flush some partitions due to the limit on number of parallel async ops.
      */
     @Override
     @CheckReturnValue
-    public boolean flush() {
+    public boolean flushAndResetMap() {
+        if (!initCurrentMap()) {
+            return false;
+        }
+
         for (int i = 0; i < buffers.length; i++) {
-            if (!flush(i)) {
+            if (!flushPartition(i)) {
                 return false;
             }
         }
+
+        // we're done
+        currentMap = null;
+        if (logger.isFineEnabled()) {
+            logger.fine(String.format("Stats for %s: keys=%,d, chunks=%,d, bytes=%,d",
+                    vertexName, totalKeys, totalChunks, totalPayloadBytes));
+        }
         return true;
+    }
+
+    @Override
+    public void resetStats() {
+        totalKeys = totalChunks = totalPayloadBytes = 0;
     }
 
     @Override
@@ -260,7 +292,7 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
 
     @Override
     public Throwable getError() {
-        return lastError.getAndSet(null);
+        return firstError.getAndSet(null);
     }
 
     @Override
@@ -273,15 +305,19 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
     }
 
     public static final class SnapshotDataKey implements IdentifiedDataSerializable, PartitionAware {
-        int partitionKey;
-        int sequence;
+        private int partitionKey;
+        private long snapshotId;
+        private String vertexName;
+        private int sequence;
 
         // for deserialization
         public SnapshotDataKey() {
         }
 
-        SnapshotDataKey(int partitionKey, int sequence) {
+        public SnapshotDataKey(int partitionKey, long snapshotId, String vertexName, int sequence) {
             this.partitionKey = partitionKey;
+            this.snapshotId = snapshotId;
+            this.vertexName = vertexName;
             this.sequence = sequence;
         }
 
@@ -290,9 +326,22 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
             return partitionKey;
         }
 
+        public long snapshotId() {
+            return snapshotId;
+        }
+
+        public String vertexName() {
+            return vertexName;
+        }
+
         @Override
         public String toString() {
-            return "SnapshotDataKey{partitionKey=" + partitionKey + ", sequence=" + sequence + '}';
+            return "SnapshotDataKey{" +
+                    "partitionKey=" + partitionKey +
+                    ", snapshotId=" + snapshotId +
+                    ", vertexName='" + vertexName + '\'' +
+                    ", sequence=" + sequence +
+                    '}';
         }
 
         @Override
@@ -308,12 +357,16 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
         @Override
         public void writeData(ObjectDataOutput out) throws IOException {
             out.writeInt(partitionKey);
+            out.writeLong(snapshotId);
+            out.writeUTF(vertexName);
             out.writeInt(sequence);
         }
 
         @Override
         public void readData(ObjectDataInput in) throws IOException {
             partitionKey = in.readInt();
+            snapshotId = in.readLong();
+            vertexName = in.readUTF();
             sequence = in.readInt();
         }
 
@@ -327,12 +380,14 @@ public class AsyncSnapshotWriterImpl implements AsyncSnapshotWriter {
             }
             SnapshotDataKey that = (SnapshotDataKey) o;
             return partitionKey == that.partitionKey &&
-                    sequence == that.sequence;
+                    snapshotId == that.snapshotId &&
+                    sequence == that.sequence &&
+                    Objects.equals(vertexName, that.vertexName);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(partitionKey, sequence);
+            return Objects.hash(partitionKey, snapshotId, vertexName, sequence);
         }
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,12 +26,15 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.util.Map.Entry;
+import java.util.regex.Pattern;
 
 import static com.hazelcast.jet.core.Edge.from;
 import static com.hazelcast.jet.core.processor.Processors.noopP;
-import static com.hazelcast.jet.function.DistributedFunctions.alwaysTrue;
+import static com.hazelcast.jet.function.DistributedPredicate.alwaysTrue;
 import static com.hazelcast.jet.function.DistributedFunctions.wholeItem;
+import static com.hazelcast.jet.impl.pipeline.transform.AggregateTransform.FIRST_STAGE_VERTEX_NAME_SUFFIX;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 @RunWith(HazelcastParallelClassRunner.class)
 public class DotTest {
@@ -47,8 +50,15 @@ public class DotTest {
         dag.edge(from(a, 0).to(c, 0).partitioned(wholeItem()));
         dag.edge(from(a, 1).to(b, 0).broadcast().distributed());
 
-        // can't assert, contains multiple subgraphs, order isn't stable
-        System.out.println(dag.toDotString());
+        String actual = dag.toDotString();
+        System.out.println(actual);
+        // contains multiple subgraphs, order isn't stable, we'll assert individual lines and the length
+        assertTrue(actual.startsWith("digraph DAG {"));
+        assertTrue(actual.contains("\"a\" -> \"c\" [label=\"partitioned\"];"));
+        assertTrue(actual.contains("\"a\" -> \"b\" [label=\"distributed-broadcast\"]"));
+        assertTrue(actual.contains("\"d\";"));
+        assertTrue(actual.endsWith("\n}"));
+        assertEquals(101, actual.length());
     }
 
     @Test
@@ -71,9 +81,42 @@ public class DotTest {
         source.filter(alwaysTrue())
               .drainTo(Sinks.logger());
 
-        // can't assert, contains multiple sub-paths, order isn't stable
-        System.out.println(p.toDotString());
-        System.out.println(p.toDag().toDotString());
+        String actualPipeline = p.toDotString();
+        assertEquals(actualPipeline, "digraph Pipeline {\n" +
+                "\t\"mapSource(source1)\" -> \"aggregateToCount\";\n" +
+                "\t\"mapSource(source1)\" -> \"aggregateToSet\";\n" +
+                "\t\"mapSource(source1)\" -> \"filter\";\n" +
+                "\t\"aggregateToCount\" -> \"loggerSink\";\n" +
+                "\t\"aggregateToSet\" -> \"loggerSink-2\";\n" +
+                "\t\"filter\" -> \"loggerSink-3\";\n" +
+                "}");
+
+        String actualDag = p.toDag().toDotString();
+        System.out.println(actualDag);
+        // contains multiple subgraphs, order isn't stable, we'll assert individual lines and the length
+        assertTrue(actualDag.startsWith("digraph DAG {"));
+        assertTrue(actualDag.contains("\"mapSource(source1)\" -> \"aggregateToCount" + FIRST_STAGE_VERTEX_NAME_SUFFIX
+                + "\" [label=\"partitioned\"];"));
+        assertTrue(actualDag.contains("\"mapSource(source1)\" -> \"filter\";"));
+        assertTrue(actualDag.contains("\"mapSource(source1)\" -> \"aggregateToSet" + FIRST_STAGE_VERTEX_NAME_SUFFIX
+                + "\" [label=\"partitioned\"];"));
+        assertTrue(regexContains(actualDag, "subgraph cluster_[01] \\{\n" +
+                "\t\t\"aggregateToCount" + FIRST_STAGE_VERTEX_NAME_SUFFIX
+                        + "\" -> \"aggregateToCount\" \\[label=\"distributed-partitioned\"];\n" +
+                "\t}"));
+
+        assertTrue(regexContains(actualDag, "\"aggregateToCount\" -> \"loggerSink(-[23])?\";"));
+        assertTrue(regexContains(actualDag, "subgraph cluster_[01] \\{\n" +
+                "\t\t\"aggregateToSet" + FIRST_STAGE_VERTEX_NAME_SUFFIX + "\" -> \"aggregateToSet\" "
+                        + "\\[label=\"distributed-partitioned\"];\n" +
+                "\t}"));
+        assertTrue(regexContains(actualDag, "\"aggregateToSet\" -> \"loggerSink(-[23])?\";"));
+        assertTrue(regexContains(actualDag, "\"filter\" -> \"loggerSink(-[23])?\";"));
+        assertTrue(actualDag.endsWith("\n}"));
+    }
+
+    private boolean regexContains(String str, String regex) {
+        return Pattern.compile(regex).matcher(str).find();
     }
 
     @Test
@@ -91,11 +134,13 @@ public class DotTest {
                 "\t\"aggregateToCount\" -> \"loggerSink\";\n" +
                 "}", p.toDotString());
         assertEquals("digraph DAG {\n" +
-                "\t\"mapSource(source1\\\")\" -> \"aggregateToCount-step1\" [label=\"partitioned\"];\n" +
+                "\t\"mapSource(source1\\\")\" -> \"aggregateToCount" + FIRST_STAGE_VERTEX_NAME_SUFFIX
+                        + "\" [label=\"partitioned\"];\n" +
                 "\tsubgraph cluster_0 {\n" +
-                "\t\t\"aggregateToCount-step1\" -> \"aggregateToCount-step2\" [label=\"distributed-partitioned\"];\n" +
+                "\t\t\"aggregateToCount" + FIRST_STAGE_VERTEX_NAME_SUFFIX
+                        + "\" -> \"aggregateToCount\" [label=\"distributed-partitioned\"];\n" +
                 "\t}\n" +
-                "\t\"aggregateToCount-step2\" -> \"loggerSink\";\n" +
+                "\t\"aggregateToCount\" -> \"loggerSink\";\n" +
                 "}", p.toDag().toDotString());
     }
 }

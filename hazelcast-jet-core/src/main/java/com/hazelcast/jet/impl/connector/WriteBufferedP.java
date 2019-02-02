@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.core.Inbox;
 import com.hazelcast.jet.core.Outbox;
 import com.hazelcast.jet.core.Processor;
+import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.SinkProcessors;
 import com.hazelcast.jet.function.DistributedBiConsumer;
 import com.hazelcast.jet.function.DistributedConsumer;
@@ -27,14 +28,13 @@ import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.function.DistributedSupplier;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 
 public final class WriteBufferedP<B, T> implements Processor {
 
     private final DistributedFunction<? super Context, B> createFn;
     private final DistributedBiConsumer<? super B, ? super T> onReceiveFn;
     private final DistributedConsumer<? super B> flushFn;
-    private DistributedConsumer<? super B> destroyFn;
+    private final DistributedConsumer<? super B> destroyFn;
 
     private B buffer;
 
@@ -65,18 +65,20 @@ public final class WriteBufferedP<B, T> implements Processor {
     }
 
     @Override
-    public boolean complete() {
-        close(null);
+    public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+        // we're a sink, no need to forward the watermarks
         return true;
     }
 
     @Override
-    public void close(@Nullable Throwable error) {
-        // avoid double destroyFn call: close() method is called from complete(), as well as by
-        // the Jet engine
-        if (destroyFn != null && buffer != null) {
+    public boolean complete() {
+        return true;
+    }
+
+    @Override
+    public void close() {
+        if (buffer != null) {
             destroyFn.accept(buffer);
-            destroyFn = null;
         }
     }
 

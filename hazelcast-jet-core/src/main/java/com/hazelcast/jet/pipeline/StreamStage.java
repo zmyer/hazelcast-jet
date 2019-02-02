@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 
 package com.hazelcast.jet.pipeline;
 
+import com.hazelcast.core.IMap;
+import com.hazelcast.core.ReplicatedMap;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.core.Processor;
@@ -27,12 +29,13 @@ import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.function.DistributedTriFunction;
 
 import javax.annotation.Nonnull;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * Represents a stage in a distributed computation {@link Pipeline
- * pipeline} that will observe an unbounded amount of data (i.e., an event
- * stream). It accepts input from its upstream stages (if any) and passes
- * its output to its downstream stages.
+ * A stage in a distributed computation {@link Pipeline pipeline} that will
+ * observe an unbounded amount of data (i.e., an event stream). It accepts
+ * input from its upstream stages (if any) and passes its output to its
+ * downstream stages.
  *
  * @param <T> the type of items coming out of this stage
  */
@@ -59,7 +62,7 @@ public interface StreamStage<T> extends GeneralStage<T> {
     StreamStage<T> merge(@Nonnull StreamStage<? extends T> other);
 
     @Nonnull @Override
-    <K> StreamStageWithGrouping<T, K> groupingKey(@Nonnull DistributedFunction<? super T, ? extends K> keyFn);
+    <K> StreamStageWithKey<T, K> groupingKey(@Nonnull DistributedFunction<? super T, ? extends K> keyFn);
 
     @Nonnull @Override
     <R> StreamStage<R> map(@Nonnull DistributedFunction<? super T, ? extends R> mapFn);
@@ -77,19 +80,69 @@ public interface StreamStage<T> extends GeneralStage<T> {
     );
 
     @Nonnull @Override
+    <C, R> StreamStage<R> mapUsingContextAsync(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
+    );
+
+    @Nonnull @Override
     <C> StreamStage<T> filterUsingContext(
             @Nonnull ContextFactory<C> contextFactory,
             @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
     );
 
     @Nonnull @Override
-    <C, R> StreamStage<R> flatMapUsingContext(
+    <C> StreamStage<T> filterUsingContextAsync(
             @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<? extends R>> flatMapFn
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
     );
 
     @Nonnull @Override
-    <R> StreamStage<R> aggregateRolling(@Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp);
+    <C, R> StreamStage<R> flatMapUsingContext(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<R>> flatMapFn
+    );
+
+    @Nonnull @Override
+    <C, R> StreamStage<R> flatMapUsingContextAsync(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Traverser<R>>> flatMapAsyncFn
+    );
+
+    @Override @Nonnull
+    default <K, V, R> StreamStage<R> mapUsingReplicatedMap(
+            @Nonnull String mapName,
+            @Nonnull DistributedBiFunction<? super ReplicatedMap<K, V>, ? super T, ? extends R> mapFn
+    ) {
+        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(mapName, mapFn);
+    }
+
+    @Override @Nonnull
+    default <K, V, R> StreamStage<R> mapUsingReplicatedMap(
+            @Nonnull ReplicatedMap<K, V> replicatedMap,
+            @Nonnull DistributedBiFunction<? super ReplicatedMap<K, V>, ? super T, ? extends R> mapFn
+    ) {
+        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(replicatedMap, mapFn);
+    }
+
+    @Override @Nonnull
+    default <K, V, R> StreamStage<R> mapUsingIMapAsync(
+            @Nonnull String mapName,
+            @Nonnull DistributedBiFunction<? super IMap<K, V>, ? super T, ? extends CompletableFuture<R>> mapFn
+    ) {
+        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingIMapAsync(mapName, mapFn);
+    }
+
+    @Override @Nonnull
+    default <K, V, R> StreamStage<R> mapUsingIMapAsync(
+            @Nonnull IMap<K, V> iMap,
+            @Nonnull DistributedBiFunction<? super IMap<K, V>, ? super T, ? extends CompletableFuture<R>> mapFn
+    ) {
+        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingIMapAsync(iMap, mapFn);
+    }
+
+    @Nonnull @Override
+    <R> StreamStage<R> rollingAggregate(@Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp);
 
     @Nonnull @Override
     <K, T1_IN, T1, R> StreamStage<R> hashJoin(

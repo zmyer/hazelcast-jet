@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -95,6 +95,7 @@ public class TestApplicationContext {
         assertEquals(4, instanceConfig.getBackupCount());
         assertEquals(2, instanceConfig.getCooperativeThreadCount());
         assertEquals(200, instanceConfig.getFlowControlPeriodMs());
+        assertEquals(1234, instanceConfig.getScaleUpDelayMillis());
 
         EdgeConfig edgeConfig = jetConfig.getDefaultEdgeConfig();
         assertEquals(8, edgeConfig.getQueueSize());
@@ -106,7 +107,8 @@ public class TestApplicationContext {
         MetricsConfig metricsConfig = jetConfig.getMetricsConfig();
         assertFalse(metricsConfig.isEnabled());
         assertEquals(123, metricsConfig.getRetentionSeconds());
-        assertTrue(metricsConfig.isEnabledForDataStructures());
+        assertEquals(10, metricsConfig.getCollectionIntervalSeconds());
+        assertTrue(metricsConfig.isMetricsForDataStructuresEnabled());
     }
 
     private void assertHazelcastConfig(Config cfg) {

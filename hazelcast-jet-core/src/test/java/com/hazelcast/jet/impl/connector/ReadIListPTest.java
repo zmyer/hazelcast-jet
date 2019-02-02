@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ public class ReadIListPTest extends JetTestSupport {
         List<Object> data = IntStream.range(0, listLength).boxed().collect(toList());
         list.addAll(data);
         TestSupport
-                .verifyProcessor(new ReadIListP(list.getName(), null))
+                .verifyProcessor(() -> new ReadIListP(list.getName(), null))
                 .jetInstance(instance)
                 .disableSnapshots()
                 .disableLogging()

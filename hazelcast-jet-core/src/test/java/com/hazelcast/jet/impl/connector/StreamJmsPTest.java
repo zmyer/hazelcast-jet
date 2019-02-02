@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import com.hazelcast.jet.core.JetTestSupport;
 import com.hazelcast.jet.core.Processor.Context;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
+import com.hazelcast.jet.function.DistributedConsumer;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.logging.Logger;
 import com.hazelcast.test.HazelcastParallelClassRunner;
@@ -41,8 +42,7 @@ import javax.jms.TextMessage;
 import java.util.Enumeration;
 import java.util.Queue;
 
-import static com.hazelcast.jet.function.DistributedFunctions.noopConsumer;
-import static com.hazelcast.jet.impl.util.Util.uncheckCall;
+import static com.hazelcast.jet.core.EventTimePolicy.noEventTime;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(HazelcastParallelClassRunner.class)
@@ -57,13 +57,14 @@ public class StreamJmsPTest extends JetTestSupport {
 
     @After
     public void stopProcessor() throws Exception {
-        processor.close(null);
+        processor.close();
         processorConnection.close();
     }
 
     @Test
     public void when_queue() throws Exception {
         String queueName = randomString();
+        logger.info("using queue: " + queueName);
         initializeProcessor(queueName, true);
         String message1 = sendMessage(queueName, true);
         String message2 = sendMessage(queueName, true);
@@ -72,16 +73,25 @@ public class StreamJmsPTest extends JetTestSupport {
 
         Queue<Object> queue = outbox.queue(0);
 
-        processor.complete();
-        assertEquals(message1, queue.poll());
+        // Even though both messages are in queue, the processor might not see them
+        // because it uses `consumer.receiveNoWait()`, so if it's not yet available, it doesn't
+        // block and it should be available later.
+        // See https://github.com/hazelcast/hazelcast-jet/issues/1010
+        assertTrueEventually(() -> {
+            processor.complete();
+            assertEquals(message1, queue.poll());
+        });
         outbox.reset();
-        processor.complete();
-        assertEquals(message2, queue.poll());
+        assertTrueEventually(() -> {
+            processor.complete();
+            assertEquals(message2, queue.poll());
+        });
     }
 
     @Test
     public void when_topic() throws Exception {
         String topicName = randomString();
+        logger.info("using topic: " + topicName);
         sendMessage(topicName, false);
         initializeProcessor(topicName, false);
         sleepSeconds(1);
@@ -99,14 +109,12 @@ public class StreamJmsPTest extends JetTestSupport {
         processorConnection = broker.createConnectionFactory().createConnection();
         processorConnection.start();
 
-        DistributedFunction<Connection, Session> sessionFn = c -> uncheckCall(() ->
-                c.createSession(false, Session.AUTO_ACKNOWLEDGE));
-        DistributedFunction<Session, MessageConsumer> consumerFn = s -> uncheckCall(() -> {
-            Destination destination = isQueue ? s.createQueue(destinationName) : s.createTopic(destinationName);
-            return s.createConsumer(destination);
-        });
-        DistributedFunction<Message, String> textMessageFn = m -> uncheckCall(((TextMessage) m)::getText);
-        processor = new StreamJmsP<>(processorConnection, sessionFn, consumerFn, noopConsumer(), textMessageFn);
+        DistributedFunction<Connection, Session> sessionFn = c -> c.createSession(false, Session.AUTO_ACKNOWLEDGE);
+        DistributedFunction<Session, MessageConsumer> consumerFn = s ->
+                s.createConsumer(isQueue ? s.createQueue(destinationName) : s.createTopic(destinationName));
+        DistributedFunction<Message, String> textMessageFn = m -> ((TextMessage) m).getText();
+        processor = new StreamJmsP<>(
+                processorConnection, sessionFn, consumerFn, DistributedConsumer.noop(), textMessageFn, noEventTime());
         outbox = new TestOutbox(1);
         Context ctx = new TestProcessorContext().setLogger(Logger.getLogger(StreamJmsP.class));
         processor.init(outbox, ctx);
@@ -124,6 +132,7 @@ public class StreamJmsPTest extends JetTestSupport {
         MessageProducer producer = session.createProducer(destination);
         TextMessage textMessage = session.createTextMessage(message);
         producer.send(textMessage);
+        logger.info("sent message " + message + " to " + destinationName);
         session.close();
         connection.close();
         return message;
@@ -146,5 +155,4 @@ public class StreamJmsPTest extends JetTestSupport {
         connection.close();
         return size;
     }
-
 }

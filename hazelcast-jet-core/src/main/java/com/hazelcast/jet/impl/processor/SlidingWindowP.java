@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.impl.processor;
 
+import com.hazelcast.core.PartitionAware;
 import com.hazelcast.internal.metrics.Probe;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.Traverser;
@@ -28,13 +29,19 @@ import com.hazelcast.jet.core.SlidingWindowPolicy;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.function.KeyedWindowResultFunction;
+import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
+import com.hazelcast.nio.ObjectDataInput;
+import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -107,7 +114,13 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
 
     // value to be used temporarily during snapshot restore
     private long minRestoredNextWinToEmit = Long.MAX_VALUE;
+    private long minRestoredFrameTs = Long.MAX_VALUE;
     private ProcessingGuarantee processingGuarantee;
+
+    // extracted lambdas to reduce GC litter
+    private Function<Long, Map<K, A>> createMapPerTsFunction;
+    private Function<K, A> createAccFunction;
+    private boolean badFrameRestored;
 
     @SuppressWarnings("unchecked")
     public SlidingWindowP(
@@ -132,9 +145,19 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
         this.isLastStage = isLastStage;
         this.wmFlatMapper = flatMapper(
                 wm -> windowTraverserAndEvictor(wm.timestamp())
+                        .append(wm)
                         .onFirstNull(() -> nextWinToEmit = winPolicy.higherFrameTs(wm.timestamp()))
         );
         this.emptyAcc = aggrOp.createFn().get();
+
+        createMapPerTsFunction = x -> {
+            lazyIncrement(totalFrames);
+            return new HashMap<>();
+        };
+        createAccFunction = k -> {
+            lazyIncrement(totalKeysInFrames);
+            return aggrOp.createFn().get();
+        };
     }
 
     @Override
@@ -160,14 +183,8 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
         }
         final K key = keyFns.get(ordinal).apply(item);
         A acc = tsToKeyToAcc
-                .computeIfAbsent(frameTs, x -> {
-                    lazyIncrement(totalFrames);
-                    return new HashMap<>();
-                })
-                .computeIfAbsent(key, k -> {
-                    lazyIncrement(totalKeysInFrames);
-                    return aggrOp.createFn().get();
-                });
+                .computeIfAbsent(frameTs, createMapPerTsFunction)
+                .computeIfAbsent(key, createAccFunction);
         aggrOp.accumulateFn(ordinal).accept(acc, item);
         topTs = max(topTs, frameTs);
         return true;
@@ -194,7 +211,10 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
                             .map(e2 -> entry(new SnapshotKey(e.getKey(), e2.getKey()), e2.getValue()))
                     )
                     .append(entry(broadcastKey(Keys.NEXT_WIN_TO_EMIT), nextWinToEmit))
-                    .onFirstNull(() -> snapshotTraverser = null);
+                    .onFirstNull(() -> {
+                        logFine(getLogger(), "Saved nextWinToEmit: %s", nextWinToEmit);
+                        snapshotTraverser = null;
+                    });
         }
         return emitFromTraverserToSnapshot(snapshotTraverser);
     }
@@ -217,18 +237,32 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
             return;
         }
         SnapshotKey k = (SnapshotKey) key;
-        if (tsToKeyToAcc
-                .computeIfAbsent(k.timestamp,
-                        x -> {
-                            lazyIncrement(totalFrames);
-                            return new HashMap<>();
-                        })
-                .put((K) k.key, (A) value) != null
-        ) {
-            throw new JetException("Duplicate key in snapshot: " + k);
+        // align frame timestamp to our frame - they can be misaligned if slide step was changed in updated DAG
+        long higherFrameTs = winPolicy.higherFrameTs(k.timestamp - 1);
+        if (higherFrameTs != k.timestamp) {
+            if (!badFrameRestored) {
+                badFrameRestored = true;
+                getLogger().warning("Frames in the state do not match the current frame size: they were likely " +
+                        "saved for different window slide step or different offset. The window results will probably be " +
+                        "incorrect until all restored frames are emitted.");
+            }
         }
+        minRestoredFrameTs = Math.min(higherFrameTs, minRestoredFrameTs);
+        tsToKeyToAcc
+                .computeIfAbsent(higherFrameTs, createMapPerTsFunction)
+                .merge((K) k.key, (A) value, (o, n) -> {
+                    if (!badFrameRestored) {
+                        throw new JetException("Duplicate key in snapshot: " + k);
+                    }
+                    if (combineFn == null) {
+                        throw new JetException("AggregateOperation.combineFn required for merging restored frames");
+                    }
+                    combineFn.accept(o, n);
+                    lazyAdd(totalKeysInFrames, -1);
+                    return o;
+                });
         lazyIncrement(totalKeysInFrames);
-        topTs = max(topTs, k.timestamp);
+        topTs = max(topTs, higherFrameTs);
     }
 
     @Override
@@ -238,8 +272,23 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
         // tumbling window and it makes no difference in that case. So we don't
         // restore and remain at MIN_VALUE.
         if (isLastStage) {
-            nextWinToEmit = minRestoredNextWinToEmit;
+            // if nextWinToEmit is not on frame boundary, push it to next boundary
+            nextWinToEmit = minRestoredNextWinToEmit > Long.MIN_VALUE
+                    ? winPolicy.higherFrameTs(minRestoredNextWinToEmit - 1)
+                    : minRestoredNextWinToEmit;
             logFine(getLogger(), "Restored nextWinToEmit from snapshot to: %s", nextWinToEmit);
+            // Delete too old restored frames. This can happen when restoring from exported state and new job
+            // has smaller window size
+            if (nextWinToEmit > Long.MIN_VALUE + winPolicy.windowSize()) {
+                for (long ts = minRestoredFrameTs; ts <= nextWinToEmit - winPolicy.windowSize();
+                        ts += winPolicy.frameSize()) {
+                    Map<K, A> removed = tsToKeyToAcc.remove(ts);
+                    if (removed != null) {
+                        lazyAdd(totalFrames, -1);
+                        lazyAdd(totalKeysInFrames, -removed.size());
+                    }
+                }
+            }
         }
         return true;
     }
@@ -296,10 +345,12 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
              ts <= frameTs;
              ts += winPolicy.frameSize()
         ) {
-            tsToKeyToAcc.getOrDefault(ts, emptyMap())
-                        .forEach((key, currAcc) -> combineFn.accept(
-                                window.computeIfAbsent(key, k -> aggrOp.createFn().get()),
-                                currAcc));
+            assert combineFn != null : "combineFn == null";
+            for (Entry<K, A> entry : tsToKeyToAcc.getOrDefault(ts, emptyMap()).entrySet()) {
+                combineFn.accept(
+                        window.computeIfAbsent(entry.getKey(), k -> aggrOp.createFn().get()),
+                        entry.getValue());
+            }
         }
         return window;
     }
@@ -357,5 +408,66 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
     // package-visible for test
     enum Keys {
         NEXT_WIN_TO_EMIT
+    }
+
+    public static final class SnapshotKey implements PartitionAware<Object>, IdentifiedDataSerializable {
+        long timestamp;
+        Object key;
+
+        public SnapshotKey() {
+        }
+
+        SnapshotKey(long timestamp, @Nonnull Object key) {
+            this.timestamp = timestamp;
+            this.key = key;
+        }
+
+        @Override
+        public Object getPartitionKey() {
+            return key;
+        }
+
+        @Override
+        public int getFactoryId() {
+            return JetInitDataSerializerHook.FACTORY_ID;
+        }
+
+        @Override
+        public int getId() {
+            return JetInitDataSerializerHook.SLIDING_WINDOW_P_SNAPSHOT_KEY;
+        }
+
+        @Override
+        public void writeData(ObjectDataOutput out) throws IOException {
+            out.writeLong(timestamp);
+            out.writeObject(key);
+        }
+
+        @Override
+        public void readData(ObjectDataInput in) throws IOException {
+            timestamp = in.readLong();
+            key = in.readObject();
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            SnapshotKey that;
+            return this == o
+                    || o instanceof SnapshotKey
+                    && this.timestamp == (that = (SnapshotKey) o).timestamp
+                    && Objects.equals(this.key, that.key);
+        }
+
+        @Override
+        public int hashCode() {
+            int hc = (int) (timestamp ^ (timestamp >>> 32));
+            hc = 73 * hc + Objects.hashCode(key);
+            return hc;
+        }
+
+        @Override
+        public String toString() {
+            return "SnapshotKey{timestamp=" + timestamp + ", key=" + key + '}';
+        }
     }
 }

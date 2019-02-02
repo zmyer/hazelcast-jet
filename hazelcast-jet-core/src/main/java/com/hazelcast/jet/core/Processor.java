@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.logging.ILogger;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 
 /**
  * When Jet executes a DAG, it creates one or more instances of {@code
@@ -71,8 +70,8 @@ public interface Processor {
      * involves blocking operations, which would cause all other processors on
      * the same shared thread to starve.
      * <p>
-     * Processor instances on single vertex are allowed to return different
-     * value, but single processor instance must return constant value.
+     * Processor instances of a single vertex are allowed to return different
+     * values, but a single processor instance must always return the same value.
      * <p>
      * The default implementation returns {@code true}.
      */
@@ -88,7 +87,7 @@ public interface Processor {
      * <p>
      * The default implementation does nothing.
      */
-    default void init(@Nonnull Outbox outbox, @Nonnull Context context) {
+    default void init(@Nonnull Outbox outbox, @Nonnull Context context) throws Exception {
     }
 
     /**
@@ -101,28 +100,30 @@ public interface Processor {
      * called again before proceeding to call any other methods. There is at
      * least one item in the inbox when this method is called.
      * <p>
-     * The default implementation does nothing.
+     * The default implementation throws an exception. It is suitable for source
+     * processors.
      *
      * @param ordinal ordinal of the inbound edge
      * @param inbox   the inbox containing the pending items
      */
     default void process(int ordinal, @Nonnull Inbox inbox) {
+        throw new UnsupportedOperationException("Missing implementation in " + getClass());
     }
 
     /**
      * Tries to process the supplied watermark. The value is always greater
      * than in the previous call. The watermark is delivered for processing
-     * after it has been received from all the edges or the {@link
-     * com.hazelcast.jet.config.JobConfig#setMaxWatermarkRetainMillis(int)
-     * maximum retention time} has elapsed.
+     * after it has been received from all the edges.
      * <p>
      * The implementation may choose to process only partially and return
      * {@code false}, in which case it will be called again later with the same
-     * {@code timestamp} before any other processing method is called. When the
-     * method returns {@code true}, the watermark is forwarded to the
+     * {@code timestamp} before any other processing method is called. Before
+     * the method returns {@code true}, it should emit the watermark to the
      * downstream processors.
      * <p>
-     * The default implementation just returns {@code true}.
+     * The default implementation throws an exception. For any non-sink
+     * processor you must provide an implementation that at least forwards the
+     * watermark. A sink processor may simply return {@code true}.
      *
      * <h3>Caution for Jobs With the At-Least-Once Guarantee</h3>
      * Jet propagates the value of the watermark by sending <em>watermark
@@ -138,7 +139,7 @@ public interface Processor {
      *         {@code false} otherwise.
      */
     default boolean tryProcessWatermark(@Nonnull Watermark watermark) {
-        return true;
+        throw new UnsupportedOperationException("Missing implementation in " + getClass());
     }
 
     /**
@@ -146,8 +147,13 @@ public interface Processor {
      * of items in the inbox has been exhausted. It can be used to produce
      * output in the absence of input or to do general maintenance work.
      * <p>
-     * If the call returns {@code false}, it will be called again before proceeding
-     * to call any other method. Default implementation returns {@code true}.
+     * If the call returns {@code false}, it will be called again before
+     * proceeding to call any other method. Default implementation returns
+     * {@code true}.
+     * <p>
+     * If this method tried to offer to the outbox and the offer call returned
+     * false, this method must also return false and retry to offer in the
+     * next call.
      */
     default boolean tryProcess() {
         return true;
@@ -157,6 +163,10 @@ public interface Processor {
      * Called after the edge input with the supplied {@code ordinal} is
      * exhausted. If it returns {@code false}, it will be called again before
      * proceeding to call any other method.
+     * <p>
+     * If this method tried to offer to the outbox and the offer call returned
+     * false, this method must also return false and retry the offer in the
+     * next call.
      *
      * @return {@code true} if the processor is now done completing the edge,
      *         {@code false} otherwise.
@@ -168,7 +178,17 @@ public interface Processor {
     /**
      * Called after all the inbound edges' streams are exhausted. If it returns
      * {@code false}, it will be invoked again until it returns {@code true}.
-     * After this method is called, no other processing methods will be called on
+     * For example, a streaming source processor will return {@code false}
+     * forever. Unlike other methods which guarantee that no other method is
+     * called until they return {@code true}, {@link #saveToSnapshot()} can be
+     * called even though this method returned {@code false}. If you returned
+     * because {@code Outbox.offer()} returned {@code false}, make sure to
+     * first offer the pending item to the outbox in {@link #saveToSnapshot()}
+     * before continuing to {@linkplain Outbox#offerToSnapshot offer to
+     * snapshot}.
+     *
+     *<p>
+     * After this method is called, no other processing methods are called on
      * this processor, except for {@link #saveToSnapshot()}.
      * <p>
      * Non-cooperative processors are required to return from this method from
@@ -185,20 +205,15 @@ public interface Processor {
 
     /**
      * Stores its snapshotted state by adding items to the outbox's {@linkplain
-     * Outbox#offerToSnapshot(Object, Object) snapshot bucket}. If it returns
-     * {@code false}, it will be called again before proceeding to call any
-     * other method.
+     * Outbox#offerToSnapshot(Object, Object) snapshot bucket}. If this method
+     * returns {@code false}, it will be called again before proceeding to call
+     * any other method.
      * <p>
      * This method will only be called after a call to {@link #process(int,
-     * Inbox) process()} returns and the inbox is empty. After all the input is
-     * exhausted, it may also be called between {@link #complete()} calls. Once
+     * Inbox) process()} returns with an empty inbox. After all the input is
+     * exhausted, it is also called between {@link #complete()} calls. Once
      * {@code complete()} returns {@code true}, this method won't be called
      * anymore.
-     * <p>
-     * <b>Note:</b> if you returned from {@link #complete()} because some of
-     * the {@code Outbox.offer()} method returned false, you need to make sure
-     * to re-offer the pending item in this method before offering any items to
-     * {@link Outbox#offerToSnapshot}.
      * <p>
      * The default implementation takes no action and returns {@code true}.
      */
@@ -229,6 +244,10 @@ public interface Processor {
      * If it returns {@code false}, it will be called again before proceeding
      * to call any other methods.
      * <p>
+     * If this method tried to offer to the outbox and the offer call returned
+     * false, this method must also return false and retry the offer in the
+     * next call.
+     * <p>
      * The default implementation takes no action and returns {@code true}.
      */
     default boolean finishSnapshotRestore() {
@@ -236,24 +255,19 @@ public interface Processor {
     }
 
     /**
-     * Called after the execution has finished on all members - successfully or
-     * not, before {@link ProcessorSupplier#close} is called. If the execution
-     * was <em>aborted</em> due to a member leaving the cluster it is called
-     * immediately. Int this case, it can happen that the job is still running
-     * on some other member (but not on this member).
+     * Called as the last method in the processor lifecycle. It is called
+     * whether the job was successful or not, and strictly before {@link
+     * ProcessorSupplier#close} is called on this member. The method might get
+     * called even if {@link #init} method was not yet called.
      * <p>
-     * After this method no other methods are called.
+     * The method will be called right after {@link #complete()} returns {@code
+     * true}, that is before the job is finished. The job might still be
+     * running other processors.
      * <p>
-     * If this method throws an exception, it will be logged and ignored; it
-     * won't be reported as a job failure.
-     * <p>
-     * Note: this method can be called even if {@link #init} method was not
-     * called yet in case the job fails during the init phase.
-
-     * @param error the exception (if any) that caused the job to fail;
-     *              {@code null} in the case of successful job completion
+     * If this method throws an exception, it is logged but it won't be
+     * reported as a job failure or cause the job to fail.
      */
-    default void close(@Nullable Throwable error) throws Exception {
+    default void close() throws Exception {
     }
 
     /**

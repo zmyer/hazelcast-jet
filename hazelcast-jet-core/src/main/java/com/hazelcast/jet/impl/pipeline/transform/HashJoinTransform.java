@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,9 +26,10 @@ import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
 import com.hazelcast.jet.impl.processor.HashJoinCollectP;
 import com.hazelcast.jet.impl.processor.HashJoinP;
 import com.hazelcast.jet.pipeline.JoinClause;
-import java.util.List;
+
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.util.List;
 
 import static com.hazelcast.jet.core.Edge.from;
 import static com.hazelcast.jet.impl.pipeline.Planner.tailList;
@@ -94,7 +95,7 @@ public class HashJoinTransform<T0, R> extends AbstractTransform {
     @Override
     @SuppressWarnings("unchecked")
     public void addToDag(Planner p) {
-        String namePrefix = p.uniqueVertexName(this.name(), "");
+        String namePrefix = p.uniqueVertexName(this.name());
         PlannerVertex primary = p.xform2vertex.get(this.upstream().get(0));
         List keyFns = this.clauses.stream()
                                   .map(JoinClause::leftKeyFn)

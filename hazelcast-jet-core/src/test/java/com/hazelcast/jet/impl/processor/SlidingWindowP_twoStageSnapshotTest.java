@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,12 +43,13 @@ import org.junit.runners.Parameterized.Parameters;
 
 import java.util.Collection;
 import java.util.Map.Entry;
+import java.util.Queue;
 import java.util.stream.Collectors;
 
 import static com.hazelcast.jet.Util.entry;
+import static com.hazelcast.jet.core.JetTestSupport.wm;
 import static com.hazelcast.jet.core.SlidingWindowPolicy.slidingWinPolicy;
 import static com.hazelcast.jet.core.processor.Processors.combineToSlidingWindowP;
-import static com.hazelcast.jet.function.DistributedFunction.identity;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static org.junit.Assert.assertEquals;
@@ -86,18 +87,18 @@ public class SlidingWindowP_twoStageSnapshotTest {
                 .andAccumulate((LongAccumulator acc, Entry<?, Long> item) -> acc.add(item.getValue()))
                 .andCombine(LongAccumulator::add)
                 .andDeduct(LongAccumulator::subtract)
-                .andFinish(LongAccumulator::get);
+                .andExportFinish(LongAccumulator::get);
 
         DistributedSupplier<Processor> procSupplier1 = Processors.accumulateByFrameP(
                 singletonList((DistributedFunction<? super Entry<Long, Long>, ?>) t -> KEY),
                 singletonList((DistributedToLongFunction<? super Entry<Long, Long>>) Entry::getKey),
                 TimestampKind.EVENT,
                 windowDef,
-                ((AggregateOperation1<? super Entry<Long, Long>, LongAccumulator, ?>) aggrOp).withFinishFn(identity())
+                ((AggregateOperation1<? super Entry<Long, Long>, LongAccumulator, ?>) aggrOp).withIdentityFinish()
         );
 
-        DistributedSupplier<Processor> procSupplier2 = combineToSlidingWindowP(windowDef, aggrOp,
-                TimestampedEntry::fromWindowResult);
+        DistributedSupplier<Processor> procSupplier2 =
+                combineToSlidingWindowP(windowDef, aggrOp, TimestampedEntry::fromWindowResult);
 
         // new supplier to save the last supplied instance
         stage1Supplier = () -> lastSuppliedStage1Processor = (SlidingWindowP<?, ?, ?, ?>) procSupplier1.get();
@@ -111,7 +112,7 @@ public class SlidingWindowP_twoStageSnapshotTest {
     }
 
     @Test
-    public void test() {
+    public void test() throws Exception {
         SlidingWindowP stage1p1 = stage1Supplier.get();
         SlidingWindowP stage1p2 = stage1Supplier.get();
         SlidingWindowP stage2p = stage2Supplier.get();
@@ -169,33 +170,38 @@ public class SlidingWindowP_twoStageSnapshotTest {
                         outboxFrame(5, 10),
                         outboxFrame(6, 9),
                         outboxFrame(7, 7),
-                        outboxFrame(8, 4)
+                        outboxFrame(8, 4),
+                        wm(10)
                 )),
                 collectionToString(stage2Outbox.queue(0)));
     }
 
-    private void processStage2(SlidingWindowP p, TestOutbox stage1p1Outbox, TestOutbox stage1p2Outbox, TestInbox inbox) {
-        inbox.addAll(stage1p1Outbox.queue(0));
-        inbox.addAll(stage1p2Outbox.queue(0));
-        stage1p1Outbox.queue(0).clear();
-        stage1p2Outbox.queue(0).clear();
+    private static void processStage2(
+            SlidingWindowP p, TestOutbox stage1p1Outbox, TestOutbox stage1p2Outbox, TestInbox inbox
+    ) {
+        moveAllIgnoringWatermarks(stage1p1Outbox.queue(0), inbox);
+        moveAllIgnoringWatermarks(stage1p2Outbox.queue(0), inbox);
         p.process(0, inbox);
         assertTrue(inbox.isEmpty());
     }
 
-    private TestOutbox newOutbox() {
+    private static void moveAllIgnoringWatermarks(Queue<Object> outboxQueue, TestInbox inbox) {
+        for (Object o; ((o = outboxQueue.poll()) != null); ) {
+            if (!(o instanceof Watermark)) {
+                inbox.add(o);
+            }
+        }
+    }
+
+    private static TestOutbox newOutbox() {
         return new TestOutbox(new int[] {128}, 128);
     }
 
-    private void assertEmptyState(SlidingWindowP p) {
+    private static void assertEmptyState(SlidingWindowP p) {
         assertTrue("tsToKeyToFrame is not empty: " + p.tsToKeyToAcc,
                 p.tsToKeyToAcc.isEmpty());
         assertTrue("slidingWindow is not empty: " + p.slidingWindow,
                 p.slidingWindow == null || p.slidingWindow.isEmpty());
-    }
-
-    private static Watermark wm(long timestamp) {
-        return new Watermark(timestamp);
     }
 
     private static TimestampedEntry<Long, ?> outboxFrame(long ts, long value) {

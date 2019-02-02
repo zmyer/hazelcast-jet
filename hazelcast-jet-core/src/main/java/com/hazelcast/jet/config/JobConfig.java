@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 
 package com.hazelcast.jet.config;
 
+import com.hazelcast.jet.JetInstance;
+import com.hazelcast.jet.Job;
 import com.hazelcast.util.Preconditions;
 
 import javax.annotation.Nonnull;
@@ -29,23 +31,23 @@ import java.util.List;
 
 import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
 import static com.hazelcast.util.Preconditions.checkNotNull;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * Contains the configuration specific to one Hazelcast Jet job.
  */
 public class JobConfig implements Serializable {
 
-    private static final int SNAPSHOT_INTERVAL_MILLIS_DEFAULT = 10_000;
+    private static final long SNAPSHOT_INTERVAL_MILLIS_DEFAULT = SECONDS.toMillis(10);
 
     private String name;
     private ProcessingGuarantee processingGuarantee = ProcessingGuarantee.NONE;
     private long snapshotIntervalMillis = SNAPSHOT_INTERVAL_MILLIS_DEFAULT;
-
+    private boolean autoScaling = true;
     private boolean splitBrainProtectionEnabled;
     private final List<ResourceConfig> resourceConfigs = new ArrayList<>();
-    private boolean autoRestartEnabled = true;
-    private int maxWatermarkRetainMillis = -1;
     private JobClassLoaderFactory classLoaderFactory;
+    private String initialSnapshotName;
 
     /**
      * Returns the name of the job or {@code null} if no name was given.
@@ -56,8 +58,15 @@ public class JobConfig implements Serializable {
     }
 
     /**
-     * Sets the name for the job. Job names do not have to be unique.
-     * Default value is {@code null}.
+     * Sets the name of the job. There can be at most one active job in the
+     * cluster with particular name, however, the name can be reused after the
+     * previous job with that name completed or failed. See {@link
+     * JetInstance#newJobIfAbsent}. An active job is a job that is running,
+     * suspended or waiting to be run.
+     * <p>
+     * The job name is printed in logs and is visible in Jet Management Center.
+     * <p>
+     * The default value is {@code null}.
      *
      * @return {@code this} instance for fluent API
      */
@@ -96,9 +105,9 @@ public class JobConfig implements Serializable {
      * <p>
      * Split-brain protection is disabled by default.
      * <p>
-     * This setting has no effect if
-     * {@link #setAutoRestartOnMemberFailure(boolean) auto restart on member
-     * failure} is disabled.
+     * If {@linkplain #setAutoScaling(boolean) auto scaling} is disabled and
+     * you manually {@link Job#resume} the job, the job won't start executing
+     * until the quorum is met, but will remain in the resumed state.
      *
      * @return {@code this} instance for fluent API
      */
@@ -109,29 +118,37 @@ public class JobConfig implements Serializable {
     }
 
     /**
-     * Tells whether {@link #setAutoRestartOnMemberFailure(boolean) auto
-     * restart after member failure} is enabled.
-     */
-    public boolean isAutoRestartOnMemberFailureEnabled() {
-        return this.autoRestartEnabled;
-    }
-
-    /**
-     * Sets whether the job should automatically restart after a
-     * participating member leaves the cluster. When enabled and a member
-     * fails, the job will automatically restart on the remaining members.
-     * <p>
-     * If snapshotting is enabled, the job state will be restored from the
-     * latest snapshot.
-     * <p>
-     * By default, auto-restart is enabled.
+     * Sets whether Jet will scale the job up or down when a member is added or
+     * removed from the cluster. Enabled by default.
+     *
+     * <pre>
+     * +--------------------------+-----------------------+----------------+
+     * |       Auto scaling       |     Member added      | Member removed |
+     * +--------------------------+-----------------------+----------------+
+     * | Enabled                  | restart (after delay) | restart        |
+     * | Disabled - snapshots on  | no action             | suspend        |
+     * | Disabled - snapshots off | no action             | fail           |
+     * +--------------------------+-----------------------+----------------+
+     * </pre>
+     *
+     * @see InstanceConfig#setScaleUpDelayMillis
+     *        Configuring the scale-up delay
+     * @see #setProcessingGuarantee
+     *        Enabling/disabling snapshots
      *
      * @return {@code this} instance for fluent API
      */
-    @Nonnull
-    public JobConfig setAutoRestartOnMemberFailure(boolean isEnabled) {
-        this.autoRestartEnabled = isEnabled;
+    public JobConfig setAutoScaling(boolean enabled) {
+        this.autoScaling = enabled;
         return this;
+    }
+
+    /**
+     * Returns whether auto scaling is enabled, see {@link
+     * #setAutoScaling(boolean)}.
+     */
+    public boolean isAutoScaling() {
+        return autoScaling;
     }
 
     /**
@@ -170,9 +187,9 @@ public class JobConfig implements Serializable {
 
     /**
      * Sets the snapshot interval in milliseconds &mdash; the interval between
-     * the completion of the previous snapshot and the start of a new one.
-     * Must be set to a positive value. This setting is only relevant when
-     * <i>>at-least-once</i> or <i>exactly-once</i> processing guarantees are used.
+     * the completion of the previous snapshot and the start of a new one. Must
+     * be set to a positive value. This setting is only relevant with
+     * <i>at-least-once</i> or <i>exactly-once</i> processing guarantees.
      * <p>
      * Default value is set to 10 seconds.
      *
@@ -186,56 +203,11 @@ public class JobConfig implements Serializable {
     }
 
     /**
-     * Sets the maximum time to retain the watermarks while coalescing them.
-     * A negative value disables the limit and Jet will retain the watermark
-     * as long as needed. With this setting you choose a trade-off between
-     * latency and correctness that arises when dealing with stream skew.
-     *
-     * <h3>Stream Skew</h3>
-     * The <em>skew</em> between two slices of a distributed stream is defined
-     * as the difference in their watermark values. There is always some skew
-     * in the system and it's acceptable, but it can grow very large due to
-     * various causes such as a hiccup on one of the cluster members (a long GC
-     * pause), external source hiccup on a member, skew between partitions of a
-     * distributed source, and so on.
-     *
-     * <h3>Detrimental Effects of Stream Skew</h3>
-     * To maintain full correctness, Jet must wait indefinitely for the
-     * watermark to advance in all the slices of the stream in order to advance
-     * the overall watermark. The process that does this is called <em>watermark
-     * coalescing</em> and it results in increased latency of the output with
-     * respect to the input and possibly also increased memory usage due to the
-     * retention of all the pending data.
-     *
-     * <h3>Detrimental Effects of Limiting Retention Time</h3>
-     * Limiting the watermark retention time allows it to advance, and therefore
-     * the processing to continue, in the face of exceedingly large stream skew.
-     * However, since any event with a timestamp less than the current watermark
-     * is categorized as a <em>late event </em> and dropped, this limit can
-     * result in data loss.
-     *
-     * @param retainMillis maximum time to retain watermarks for delayed queues
-     *                     or -1 to disable (the default)
-     * @return {@code this} instance for fluent API
-     */
-    @Nonnull
-    public JobConfig setMaxWatermarkRetainMillis(int retainMillis) {
-        maxWatermarkRetainMillis = retainMillis;
-        return this;
-    }
-
-    /**
-     * Returns the maximum watermark retention time, see {@link
-     * #setMaxWatermarkRetainMillis(int)}.
-     */
-    public int getMaxWatermarkRetainMillis() {
-        return maxWatermarkRetainMillis;
-    }
-
-    /**
      * Adds the supplied classes to the list of resources that will be
      * available on the job's classpath while it's executing in the Jet
      * cluster.
+     * <p>
+     * See also {@link #addJar} and {@link #addResource}.
      *
      * @return {@code this} instance for fluent API
      */
@@ -389,7 +361,7 @@ public class JobConfig implements Serializable {
 
     private static String toFilename(URL url) {
         String urlFile = url.getPath();
-        return urlFile.substring(urlFile.lastIndexOf('/') + 1, urlFile.length());
+        return urlFile.substring(urlFile.lastIndexOf('/') + 1);
     }
 
     /**
@@ -398,6 +370,7 @@ public class JobConfig implements Serializable {
      *
      * @return {@code this} instance for fluent API
      */
+    @Nonnull
     public JobConfig setClassLoaderFactory(@Nullable JobClassLoaderFactory classLoaderFactory) {
         this.classLoaderFactory = classLoaderFactory;
         return this;
@@ -409,5 +382,34 @@ public class JobConfig implements Serializable {
     @Nullable
     public JobClassLoaderFactory getClassLoaderFactory() {
         return classLoaderFactory;
+    }
+
+    /**
+     * Returns the configured {@linkplain #setInitialSnapshotName(String)
+     * initial snapshot name} or {@code null} if no initial snapshot is configured.
+     */
+    @Nullable
+    public String getInitialSnapshotName() {
+        return initialSnapshotName;
+    }
+
+    /**
+     * Sets the {@linkplain Job#exportSnapshot(String) exported state snapshot}
+     * name to restore the initial job state from. This state will be used for
+     * initial state and also for the case when the execution restarts before
+     * it produces first snapshot.
+     * <p>
+     * The job will use the state even if {@linkplain
+     * #setProcessingGuarantee(ProcessingGuarantee) processing guarantee} is
+     * set to {@link ProcessingGuarantee#NONE NONE}.
+     *
+     * @param initialSnapshotName the snapshot name given to {@link
+     *      Job#exportSnapshot(String)}
+     * @return {@code this} instance for fluent API
+     */
+    @Nonnull
+    public JobConfig setInitialSnapshotName(@Nullable String initialSnapshotName) {
+        this.initialSnapshotName = initialSnapshotName;
+        return this;
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,37 +16,45 @@
 
 package com.hazelcast.jet.impl.util;
 
+import com.hazelcast.jet.IMapJet;
+import com.hazelcast.jet.JetInstance;
+import com.hazelcast.jet.core.JetTestSupport;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static com.hazelcast.jet.impl.util.Util.addClamped;
 import static com.hazelcast.jet.impl.util.Util.gcd;
 import static com.hazelcast.jet.impl.util.Util.memoizeConcurrent;
 import static com.hazelcast.jet.impl.util.Util.subtractClamped;
+import static java.util.stream.Collectors.toMap;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 @RunWith(HazelcastParallelClassRunner.class)
-public class UtilTest {
+public class UtilTest extends JetTestSupport {
 
     @Rule
     public ExpectedException exception = ExpectedException.none();
 
     @Test
-    public void when_addClamped_then_doesntOverflow() {
+    public void when_addClamped_then_doesNotOverflow() {
         // no overflow
         assertEquals(0, addClamped(0, 0));
         assertEquals(1, addClamped(1, 0));
         assertEquals(-1, addClamped(-1, 0));
         assertEquals(-1, addClamped(Long.MAX_VALUE, Long.MIN_VALUE));
+        assertEquals(-1, addClamped(Long.MIN_VALUE, Long.MAX_VALUE));
 
         // overflow over MAX_VALUE
         assertEquals(Long.MAX_VALUE, addClamped(Long.MAX_VALUE, 1));
@@ -58,12 +66,13 @@ public class UtilTest {
     }
 
     @Test
-    public void when_subtractClamped_then_doesntOverflow() {
+    public void when_subtractClamped_then_doesNotOverflow() {
         // no overflow
         assertEquals(0, subtractClamped(0, 0));
         assertEquals(1, subtractClamped(1, 0));
         assertEquals(-1, subtractClamped(-1, 0));
         assertEquals(0, subtractClamped(Long.MAX_VALUE, Long.MAX_VALUE));
+        assertEquals(0, subtractClamped(Long.MIN_VALUE, Long.MIN_VALUE));
 
         // overflow over MAX_VALUE
         assertEquals(Long.MAX_VALUE, subtractClamped(Long.MAX_VALUE, -1));
@@ -102,28 +111,6 @@ public class UtilTest {
     }
 
     @Test
-    public void test_idToString() {
-        assertEquals("0000-0000-0000-0000", Util.idToString(0));
-        assertEquals("0000-0000-0000-0001", Util.idToString(1));
-        assertEquals("7fff-ffff-ffff-ffff", Util.idToString(Long.MAX_VALUE));
-        assertEquals("8000-0000-0000-0000", Util.idToString(Long.MIN_VALUE));
-        assertEquals("ffff-ffff-ffff-ffff", Util.idToString(-1));
-        assertEquals("1122-10f4-7de9-8115", Util.idToString(1234567890123456789L));
-        assertEquals("eedd-ef0b-8216-7eeb", Util.idToString(-1234567890123456789L));
-    }
-
-    @Test
-    public void test_idFromString() {
-        assertEquals(0, Util.idFromString("0000-0000-0000-0000"));
-        assertEquals(1, Util.idFromString("0000-0000-0000-0001"));
-        assertEquals(Long.MAX_VALUE, Util.idFromString("7fff-ffff-ffff-ffff"));
-        assertEquals(Long.MIN_VALUE, Util.idFromString("8000-0000-0000-0000"));
-        assertEquals(-1, Util.idFromString("ffff-ffff-ffff-ffff"));
-        assertEquals(1234567890123456789L, Util.idFromString("1122-10f4-7de9-8115"));
-        assertEquals(-1234567890123456789L, Util.idFromString("eedd-ef0b-8216-7eeb"));
-    }
-
-    @Test
     public void test_calculateGcd2() {
         assertEquals(2, gcd(0L, 2L));
         assertEquals(1, gcd(1L, 2L));
@@ -137,5 +124,21 @@ public class UtilTest {
         assertEquals(4, gcd(4, 4, 4));
         assertEquals(4, gcd(4, 8, 12));
         assertEquals(1, gcd(4, 8, 13));
+    }
+
+    @Test
+    public void test_copyMap() throws Exception {
+        JetInstance[] instances = createJetMembers(2);
+
+        logger.info("Populating source map...");
+        IMapJet<Object, Object> srcMap = instances[0].getMap("src");
+        Map<Integer, Integer> testData = IntStream.range(0, 100_000).boxed().collect(toMap(e -> e, e -> e));
+        srcMap.putAll(testData);
+
+        logger.info("Copying using job...");
+        Util.copyMapUsingJob(instances[0], 128, srcMap.getName(), "target").get();
+        logger.info("Done copying");
+
+        assertEquals(testData, new HashMap<>(instances[0].getMap("target")));
     }
 }

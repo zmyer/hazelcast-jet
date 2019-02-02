@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package com.hazelcast.jet.impl.execution.init;
 import com.hazelcast.internal.metrics.LongProbeFunction;
 import com.hazelcast.internal.metrics.ProbeBuilder;
 import com.hazelcast.internal.metrics.ProbeLevel;
+import com.hazelcast.internal.metrics.ProbeUnit;
 import com.hazelcast.internal.util.concurrent.ConcurrentConveyor;
 import com.hazelcast.internal.util.concurrent.OneToOneConcurrentArrayQueue;
 import com.hazelcast.internal.util.concurrent.QueuedPipe;
@@ -54,6 +55,7 @@ import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 import com.hazelcast.spi.NodeEngine;
 import com.hazelcast.spi.impl.NodeEngineImpl;
 import com.hazelcast.spi.partition.IPartitionService;
+import com.hazelcast.util.StringUtil;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -70,10 +72,11 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.internal.util.concurrent.ConcurrentConveyor.concurrentConveyor;
+import static com.hazelcast.jet.Util.idToString;
 import static com.hazelcast.jet.config.EdgeConfig.DEFAULT_QUEUE_SIZE;
 import static com.hazelcast.jet.impl.execution.OutboundCollector.compositeCollector;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
 import static com.hazelcast.jet.impl.util.Util.getJetInstance;
-import static com.hazelcast.jet.impl.util.Util.idToString;
 import static com.hazelcast.jet.impl.util.Util.memoize;
 import static com.hazelcast.jet.impl.util.Util.readList;
 import static com.hazelcast.jet.impl.util.Util.writeList;
@@ -133,7 +136,7 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
     public void initialize(NodeEngine nodeEngine, long jobId, long executionId, SnapshotContext snapshotContext) {
         this.nodeEngine = (NodeEngineImpl) nodeEngine;
         this.executionId = executionId;
-        initProcSuppliers();
+        initProcSuppliers(jobId, executionId);
         initDag();
 
         this.ptionArrgmt = new PartitionArrangement(partitionOwners, nodeEngine.getThisAddress());
@@ -145,21 +148,28 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
             QueuedPipe<Object>[] snapshotQueues = new QueuedPipe[vertex.localParallelism()];
             Arrays.setAll(snapshotQueues, i -> new OneToOneConcurrentArrayQueue<>(SNAPSHOT_QUEUE_SIZE));
             ConcurrentConveyor<Object> ssConveyor = ConcurrentConveyor.concurrentConveyor(null, snapshotQueues);
-            StoreSnapshotTasklet ssTasklet = new StoreSnapshotTasklet(snapshotContext, jobId,
-                    new ConcurrentInboundEdgeStream(ssConveyor, 0, 0, lastSnapshotId, true, -1,
+            StoreSnapshotTasklet ssTasklet = new StoreSnapshotTasklet(snapshotContext,
+                    new ConcurrentInboundEdgeStream(ssConveyor, 0, 0, true,
                             "ssFrom:" + vertex.name()),
-                    new AsyncSnapshotWriterImpl(nodeEngine, memberIndex, memberCount),
-                    nodeEngine.getLogger(StoreSnapshotTasklet.class),
+                    new AsyncSnapshotWriterImpl(nodeEngine, snapshotContext, vertex.name(), memberIndex, memberCount),
+                    nodeEngine.getLogger(StoreSnapshotTasklet.class.getName() + "." + vertex.name()),
                     vertex.name(), vertex.isHigherPriorityUpstream());
             tasklets.add(ssTasklet);
 
             int localProcessorIdx = 0;
-            for (Processor p : processors) {
+            for (Processor processor : processors) {
                 int globalProcessorIndex = memberIndex * vertex.localParallelism() + localProcessorIdx;
-                String loggerName = createLoggerName(p.getClass().getName(), vertex.name(), globalProcessorIndex);
+                String loggerName = createLoggerName(
+                        processor.getClass().getName(),
+                        jobConfig.getName(),
+                        vertex.name()
+                        , globalProcessorIndex
+                );
                 ProcCtx context = new ProcCtx(
                         instance,
-                        nodeEngine.getSerializationService(),
+                        jobId,
+                        executionId,
+                        getJobConfig(),
                         nodeEngine.getLogger(loggerName),
                         vertex.name(),
                         localProcessorIdx,
@@ -173,14 +183,23 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                 ProbeBuilder probeBuilder = this.nodeEngine.getMetricsRegistry().newProbeBuilder()
                         .withTag("module", "jet")
                         .withTag("job", idToString(jobId))
-                        .withTag("vertex", vertex.name())
-                        .withTag("edgesIn", String.valueOf(vertex.inboundEdges().size()))
-                        .withTag("edgesOut", String.valueOf(vertex.outboundEdges().size()));
+                        .withTag("exec", idToString(executionId))
+                        .withTag("vertex", vertex.name());
+
+                // ignore vertices which are only used for snapshot restore and do not
+                // consider snapshot restore edges for determining source tag
+                if (vertex.inboundEdges().stream().allMatch(EdgeDef::isSnapshotRestoreEdge)
+                        && !vertex.isSnapshotVertex()) {
+                    probeBuilder = probeBuilder.withTag("source", "true");
+                }
+                if (vertex.outboundEdges().size() == 0) {
+                    probeBuilder = probeBuilder.withTag("sink", "true");
+                }
                 ProbeBuilder processorProbeBuilder = probeBuilder
                         .withTag("proc", String.valueOf(globalProcessorIndex));
                 processorProbeBuilder
-                        .withTag("procType", p.getClass().getSimpleName())
-                        .scanAndRegister(p);
+                        .withTag("procType", processor.getClass().getSimpleName())
+                        .scanAndRegister(processor);
 
                 // createOutboundEdgeStreams() populates localConveyorMap and edgeSenderConveyorMap.
                 // Also populates instance fields: senderMap, receiverMap, tasklets.
@@ -193,11 +212,11 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
 
                 OutboundCollector snapshotCollector = new ConveyorCollector(ssConveyor, localProcessorIdx, null);
 
-                ProcessorTasklet processorTasklet = new ProcessorTasklet(context, p, inboundStreams, outboundStreams,
-                        snapshotContext, snapshotCollector, jobConfig.getMaxWatermarkRetainMillis());
-                processorTasklet.registerMetrics(processorProbeBuilder);
+                ProcessorTasklet processorTasklet = new ProcessorTasklet(context, nodeEngine.getSerializationService(),
+                        processor, inboundStreams, outboundStreams, snapshotContext, snapshotCollector,
+                        processorProbeBuilder);
                 tasklets.add(processorTasklet);
-                this.processors.add(p);
+                this.processors.add(processor);
                 localProcessorIdx++;
             }
         }
@@ -209,8 +228,14 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
         tasklets.addAll(allReceivers);
     }
 
-    public static String createLoggerName(String processorClassName, String vertexName, int processorIndex) {
-        return processorClassName + '.' + vertexName + '#' + processorIndex;
+    public static String createLoggerName(
+            String processorClassName, String jobName, String vertexName, int processorIndex
+    ) {
+        if (StringUtil.isNullOrEmptyAfterTrim(jobName)) {
+            return processorClassName + '.' + vertexName + '#' + processorIndex;
+        } else {
+            return processorClassName + '.' + jobName.trim() + "/" + vertexName + '#' + processorIndex;
+        }
     }
 
     public List<ProcessorSupplier> getProcessorSuppliers() {
@@ -278,22 +303,29 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
 
     // End implementation of IdentifiedDataSerializable
 
-    private void initProcSuppliers() {
+    private void initProcSuppliers(long jobId, long executionId) {
         JetService service = nodeEngine.getService(JetService.SERVICE_NAME);
 
         for (VertexDef vertex : vertices) {
             ProcessorSupplier supplier = vertex.processorSupplier();
             ILogger logger = nodeEngine.getLogger(supplier.getClass().getName() + '.'
                     + vertex.name() + "#ProcessorSupplier");
-            supplier.init(new ProcSupplierCtx(
-                    service.getJetInstance(),
-                    logger,
-                    vertex.name(),
-                    vertex.localParallelism(),
-                    vertex.localParallelism() * memberCount,
-                    memberIndex,
-                    memberCount
-            ));
+            try {
+                supplier.init(new ProcSupplierCtx(
+                        service.getJetInstance(),
+                        jobId,
+                        executionId,
+                        jobConfig,
+                        logger,
+                        vertex.name(),
+                        vertex.localParallelism(),
+                        vertex.localParallelism() * memberCount,
+                        memberIndex,
+                        memberCount
+                ));
+            } catch (Exception e) {
+                throw sneakyThrow(e);
+            }
         }
     }
 
@@ -380,9 +412,9 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
             // and don't use the reference to source, but we use the source to deregister the metrics when the job
             // finishes.
             if (firstTasklet != null) {
-                probeBuilder.register(firstTasklet, "distributedBytesOut", ProbeLevel.INFO,
+                probeBuilder.register(firstTasklet, "distributedBytesOut", ProbeLevel.INFO, ProbeUnit.BYTES,
                         addCountersProbeFunction(bytesCounters));
-                probeBuilder.register(firstTasklet, "distributedItemsOut", ProbeLevel.INFO,
+                probeBuilder.register(firstTasklet, "distributedItemsOut", ProbeLevel.INFO, ProbeUnit.BYTES,
                         addCountersProbeFunction(itemsCounters));
             }
             return addrToConveyor;
@@ -530,9 +562,9 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                            // We register the metrics to the first tasklet. The metrics itself aggregate counters from
                            // all tasklets and don't use the reference to source, but we use the source to deregister
                            // the metrics when the job finishes.
-                           probeBuilder.register(firstTasklet, "distributedItemsIn", ProbeLevel.INFO,
+                           probeBuilder.register(firstTasklet, "distributedItemsIn", ProbeLevel.INFO, ProbeUnit.COUNT,
                                    addCountersProbeFunction(itemCounters));
-                           probeBuilder.register(firstTasklet, "distributedBytesIn", ProbeLevel.INFO,
+                           probeBuilder.register(firstTasklet, "distributedBytesIn", ProbeLevel.INFO, ProbeUnit.COUNT,
                                    addCountersProbeFunction(bytesCounters));
                        }
                        return addrToTasklet;
@@ -559,8 +591,8 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
     private ConcurrentInboundEdgeStream newEdgeStream(EdgeDef inEdge, ConcurrentConveyor<Object> conveyor,
                                                       String debugName) {
         return new ConcurrentInboundEdgeStream(conveyor, inEdge.destOrdinal(), inEdge.priority(),
-                lastSnapshotId, jobConfig.getProcessingGuarantee() == ProcessingGuarantee.EXACTLY_ONCE,
-                jobConfig.getMaxWatermarkRetainMillis(), debugName);
+                jobConfig.getProcessingGuarantee() == ProcessingGuarantee.EXACTLY_ONCE,
+                debugName);
     }
 
     public List<Processor> getProcessors() {

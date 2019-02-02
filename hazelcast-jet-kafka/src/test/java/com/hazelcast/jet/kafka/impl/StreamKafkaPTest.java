@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,22 +17,21 @@
 package com.hazelcast.jet.kafka.impl;
 
 import com.hazelcast.core.IList;
-import com.hazelcast.jet.IMapJet;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.BroadcastKey;
+import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.Watermark;
-import com.hazelcast.jet.core.WatermarkGenerationParams;
 import com.hazelcast.jet.core.test.TestInbox;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.function.DistributedToLongFunction;
-import com.hazelcast.jet.impl.SnapshotRepository;
-import com.hazelcast.jet.impl.execution.SnapshotRecord;
+import com.hazelcast.jet.impl.JobExecutionRecord;
+import com.hazelcast.jet.impl.JobRepository;
 import com.hazelcast.jet.kafka.KafkaSources;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
@@ -52,7 +51,6 @@ import javax.annotation.Nonnull;
 import java.util.AbstractMap.SimpleImmutableEntry;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -62,9 +60,8 @@ import java.util.Set;
 import java.util.concurrent.Future;
 
 import static com.hazelcast.jet.Util.entry;
-import static com.hazelcast.jet.core.WatermarkEmissionPolicy.noThrottling;
-import static com.hazelcast.jet.core.WatermarkGenerationParams.wmGenParams;
-import static com.hazelcast.jet.core.WatermarkPolicies.limitingLag;
+import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
+import static com.hazelcast.jet.core.WatermarkPolicy.limitingLag;
 import static com.hazelcast.jet.impl.execution.WatermarkCoalescer.IDLE_MESSAGE;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
@@ -73,6 +70,7 @@ import static java.util.stream.Collectors.toSet;
 import static java.util.stream.IntStream.range;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -108,6 +106,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
 
         Pipeline p = Pipeline.create();
         p.drawFrom(KafkaSources.<Integer, String, String>kafka(properties, rec -> rec.value() + "-x", topic1Name))
+         .withoutTimestamps()
          .drainTo(Sinks.list("sink"));
 
         instances[0].newJob(p);
@@ -123,7 +122,6 @@ public class StreamKafkaPTest extends KafkaTestSupport {
                 assertTrue("missing entry: " + value, list.contains(value));
             }
         }, 5);
-
     }
 
     @Test
@@ -143,13 +141,14 @@ public class StreamKafkaPTest extends KafkaTestSupport {
 
         Pipeline p = Pipeline.create();
         p.drawFrom(KafkaSources.kafka(properties, topic1Name, topic2Name))
+         .withoutTimestamps()
          .drainTo(Sinks.list("sink"));
 
         JobConfig config = new JobConfig();
         config.setProcessingGuarantee(guarantee);
         config.setSnapshotIntervalMillis(500);
         Job job = instances[0].newJob(p, config);
-        sleepAtLeastSeconds(3);
+        sleepSeconds(3);
         for (int i = 0; i < messageCount; i++) {
             produce(topic1Name, i, Integer.toString(i));
             produce(topic2Name, i - messageCount, Integer.toString(i - messageCount));
@@ -164,23 +163,23 @@ public class StreamKafkaPTest extends KafkaTestSupport {
                 assertTrue("missing entry: " + entry1, list.contains(entry1));
                 assertTrue("missing entry: " + entry2, list.contains(entry2));
             }
-        }, 5);
+        }, 15);
 
         if (guarantee != ProcessingGuarantee.NONE) {
-            // wait until the items are consumed and a new snapshot appears
-            assertTrueEventually(() -> assertEquals(list.size(), messageCount * 2));
-            IMapJet<Long, Object> snapshotsMap =
-                    instances[0].getMap(SnapshotRepository.snapshotsMapName(job.getId()));
-            Long currentMax = maxSuccessfulSnapshot(snapshotsMap);
+            // wait until a new snapshot appears
+            JobRepository jr = new JobRepository(instances[0]);
+            long currentMax = jr.getJobExecutionRecord(job.getId()).snapshotId();
             assertTrueEventually(() -> {
-                Long newMax = maxSuccessfulSnapshot(snapshotsMap);
-                assertTrue("no snapshot produced", newMax != null && !newMax.equals(currentMax));
+                JobExecutionRecord jobExecutionRecord = jr.getJobExecutionRecord(job.getId());
+                assertNotNull("jobExecutionRecord == null", jobExecutionRecord);
+                long newMax = jobExecutionRecord.snapshotId();
+                assertTrue("no snapshot produced", newMax > currentMax);
                 System.out.println("snapshot " + newMax + " found, previous was " + currentMax);
             });
 
             // Bring down one member. Job should restart and drain additional items (and maybe
             // some of the previous duplicately).
-            instances[1].shutdown();
+            instances[1].getHazelcastInstance().getLifecycleService().terminate();
             Thread.sleep(500);
 
             for (int i = messageCount; i < 2 * messageCount; i++) {
@@ -206,21 +205,8 @@ public class StreamKafkaPTest extends KafkaTestSupport {
         assertTrueEventually(() -> assertTrue(job.getFuture().isDone()));
     }
 
-    /**
-     * @return maximum ID of successful snapshot or null, if there is no successful snapshot.
-     */
-    private Long maxSuccessfulSnapshot(IMapJet<Long, Object> snapshotsMap) {
-        return snapshotsMap.entrySet().stream()
-                           .filter(e -> e.getValue() instanceof SnapshotRecord)
-                           .map(e -> (SnapshotRecord) e.getValue())
-                           .filter(SnapshotRecord::isSuccessful)
-                           .map(SnapshotRecord::snapshotId)
-                           .max(Comparator.naturalOrder())
-                           .orElse(null);
-    }
-
     @Test
-    public void when_eventsInAllPartitions_then_watermarkOutputImmediately() {
+    public void when_eventsInAllPartitions_then_watermarkOutputImmediately() throws Exception {
         StreamKafkaP processor = createProcessor(1, r -> entry(r.key(), r.value()), 10_000);
         TestOutbox outbox = new TestOutbox(new int[]{10}, 10);
         processor.init(outbox, new TestProcessorContext());
@@ -228,7 +214,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
         for (int i = 0; i < INITIAL_PARTITION_COUNT; i++) {
             Entry<Integer, String> event = entry(i + 100, Integer.toString(i));
             System.out.println("produced event " + event);
-            produce(topic1Name, i, event.getKey(), event.getValue());
+            produce(topic1Name, i, null, event.getKey(), event.getValue());
             if (i == INITIAL_PARTITION_COUNT - 1) {
                 assertEquals(new Watermark(100 - LAG), consumeEventually(processor, outbox));
             }
@@ -269,7 +255,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
     }
 
     @Test
-    public void when_eventsInSinglePartition_then_watermarkAfterIdleTime() {
+    public void when_eventsInSinglePartition_then_watermarkAfterIdleTime() throws Exception {
         // When
         StreamKafkaP processor = createProcessor(2, r -> entry(r.key(), r.value()), 10_000);
         TestOutbox outbox = new TestOutbox(new int[]{10}, 10);
@@ -331,13 +317,13 @@ public class StreamKafkaPTest extends KafkaTestSupport {
                         (int) ((Entry) e).getKey()
                         :
                         System.currentTimeMillis();
-        WatermarkGenerationParams<T> wmParams = wmGenParams(
-                timestampFn, limitingLag(LAG), noThrottling(), idleTimeoutMillis);
+        EventTimePolicy<T> eventTimePolicy = eventTimePolicy(
+                timestampFn, limitingLag(LAG), 1, 0, idleTimeoutMillis);
         List<String> topics = numTopics == 1 ?
                 singletonList(topic1Name)
                 :
                 asList(topic1Name, topic2Name);
-        return new StreamKafkaP<>(properties, topics, projectionFn, wmParams);
+        return new StreamKafkaP<>(properties, topics, projectionFn, eventTimePolicy);
     }
 
     @Test
@@ -374,7 +360,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
     }
 
     @Test
-    public void when_noAssignedPartitions_thenEmitIdleMsgImmediately() {
+    public void when_noAssignedPartitions_thenEmitIdleMsgImmediately() throws Exception {
         StreamKafkaP processor = createProcessor(2, r -> entry(r.key(), r.value()), 100_000);
         TestOutbox outbox = new TestOutbox(new int[]{10}, 10);
         TestProcessorContext context = new TestProcessorContext()
@@ -389,7 +375,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
     }
 
     @Test
-    public void when_customProjection_then_used() {
+    public void when_customProjection_then_used() throws Exception {
         // When
         StreamKafkaP processor = createProcessor(2, r -> r.key() + "=" + r.value(), 10_000);
         TestOutbox outbox = new TestOutbox(new int[]{10}, 10);
@@ -401,16 +387,16 @@ public class StreamKafkaPTest extends KafkaTestSupport {
     }
 
     @Test
-    public void when_customProjectionToNull_then_filteredOut() {
+    public void when_customProjectionToNull_then_filteredOut() throws Exception {
         // When
-        WatermarkGenerationParams<String> wmParams = wmGenParams(
+        EventTimePolicy<String> eventTimePolicy = eventTimePolicy(
                 Long::parseLong,
                 limitingLag(0),
-                noThrottling(),
+                1, 0,
                 0
         );
         StreamKafkaP processor = new StreamKafkaP<Integer, String, String>(
-                properties, singletonList(topic1Name), r -> "0".equals(r.value()) ? null : r.value(), wmParams
+                properties, singletonList(topic1Name), r -> "0".equals(r.value()) ? null : r.value(), eventTimePolicy
         );
         TestOutbox outbox = new TestOutbox(new int[]{10}, 10);
         processor.init(outbox, new TestProcessorContext());

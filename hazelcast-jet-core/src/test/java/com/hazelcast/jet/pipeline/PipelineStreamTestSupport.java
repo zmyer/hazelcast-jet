@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.hazelcast.jet.pipeline;
 
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.jet.Job;
 import org.junit.Before;
 
 import java.util.Iterator;
@@ -32,7 +33,7 @@ import static java.util.stream.Collectors.toList;
 
 public abstract class PipelineStreamTestSupport extends PipelineTestSupport {
 
-    StreamStage<Integer> mapJournalSrcStage;
+    StreamSourceStage<Integer> srcStage;
 
     long maxLag;
 
@@ -55,10 +56,10 @@ public abstract class PipelineStreamTestSupport extends PipelineTestSupport {
         closingItems = nCopies(inputKeys.size(), 16 * itemCount);
         maxLag = itemCount / 2;
         srcMap = jet().getMap(journaledSrcMapName);
-        mapJournalSrcStage = drawEventJournalValues(journaledSrcMapName);
+        srcStage = drawEventJournalValues(journaledSrcMapName);
     }
 
-    StreamStage<Integer> drawEventJournalValues(String mapName) {
+    StreamSourceStage<Integer> drawEventJournalValues(String mapName) {
         return p.drawFrom(Sources.mapJournal(mapName, mapPutEvents(), mapEventNewValue(), START_FROM_OLDEST));
     }
 
@@ -74,5 +75,9 @@ public abstract class PipelineStreamTestSupport extends PipelineTestSupport {
 
     void addToSrcMapJournal(List<Integer> items) {
         addToMapJournal(srcMap, items);
+    }
+
+    Job executeAsync() {
+        return jet().newJob(p);
     }
 }

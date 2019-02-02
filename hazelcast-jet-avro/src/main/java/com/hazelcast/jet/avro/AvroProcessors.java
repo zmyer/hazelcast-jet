@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,11 +29,11 @@ import org.apache.avro.io.DatumReader;
 import org.apache.avro.io.DatumWriter;
 
 import javax.annotation.Nonnull;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.stream.StreamSupport;
 
-import static com.hazelcast.jet.impl.util.Util.uncheckCall;
 import static com.hazelcast.jet.impl.util.Util.uncheckRun;
 
 /**
@@ -46,22 +46,22 @@ public final class AvroProcessors {
     }
 
     /**
-     * Returns a supplier of processors for {@link AvroSources#files}.
+     * Returns a supplier of processors for {@link AvroSources#filesBuilder}.
      */
     @Nonnull
-    public static <W, R> ProcessorMetaSupplier readFilesP(
+    public static <D, T> ProcessorMetaSupplier readFilesP(
             @Nonnull String directory,
             @Nonnull String glob,
             boolean sharedFileSystem,
-            @Nonnull DistributedSupplier<DatumReader<W>> datumReaderSupplier,
-            @Nonnull DistributedBiFunction<String, W, R> mapOutputFn
+            @Nonnull DistributedSupplier<? extends DatumReader<D>> datumReaderSupplier,
+            @Nonnull DistributedBiFunction<String, ? super D, T> mapOutputFn
     ) {
         return ReadFilesP.metaSupplier(directory, glob, sharedFileSystem,
-                path -> uncheckCall(() -> {
-                    DataFileReader<W> reader = new DataFileReader<>(path.toFile(), datumReaderSupplier.get());
+                path -> {
+                    DataFileReader<D> reader = new DataFileReader<>(path.toFile(), datumReaderSupplier.get());
                     return StreamSupport.stream(reader.spliterator(), false)
                                         .onClose(() -> uncheckRun(reader::close));
-                }),
+                },
                 mapOutputFn);
     }
 
@@ -69,18 +69,18 @@ public final class AvroProcessors {
      * Returns a supplier of processors for {@link AvroSinks#files}.
      */
     @Nonnull
-    public static <R> ProcessorMetaSupplier writeFilesP(
+    public static <D> ProcessorMetaSupplier writeFilesP(
             @Nonnull String directoryName,
             @Nonnull DistributedSupplier<Schema> schemaSupplier,
-            @Nonnull DistributedSupplier<DatumWriter<R>> datumWriterSupplier
+            @Nonnull DistributedSupplier<DatumWriter<D>> datumWriterSupplier
     ) {
         return ProcessorMetaSupplier.of(
-                WriteBufferedP.<DataFileWriter<R>, R>supplier(
+                WriteBufferedP.<DataFileWriter<D>, D>supplier(
                         context -> createWriter(Paths.get(directoryName), context.globalProcessorIndex(),
                                 schemaSupplier, datumWriterSupplier),
-                        (writer, item) -> uncheckRun(() -> writer.append(item)),
-                        writer -> uncheckRun(writer::flush),
-                        writer -> uncheckRun(writer::close)
+                        DataFileWriter::append,
+                        DataFileWriter::flush,
+                        DataFileWriter::close
                 ), 1);
     }
 
@@ -88,15 +88,17 @@ public final class AvroProcessors {
             justification = "mkdirs() returns false if the directory already existed, which is good. "
                     + "We don't care even if it didn't exist and we failed to create it, "
                     + "because we'll fail later when trying to create the file.")
-    private static <R> DataFileWriter<R> createWriter(Path directory, int globalIndex,
-                                                      DistributedSupplier<Schema> schemaSupplier,
-                                                      DistributedSupplier<DatumWriter<R>> datumWriterSupplier) {
+    private static <D> DataFileWriter<D> createWriter(
+            Path directory, int globalIndex,
+            DistributedSupplier<Schema> schemaSupplier,
+            DistributedSupplier<DatumWriter<D>> datumWriterSupplier
+    ) throws IOException {
         directory.toFile().mkdirs();
 
         Path file = directory.resolve(String.valueOf(globalIndex));
 
-        DataFileWriter<R> writer = new DataFileWriter<>(datumWriterSupplier.get());
-        uncheckRun(() -> writer.create(schemaSupplier.get(), file.toFile()));
+        DataFileWriter<D> writer = new DataFileWriter<>(datumWriterSupplier.get());
+        writer.create(schemaSupplier.get(), file.toFile());
         return writer;
     }
 

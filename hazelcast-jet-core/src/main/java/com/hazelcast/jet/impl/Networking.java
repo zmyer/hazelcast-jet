@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ import static com.hazelcast.jet.impl.util.Util.createObjectDataInput;
 import static com.hazelcast.jet.impl.util.Util.createObjectDataOutput;
 import static com.hazelcast.jet.impl.util.Util.getMemberConnection;
 import static com.hazelcast.jet.impl.util.Util.getRemoteMembers;
-import static com.hazelcast.jet.impl.util.Util.idToString;
+import static com.hazelcast.jet.Util.idToString;
 import static com.hazelcast.jet.impl.util.Util.uncheckRun;
 import static com.hazelcast.nio.Packet.FLAG_JET_FLOW_CONTROL;
 import static com.hazelcast.nio.Packet.FLAG_URGENT;

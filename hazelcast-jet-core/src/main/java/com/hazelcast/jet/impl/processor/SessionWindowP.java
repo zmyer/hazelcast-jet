@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -63,8 +63,8 @@ import static com.hazelcast.jet.impl.util.Util.toLocalDateTime;
 import static com.hazelcast.util.Preconditions.checkTrue;
 import static java.lang.Math.min;
 import static java.lang.System.arraycopy;
+import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
-import static java.util.stream.Collectors.toList;
 
 /**
  * Session window processor. See {@link
@@ -95,7 +95,7 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
     @Nonnull
     private final KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn;
     @Nonnull
-    private final FlatMapper<Watermark, OUT> closedWindowFlatmapper;
+    private final FlatMapper<Watermark, Object> closedWindowFlatmapper;
     private ProcessingGuarantee processingGuarantee;
 
     @Probe
@@ -107,6 +107,13 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
 
     private Traverser snapshotTraverser;
     private long minRestoredCurrentWatermark = Long.MAX_VALUE;
+    private boolean inComplete;
+
+    // extracted lambdas to reduce GC litter
+    private final Function<K, Windows<A>> newWindowsFunction = k -> {
+        lazyIncrement(totalKeys);
+        return new Windows<>();
+    };
 
     @SuppressWarnings("unchecked")
     public SessionWindowP(
@@ -134,7 +141,6 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
 
     @Override
     protected boolean tryProcess(int ordinal, @Nonnull Object item) {
-        @SuppressWarnings("unchecked")
         final long timestamp = timestampFns.get(ordinal).applyAsLong(item);
         if (timestamp < currentWatermark) {
             logLateEvent(getLogger(), currentWatermark, item);
@@ -143,10 +149,7 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
         }
         K key = keyFns.get(ordinal).apply(item);
         addItem(ordinal,
-                keyToWindows.computeIfAbsent(key, k -> {
-                    lazyIncrement(totalKeys);
-                    return new Windows<>();
-                }),
+                keyToWindows.computeIfAbsent(key, newWindowsFunction),
                 key, timestamp, item);
         return true;
     }
@@ -162,25 +165,27 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
 
     @Override
     public boolean complete() {
+        inComplete = true;
         return closedWindowFlatmapper.tryProcess(COMPLETING_WM);
     }
 
-    private Traverser<OUT> traverseClosedWindows(Watermark wm) {
+    private Traverser<Object> traverseClosedWindows(Watermark wm) {
         SortedMap<Long, Set<K>> windowsToClose = deadlineToKeys.headMap(wm.timestamp());
-        lazyAdd(totalWindows, -windowsToClose.values().stream().mapToInt(Set::size).sum());
 
-        List<K> distinctKeys = windowsToClose
+        Stream<Object> closedWindows = windowsToClose
                 .values().stream()
                 .flatMap(Set::stream)
-                .distinct()
-                .collect(toList());
-        windowsToClose.clear();
-
-        Stream<OUT> closedWindows = distinctKeys
-                .stream()
                 .map(key -> closeWindows(keyToWindows.get(key), key, wm.timestamp()))
                 .flatMap(List::stream);
-        return traverseStream(closedWindows);
+        Traverser<Object> result = traverseStream(closedWindows)
+                .onFirstNull(() -> {
+                    lazyAdd(totalWindows, -windowsToClose.values().stream().mapToInt(Set::size).sum());
+                    windowsToClose.clear();
+                });
+        if (wm != COMPLETING_WM) {
+            result = result.append(wm);
+        }
+        return result;
     }
 
     private void addToDeadlines(K key, long deadline) {
@@ -198,8 +203,14 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
         }
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public boolean saveToSnapshot() {
+        if (inComplete) {
+            // If we are in completing phase, we can have a half-emitted item. Instead of finishing it and
+            // writing a snapshot, we finish the final items and save no state.
+            return complete();
+        }
         if (snapshotTraverser == null) {
             snapshotTraverser = Traversers.<Object>traverseIterable(keyToWindows.entrySet())
                     .append(entry(broadcastKey(Keys.CURRENT_WATERMARK), currentWatermark))
@@ -251,10 +262,16 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
     }
 
     private List<OUT> closeWindows(Windows<A> w, K key, long wm) {
+        if (w == null) {
+            return emptyList();
+        }
         List<OUT> results = new ArrayList<>();
         int i = 0;
         for (; i < w.size && w.ends[i] < wm; i++) {
-            results.add(mapToOutputFn.apply(w.starts[i], w.ends[i], key, aggrOp.finishFn().apply(w.accs[i])));
+            OUT out = mapToOutputFn.apply(w.starts[i], w.ends[i], key, aggrOp.finishFn().apply(w.accs[i]));
+            if (out != null) {
+                results.add(out);
+            }
         }
         if (i != w.size) {
             w.removeHead(i);
@@ -266,12 +283,25 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
     }
 
     private A resolveAcc(Windows<A> w, K key, long timestamp) {
+        /*
+            If two sessions "touch", we merge them. That is when `window1.end ==
+            window2.start`. Reason: otherwise we'd depend on the order of input in
+            edge case. Mathematically, there's no item that will go to both sessions,
+            so they don't overlap.
+
+            Example: timeout=2. If input is: `1, wm(3), 3`, the output will be two
+            sessions: the event 1 creates a session (1, 3) which can be emitted at
+            wm(3). But if input is: `1, 3, wm(3)`, output would be 1 session (1, 5),
+            if we merge "touching" sessions. In neither case item 3 is late. The
+            wm(3) can come at any time depending on exact order in which other
+            partitions are processed and when the wm is coalesced.
+        */
         long eventEnd = timestamp + sessionTimeout;
         int i = 0;
-        for (; i < w.size && w.starts[i] <= eventEnd; i++) {
+        for (; i < w.size && w.starts[i] < eventEnd; i++) {
             // the window `i` is not after the event interval
 
-            if (w.ends[i] < timestamp) {
+            if (w.ends[i] <= timestamp) {
                 // the window `i` is before the event interval
                 continue;
             }
@@ -281,7 +311,7 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
             }
             // the window `i` overlaps the event interval
 
-            if (i + 1 == w.size || w.starts[i + 1] > eventEnd) {
+            if (i + 1 == w.size || w.starts[i + 1] >= eventEnd) {
                 // the window `i + 1` doesn't overlap the event interval
                 w.starts[i] = min(w.starts[i], timestamp);
                 if (w.ends[i] < eventEnd) {
@@ -316,6 +346,7 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
         private int size;
         private long[] starts = new long[2];
         private long[] ends = new long[2];
+        @SuppressWarnings("unchecked")
         private A[] accs = (A[]) new Object[2];
 
         private void removeWindow(int idx) {
@@ -363,6 +394,7 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
         }
 
         @Override
+        @SuppressWarnings("unchecked")
         public void readData(ObjectDataInput in) throws IOException {
             size = in.readInt();
             if (size > starts.length) {

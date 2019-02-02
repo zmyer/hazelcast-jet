@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,10 +32,15 @@ import java.util.HashSet;
 import java.util.Set;
 
 import static com.hazelcast.jet.impl.execution.init.CustomClassLoadedObject.deserializeWithCustomClassLoader;
-import static com.hazelcast.jet.impl.util.ExceptionUtil.isTopologicalFailure;
-import static com.hazelcast.jet.impl.util.Util.jobAndExecutionId;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.isRestartableException;
+import static com.hazelcast.jet.impl.util.Util.jobIdAndExecutionId;
 import static com.hazelcast.spi.ExceptionAction.THROW_EXCEPTION;
 
+/**
+ * Operation sent from master to members to initialize execution of a job.
+ * After it is successfully handled on all members, {@link
+ * StartExecutionOperation} is sent.
+ */
 public class InitExecutionOperation extends AbstractJobOperation {
 
     private long executionId;
@@ -61,17 +66,16 @@ public class InitExecutionOperation extends AbstractJobOperation {
         JetService service = getService();
 
         Address caller = getCallerAddress();
-        logger.fine("Initializing execution plan for " + jobAndExecutionId(jobId(), executionId) + " from " + caller);
+        logger.fine("Initializing execution plan for " + jobIdAndExecutionId(jobId(), executionId) + " from " + caller);
 
         ExecutionPlan plan = deserializePlan(serializedPlan);
-        service.getJobExecutionService().initExecution(
-                jobId(), executionId, caller, coordinatorMemberListVersion, participants, plan
-        );
+        service.getJobExecutionService().initExecution(jobId(), executionId, caller,
+                coordinatorMemberListVersion, participants, plan);
     }
 
     @Override
     public ExceptionAction onInvocationException(Throwable throwable) {
-        return isTopologicalFailure(throwable) ? THROW_EXCEPTION : super.onInvocationException(throwable);
+        return isRestartableException(throwable) ? THROW_EXCEPTION : super.onInvocationException(throwable);
     }
 
     @Override
@@ -87,7 +91,7 @@ public class InitExecutionOperation extends AbstractJobOperation {
         out.writeInt(coordinatorMemberListVersion);
         out.writeInt(participants.size());
         for (MemberInfo participant : participants) {
-            participant.writeData(out);
+            out.writeObject(participant);
         }
         out.writeData(serializedPlan);
     }
@@ -101,9 +105,7 @@ public class InitExecutionOperation extends AbstractJobOperation {
         int count = in.readInt();
         participants = new HashSet<>();
         for (int i = 0; i < count; i++) {
-            MemberInfo participant = new MemberInfo();
-            participant.readData(in);
-            participants.add(participant);
+            participants.add(in.readObject());
         }
         serializedPlan = in.readData();
     }

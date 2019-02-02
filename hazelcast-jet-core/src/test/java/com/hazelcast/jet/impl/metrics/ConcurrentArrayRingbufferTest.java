@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,13 @@
 
 package com.hazelcast.jet.impl.metrics;
 
-import com.hazelcast.jet.impl.metrics.ConcurrentArrayRingbuffer.RingbufferSlice;
+import com.hazelcast.jet.impl.metrics.management.ConcurrentArrayRingbuffer;
+import com.hazelcast.jet.impl.metrics.management.ConcurrentArrayRingbuffer.RingbufferSlice;
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
+import org.junit.runner.RunWith;
 
 import java.util.stream.IntStream;
 
@@ -31,6 +34,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+@RunWith(HazelcastSerialClassRunner.class)
 public class ConcurrentArrayRingbufferTest {
 
     @Rule

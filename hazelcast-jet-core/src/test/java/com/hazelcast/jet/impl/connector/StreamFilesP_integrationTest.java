@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -286,9 +286,9 @@ public class StreamFilesP_integrationTest extends JetTestSupport {
 
     private void finishDirectory(Future<Void> jobFuture, File ... files) throws Exception {
         for (File file : files) {
-            System.out.println("deleting " + file + "...");
+            logger.info("deleting " + file + "...");
             assertTrueEventually(() -> assertTrue("Failed to delete " + file, file.delete()));
-            System.out.println("deleted " + file);
+            logger.info("deleted " + file);
         }
         assertTrueEventually(() -> assertTrue("Failed to delete " + directory, directory.delete()));
         assertTrueEventually(() -> assertTrue("job should complete eventually", jobFuture.isDone()));

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,8 +28,12 @@ import java.util.Map.Entry;
 /**
  * Offers a step-by-step API to build a pipeline stage that co-groups and
  * aggregates the data from several input stages. To obtain it, call {@link
- * StageWithGrouping#aggregateBuilder()} on one of the stages to co-group
+ * BatchStageWithKey#aggregateBuilder()} on one of the stages to co-group
  * and refer to that method's Javadoc for further details.
+ * <p>
+ * <strong>Note:</strong> this is not a builder of {@code
+ * AggregateOperation}. If that' s what you are looking for, go {@link
+ * AggregateOperation#withCreate here}.
  *
  * @param <T0> type of the stream-0 item
  * @param <K> type of the grouping key
@@ -37,7 +41,7 @@ import java.util.Map.Entry;
 public class GroupAggregateBuilder1<T0, K> {
     private final GrAggBuilder<K> grAggBuilder;
 
-    GroupAggregateBuilder1(@Nonnull StageWithGrouping<T0, K> s) {
+    GroupAggregateBuilder1(@Nonnull BatchStageWithKey<T0, K> s) {
         grAggBuilder = new GrAggBuilder<>(s);
     }
 
@@ -60,7 +64,7 @@ public class GroupAggregateBuilder1<T0, K> {
      */
     @Nonnull
     @SuppressWarnings("unchecked")
-    public <T> Tag<T> add(@Nonnull StageWithGrouping<T, K> stage) {
+    public <T> Tag<T> add(@Nonnull BatchStageWithKey<T, K> stage) {
         return grAggBuilder.add(stage);
     }
 
@@ -71,13 +75,12 @@ public class GroupAggregateBuilder1<T0, K> {
      * match the tags you registered with this builder.
      *
      * @param aggrOp the aggregate operation to perform
-     * @param <A> the type of items on the stage this builder was obtained from
      * @param <R> the type of the output item
      * @return a new stage representing the co-aggregation
      */
     @Nonnull
-    public <A, R, OUT> BatchStage<OUT> build(
-            @Nonnull AggregateOperation<A, R> aggrOp,
+    public <R, OUT> BatchStage<OUT> build(
+            @Nonnull AggregateOperation<?, R> aggrOp,
             @Nonnull DistributedBiFunction<? super K, ? super R, OUT> mapToOutputFn
     ) {
         return grAggBuilder.buildBatch(aggrOp, mapToOutputFn);
@@ -88,13 +91,12 @@ public class GroupAggregateBuilder1<T0, K> {
      * build(aggrOp, mapToOutputFn)} which emits {@code Map.Entry}s as output.
      *
      * @param aggrOp the aggregate operation to perform.
-     * @param <A> the type of items in the pipeline stage this builder was obtained from
      * @param <R> the type of the aggregation result
      * @return a new stage representing the co-group-and-aggregate operation
      */
     @Nonnull
-    public <A, R> BatchStage<Entry<K, R>> build(
-            @Nonnull AggregateOperation<A, R> aggrOp
+    public <R> BatchStage<Entry<K, R>> build(
+            @Nonnull AggregateOperation<?, R> aggrOp
     ) {
         return grAggBuilder.buildBatch(aggrOp, Util::entry);
     }

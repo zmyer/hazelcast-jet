@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,9 @@
 
 package com.hazelcast.jet.impl.pipeline.transform;
 
+import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.Vertex;
-import com.hazelcast.jet.core.WatermarkGenerationParams;
 import com.hazelcast.jet.impl.pipeline.Planner;
 import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
 import com.hazelcast.jet.pipeline.StreamSource;
@@ -28,35 +28,39 @@ import javax.annotation.Nullable;
 import java.util.function.Function;
 
 import static com.hazelcast.jet.core.Edge.between;
-import static com.hazelcast.jet.core.WatermarkGenerationParams.noWatermarks;
+import static com.hazelcast.jet.core.EventTimePolicy.noEventTime;
 import static com.hazelcast.jet.core.processor.Processors.insertWatermarksP;
 import static java.util.Collections.emptyList;
 
 public class StreamSourceTransform<T> extends AbstractTransform implements StreamSource<T> {
 
-    private final Function<WatermarkGenerationParams<T>, ProcessorMetaSupplier> metaSupplierFn;
-    private final boolean supportsWatermarks;
+    private final Function<? super EventTimePolicy<? super T>, ? extends ProcessorMetaSupplier> metaSupplierFn;
+    private final boolean emitsWatermarks;
 
     @Nullable
-    private WatermarkGenerationParams<T> wmParams;
+    private EventTimePolicy<? super T> eventTimePolicy;
+    private final boolean supportsNativeTimestamps;
 
     public StreamSourceTransform(
             @Nonnull String name,
-            @Nonnull Function<WatermarkGenerationParams<T>, ProcessorMetaSupplier> metaSupplierFn,
-            boolean supportsWatermarks
+            @Nonnull Function<? super EventTimePolicy<? super T>, ? extends ProcessorMetaSupplier> metaSupplierFn,
+            boolean emitsWatermarks,
+            boolean supportsNativeTimestamps
     ) {
         super(name, emptyList());
         this.metaSupplierFn = metaSupplierFn;
-        this.supportsWatermarks = supportsWatermarks;
+        this.emitsWatermarks = emitsWatermarks;
+        this.supportsNativeTimestamps = supportsNativeTimestamps;
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public void addToDag(Planner p) {
-        WatermarkGenerationParams<T> params = emitsJetEvents() ? wmParams : noWatermarks();
-
-        if (supportsWatermarks || !emitsJetEvents()) {
-            p.addVertex(this, p.uniqueVertexName(name(), ""),
-                    localParallelism(), metaSupplierFn.apply(params)
+        if (emitsWatermarks || eventTimePolicy == null) {
+            // Reached when the source either emits both JetEvents and watermarks
+            // or neither. In these cases we don't have to insert watermarks.
+            p.addVertex(this, p.uniqueVertexName(name()), localParallelism(),
+                    metaSupplierFn.apply(eventTimePolicy != null ? eventTimePolicy : noEventTime())
             );
         } else {
             //                  ------------
@@ -66,27 +70,33 @@ public class StreamSourceTransform<T> extends AbstractTransform implements Strea
             //                    isolated
             //                       v
             //                  -------------
-            //                 |  insertWMP  |
+            //                 |  insertWmP  |
             //                  -------------
-            String v1name = p.uniqueVertexName(name(), "");
-            Vertex v1 = p.dag.newVertex(v1name, metaSupplierFn.apply(params)).localParallelism(localParallelism());
+            String v1name = p.uniqueVertexName(name());
+            Vertex v1 = p.dag.newVertex(v1name, metaSupplierFn.apply(eventTimePolicy))
+                             .localParallelism(localParallelism());
             PlannerVertex pv2 = p.addVertex(
-                    this, v1name + "-insertWM", localParallelism(), insertWatermarksP(params)
+                    this, v1name + "-add-timestamps", localParallelism(), insertWatermarksP(eventTimePolicy)
             );
             p.dag.edge(between(v1, pv2.v).isolated());
         }
     }
 
     @Nullable
-    public WatermarkGenerationParams<T> getWmParams() {
-        return wmParams;
+    public EventTimePolicy<? super T> getEventTimePolicy() {
+        return eventTimePolicy;
     }
 
-    public void setWmGenerationParams(WatermarkGenerationParams<T> wmParams) {
-        this.wmParams = wmParams;
+    public void setEventTimePolicy(@Nonnull EventTimePolicy<? super T> eventTimePolicy) {
+        this.eventTimePolicy = eventTimePolicy;
     }
 
     public boolean emitsJetEvents() {
-        return wmParams != null;
+        return eventTimePolicy != null;
+    }
+
+    @Override
+    public boolean supportsNativeTimestamps() {
+        return supportsNativeTimestamps;
     }
 }

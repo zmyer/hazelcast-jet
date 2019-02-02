@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import com.hazelcast.jet.function.DistributedConsumer;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.function.DistributedSupplier;
 
+import javax.annotation.Nonnull;
 import javax.jms.Connection;
 import javax.jms.Destination;
 import javax.jms.Message;
@@ -35,8 +36,6 @@ import java.util.Collection;
 import java.util.stream.Stream;
 
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeBufferedP;
-import static com.hazelcast.jet.impl.util.Util.uncheckCall;
-import static com.hazelcast.jet.impl.util.Util.uncheckRun;
 import static java.util.stream.Collectors.toList;
 
 /**
@@ -55,11 +54,11 @@ public final class WriteJmsP {
      * SinkProcessors#writeJmsTopicP} instead
      */
     public static <T> ProcessorMetaSupplier supplier(
-            DistributedSupplier<Connection> connectionSupplier,
-            DistributedFunction<Connection, Session> sessionF,
-            DistributedBiFunction<Session, T, Message> messageFn,
-            DistributedBiConsumer<MessageProducer, Message> sendFn,
-            DistributedConsumer<Session> flushFn,
+            DistributedSupplier<? extends Connection> connectionSupplier,
+            DistributedFunction<? super Connection, ? extends Session> sessionF,
+            DistributedBiFunction<? super Session, T, ? extends Message> messageFn,
+            DistributedBiConsumer<? super MessageProducer, ? super Message> sendFn,
+            DistributedConsumer<? super Session> flushFn,
             String name,
             boolean isTopic
     ) {
@@ -72,21 +71,21 @@ public final class WriteJmsP {
 
         static final long serialVersionUID = 1L;
 
-        private final DistributedSupplier<Connection> connectionSupplier;
-        private final DistributedFunction<Connection, Session> sessionF;
+        private final DistributedSupplier<? extends Connection> connectionSupplier;
+        private final DistributedFunction<? super Connection, ? extends Session> sessionF;
         private final String name;
         private final boolean isTopic;
-        private final DistributedBiFunction<Session, T, Message> messageFn;
-        private final DistributedBiConsumer<MessageProducer, Message> sendFn;
-        private final DistributedConsumer<Session> flushFn;
+        private final DistributedBiFunction<? super Session, ? super T, ? extends Message> messageFn;
+        private final DistributedBiConsumer<? super MessageProducer, ? super Message> sendFn;
+        private final DistributedConsumer<? super Session> flushFn;
 
         private transient Connection connection;
 
-        private Supplier(DistributedSupplier<Connection> connectionSupplier,
-                         DistributedFunction<Connection, Session> sessionF,
-                         DistributedBiFunction<Session, T, Message> messageFn,
-                         DistributedBiConsumer<MessageProducer, Message> sendFn,
-                         DistributedConsumer<Session> flushFn,
+        private Supplier(DistributedSupplier<? extends Connection> connectionSupplier,
+                         DistributedFunction<? super Connection, ? extends Session> sessionF,
+                         DistributedBiFunction<? super Session, ? super T, ? extends Message> messageFn,
+                         DistributedBiConsumer<? super MessageProducer, ? super Message> sendFn,
+                         DistributedConsumer<? super Session> flushFn,
                          String name,
                          boolean isTopic
         ) {
@@ -100,28 +99,28 @@ public final class WriteJmsP {
         }
 
         @Override
-        public void init(Context ignored) {
+        public void init(@Nonnull Context ignored) throws Exception {
             connection = connectionSupplier.get();
-            uncheckRun(() -> connection.start());
+            connection.start();
         }
 
+        @Nonnull
         @Override
         public Collection<? extends Processor> get(int count) {
             DistributedFunction<Processor.Context, JmsContext> createFn = jet -> {
                 Session session = sessionF.apply(connection);
-                Destination destination =
-                        uncheckCall(() -> isTopic ? session.createTopic(name) : session.createQueue(name));
-                MessageProducer producer = uncheckCall(() -> session.createProducer(destination));
+                Destination destination = isTopic ? session.createTopic(name) : session.createQueue(name);
+                MessageProducer producer = session.createProducer(destination);
                 return new JmsContext(session, producer);
             };
-            DistributedBiConsumer<JmsContext, T> onReceiveFn = (buffer, item) -> {
-                Message message = messageFn.apply(buffer.session, item);
-                sendFn.accept(buffer.producer, message);
+            DistributedBiConsumer<JmsContext, T> onReceiveFn = (jmsContext, item) -> {
+                Message message = messageFn.apply(jmsContext.session, item);
+                sendFn.accept(jmsContext.producer, message);
             };
-            DistributedConsumer<JmsContext> flushF = buffer -> flushFn.accept(buffer.session);
-            DistributedConsumer<JmsContext> destroyFn = buffer -> {
-                uncheckRun(buffer.producer::close);
-                uncheckRun(buffer.session::close);
+            DistributedConsumer<JmsContext> flushF = jmsContext -> flushFn.accept(jmsContext.session);
+            DistributedConsumer<JmsContext> destroyFn = jmsContext -> {
+                jmsContext.producer.close();
+                jmsContext.session.close();
             };
             DistributedSupplier<Processor> supplier = writeBufferedP(createFn, onReceiveFn, flushF, destroyFn);
 
@@ -129,8 +128,10 @@ public final class WriteJmsP {
         }
 
         @Override
-        public void close(Throwable error) {
-            uncheckRun(() -> connection.close());
+        public void close(Throwable error) throws Exception {
+            if (connection != null) {
+                connection.close();
+            }
         }
 
         class JmsContext {

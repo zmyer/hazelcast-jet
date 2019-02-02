@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,14 +40,14 @@ public interface Stage {
     Pipeline getPipeline();
 
     /**
-     * Sets the preferred local parallelism (number of workers per Jet
+     * Sets the preferred local parallelism (number of processors per Jet
      * cluster member) this stage will configure its DAG vertices with. Jet
-     * always uses the same number of workers on each member, so the total
+     * always uses the same number of processors on each member, so the total
      * parallelism automatically increases if another member joins the cluster.
      * <p>
-     * Note that, while most stages are backed by 1 vertex, there are exceptions.
-     * If a stage uses two vertices, each of them will have the given local
-     * parallelism, so in total there will be twice as many processing units per
+     * While most stages are backed by 1 vertex, there are exceptions. If a
+     * stage uses two vertices, each of them will have the given local
+     * parallelism, so in total there will be twice as many processors per
      * member.
      * <p>
      * The default value is {@value
@@ -62,11 +62,12 @@ public interface Stage {
     Stage setLocalParallelism(int localParallelism);
 
     /**
-     * Overrides the default name of the stage with the name you choose. This
-     * can be useful for debugging purposes, to better distinguish pipeline
-     * stages in the diagnostic output.
+     * Overrides the default name of the stage with the name you choose and
+     * returns the stage. This can be useful for debugging purposes, to better
+     * distinguish pipeline stages in the diagnostic output.
      *
      * @param name the stage name
+     * @return this stage
      */
     @Nonnull
     Stage setName(@Nonnull String name);

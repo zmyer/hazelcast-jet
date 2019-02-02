@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,13 +22,12 @@ import javax.annotation.CheckReturnValue;
 import java.util.Map.Entry;
 
 public interface AsyncSnapshotWriter {
-    void setCurrentMap(String mapName);
-
     @CheckReturnValue
     boolean offer(Entry<? extends Data, ? extends Data> entry);
 
     @CheckReturnValue
-    boolean flush();
+    boolean flushAndResetMap();
+    void resetStats();
 
     boolean hasPendingAsyncOps();
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,10 +31,7 @@ import javax.jms.Message;
 import javax.jms.MessageProducer;
 import javax.jms.Session;
 
-import static com.hazelcast.jet.function.DistributedFunctions.noopConsumer;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
-import static com.hazelcast.jet.impl.util.Util.uncheckCall;
-import static com.hazelcast.jet.impl.util.Util.uncheckRun;
 import static com.hazelcast.util.Preconditions.checkNotNull;
 
 /**
@@ -178,20 +175,20 @@ public final class JmsSinkBuilder<T> {
 
         checkNotNull(destinationName);
         if (connectionFn == null) {
-            connectionFn = factory -> uncheckCall(() -> factory.createConnection(usernameLocal, passwordLocal));
+            connectionFn = factory -> factory.createConnection(usernameLocal, passwordLocal);
         }
         if (sessionFn == null) {
-            sessionFn = connection -> uncheckCall(() -> connection.createSession(transactedLocal, acknowledgeModeLocal));
+            sessionFn = connection -> connection.createSession(transactedLocal, acknowledgeModeLocal);
         }
         if (messageFn == null) {
-            messageFn = (session, item) -> uncheckCall(() ->
-                    item instanceof Message ? (Message) item : session.createTextMessage(item.toString()));
+            messageFn = (session, item) ->
+                    item instanceof Message ? (Message) item : session.createTextMessage(item.toString());
         }
         if (sendFn == null) {
-            sendFn = (producer, message) -> uncheckRun(() -> producer.send(message));
+            sendFn = MessageProducer::send;
         }
         if (flushFn == null) {
-            flushFn = noopConsumer();
+            flushFn = DistributedConsumer.noop();
         }
 
         DistributedFunction<ConnectionFactory, Connection> connectionFnLocal = connectionFn;

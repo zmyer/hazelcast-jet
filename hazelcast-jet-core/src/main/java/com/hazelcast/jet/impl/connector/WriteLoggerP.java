@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,11 @@ public class WriteLoggerP<T> extends AbstractProcessor {
     }
 
     @Override
+    public boolean isCooperative() {
+        return false;
+    }
+
+    @Override
     @SuppressWarnings("unchecked")
     protected boolean tryProcess(int ordinal, @Nonnull Object item) {
         getLogger().info(toStringFn.apply((T) item).toString());
@@ -46,10 +51,5 @@ public class WriteLoggerP<T> extends AbstractProcessor {
     public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
         getLogger().fine(watermark.toString());
         return true;
-    }
-
-    @Override
-    public boolean isCooperative() {
-        return false;
     }
 }

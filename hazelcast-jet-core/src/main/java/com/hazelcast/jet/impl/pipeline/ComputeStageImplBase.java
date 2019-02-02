@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,10 @@
 package com.hazelcast.jet.impl.pipeline;
 
 import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.aggregate.AggregateOperation1;
+import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.Processor;
-import com.hazelcast.jet.core.WatermarkEmissionPolicy;
-import com.hazelcast.jet.core.WatermarkGenerationParams;
+import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.WatermarkPolicy;
 import com.hazelcast.jet.function.DistributedBiFunction;
 import com.hazelcast.jet.function.DistributedBiPredicate;
@@ -28,20 +29,15 @@ import com.hazelcast.jet.function.DistributedPredicate;
 import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.function.DistributedToLongFunction;
 import com.hazelcast.jet.function.DistributedTriFunction;
+import com.hazelcast.jet.impl.JetEvent;
 import com.hazelcast.jet.impl.pipeline.transform.AbstractTransform;
 import com.hazelcast.jet.impl.pipeline.transform.FilterTransform;
-import com.hazelcast.jet.impl.pipeline.transform.FilterUsingContextTransform;
-import com.hazelcast.jet.impl.pipeline.transform.FilterUsingKeyedContextTransform;
 import com.hazelcast.jet.impl.pipeline.transform.FlatMapTransform;
-import com.hazelcast.jet.impl.pipeline.transform.FlatMapUsingContextTransform;
-import com.hazelcast.jet.impl.pipeline.transform.FlatMapUsingKeyedContextTransform;
 import com.hazelcast.jet.impl.pipeline.transform.HashJoinTransform;
 import com.hazelcast.jet.impl.pipeline.transform.MapTransform;
-import com.hazelcast.jet.impl.pipeline.transform.MapUsingContextTransform;
-import com.hazelcast.jet.impl.pipeline.transform.MapUsingKeyedContextTransform;
 import com.hazelcast.jet.impl.pipeline.transform.MergeTransform;
 import com.hazelcast.jet.impl.pipeline.transform.PeekTransform;
-import com.hazelcast.jet.impl.pipeline.transform.ProcessorTransform;
+import com.hazelcast.jet.impl.pipeline.transform.RollingAggregateTransform;
 import com.hazelcast.jet.impl.pipeline.transform.SinkTransform;
 import com.hazelcast.jet.impl.pipeline.transform.StreamSourceTransform;
 import com.hazelcast.jet.impl.pipeline.transform.TimestampTransform;
@@ -55,10 +51,23 @@ import com.hazelcast.jet.pipeline.SinkStage;
 import com.hazelcast.jet.pipeline.StreamStage;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
-import static com.hazelcast.jet.core.WatermarkGenerationParams.DEFAULT_IDLE_TIMEOUT;
-import static com.hazelcast.jet.core.WatermarkGenerationParams.wmGenParams;
-import static com.hazelcast.jet.core.WatermarkPolicies.limitingLag;
+import java.util.concurrent.CompletableFuture;
+
+import static com.hazelcast.jet.core.EventTimePolicy.DEFAULT_IDLE_TIMEOUT;
+import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
+import static com.hazelcast.jet.core.WatermarkPolicy.limitingLag;
+import static com.hazelcast.jet.impl.pipeline.transform.PartitionedProcessorTransform.filterUsingPartitionedContextTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.PartitionedProcessorTransform.flatMapUsingPartitionedContextAsyncTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.PartitionedProcessorTransform.flatMapUsingPartitionedContextTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.PartitionedProcessorTransform.mapUsingContextPartitionedTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.PartitionedProcessorTransform.partitionedCustomProcessorTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.ProcessorTransform.customProcessorTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.ProcessorTransform.filterUsingContextTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.ProcessorTransform.flatMapUsingContextAsyncTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.ProcessorTransform.flatMapUsingContextTransform;
+import static com.hazelcast.jet.impl.pipeline.transform.ProcessorTransform.mapUsingContextTransform;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static com.hazelcast.util.Preconditions.checkFalse;
 import static java.util.Arrays.asList;
@@ -69,10 +78,6 @@ public abstract class ComputeStageImplBase<T> extends AbstractStage {
 
     static final FunctionAdapter DO_NOT_ADAPT = new FunctionAdapter();
     static final JetEventFunctionAdapter ADAPT_TO_JET_EVENT = new JetEventFunctionAdapter();
-
-    private static final WatermarkEmissionPolicy THROWING_EMIT_POLICY = (currentWm, lastEmittedWm) -> {
-        throw new IllegalStateException("emit policy should have been replaced");
-    };
 
     @Nonnull
     public FunctionAdapter fnAdapter;
@@ -88,29 +93,31 @@ public abstract class ComputeStageImplBase<T> extends AbstractStage {
     }
 
     @Nonnull
-    public StreamStage<T> addTimestamps() {
-        return addTimestamps(o -> System.currentTimeMillis(), 0);
+    public StreamStage<T> addTimestamps(
+            @Nonnull DistributedToLongFunction<? super T> timestampFn, long allowedLateness
+    ) {
+        return addTimestampsInt(timestampFn, allowedLateness, false);
     }
 
-    @Nonnull
     @SuppressWarnings("unchecked")
-    public StreamStage<T> addTimestamps(
-            DistributedToLongFunction<? super T> timestampFn, long allowedLateness
-    ) {
+    StreamStage<T> addTimestampsInt(
+            @Nullable DistributedToLongFunction<? super T> timestampFn,
+            long allowedLateness,
+            boolean tryAddToSource) {
         checkSerializable(timestampFn, "timestampFn");
-        checkFalse(hasJetEvents(), "This stage already has timestamps assigned to it.");
+        checkFalse(hasJetEvents(), "This stage already has timestamps assigned to it");
 
         DistributedSupplier<WatermarkPolicy> wmPolicy = limitingLag(allowedLateness);
-        WatermarkGenerationParams<T> wmParams = wmGenParams(
-                timestampFn, JetEvent::jetEvent, wmPolicy, THROWING_EMIT_POLICY, DEFAULT_IDLE_TIMEOUT
+        EventTimePolicy<T> eventTimePolicy = eventTimePolicy(
+                timestampFn, JetEvent::jetEvent, wmPolicy, 0, 0, DEFAULT_IDLE_TIMEOUT
         );
 
-        if (transform instanceof StreamSourceTransform) {
-            ((StreamSourceTransform<T>) transform).setWmGenerationParams(wmParams);
+        if (tryAddToSource && transform instanceof StreamSourceTransform) {
+            ((StreamSourceTransform<T>) transform).setEventTimePolicy(eventTimePolicy);
             this.fnAdapter = ADAPT_TO_JET_EVENT;
             return (StreamStage<T>) this;
         }
-        TimestampTransform<T> tsTransform = new TimestampTransform<>(transform, wmParams);
+        TimestampTransform<T> tsTransform = new TimestampTransform<>(transform, eventTimePolicy);
         pipelineImpl.connect(transform, tsTransform);
         return new StreamStageImpl<>(tsTransform, ADAPT_TO_JET_EVENT, pipelineImpl);
     }
@@ -124,33 +131,31 @@ public abstract class ComputeStageImplBase<T> extends AbstractStage {
 
     @Nonnull
     @SuppressWarnings("unchecked")
+    <RET> RET attachFilter(@Nonnull DistributedPredicate<T> filterFn) {
+        checkSerializable(filterFn, "filterFn");
+        return (RET) attach(new FilterTransform(transform, fnAdapter.adaptFilterFn(filterFn)), fnAdapter);
+    }
+
+    @Nonnull
+    @SuppressWarnings("unchecked")
+    <R, RET> RET attachFlatMap(
+            @Nonnull DistributedFunction<? super T, ? extends Traverser<? extends R>> flatMapFn
+    ) {
+        checkSerializable(flatMapFn, "flatMapFn");
+        return (RET) attach(new FlatMapTransform(transform, fnAdapter.adaptFlatMapFn(flatMapFn)), fnAdapter);
+    }
+
+    @Nonnull
+    @SuppressWarnings("unchecked")
     <C, R, RET> RET attachMapUsingContext(
             @Nonnull ContextFactory<C> contextFactory,
             @Nonnull DistributedBiFunction<? super C, ? super T, ? extends R> mapFn
     ) {
         checkSerializable(mapFn, "mapFn");
-        return (RET) attach(new MapUsingContextTransform(this.transform, contextFactory,
-                fnAdapter.adaptMapUsingContextFn(mapFn)), fnAdapter);
-    }
-
-    @Nonnull
-    <C, K, R, RET> RET attachMapUsingKeyedContext(
-            ContextFactory<C> contextFactory,
-            DistributedFunction<? super T, ? extends K> keyFn,
-            DistributedBiFunction<? super C, ? super T, ? extends R> mapFn
-    ) {
-        checkSerializable(keyFn, "keyFn");
-        checkSerializable(mapFn, "mapFn");
-        return (RET) attach(new MapUsingKeyedContextTransform(this.transform, contextFactory,
-                fnAdapter.adaptKeyFn(keyFn),
-                fnAdapter.adaptMapUsingContextFn(mapFn)), fnAdapter);
-    }
-
-    @Nonnull
-    @SuppressWarnings("unchecked")
-    <RET> RET attachFilter(@Nonnull DistributedPredicate<T> filterFn) {
-        checkSerializable(filterFn, "filterFn");
-        return (RET) attach(new FilterTransform(transform, fnAdapter.adaptFilterFn(filterFn)), fnAdapter);
+        DistributedBiFunction adaptedMapFn = fnAdapter.adaptMapUsingContextFn(mapFn);
+        return (RET) attach(
+                mapUsingContextTransform(transform, contextFactory, adaptedMapFn),
+                fnAdapter);
     }
 
     @Nonnull
@@ -160,52 +165,123 @@ public abstract class ComputeStageImplBase<T> extends AbstractStage {
             @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
     ) {
         checkSerializable(filterFn, "filterFn");
-        return (RET) attach(new FilterUsingContextTransform<>(transform, contextFactory,
-                fnAdapter.adaptFilterUsingContextFn(filterFn)), fnAdapter);
+        DistributedBiPredicate adaptedFilterFn = fnAdapter.adaptFilterUsingContextFn(filterFn);
+        return (RET) attach(
+                filterUsingContextTransform(transform, contextFactory, adaptedFilterFn),
+                fnAdapter);
     }
 
     @Nonnull
-    <C, K, RET> RET attachFilterUsingKeyedContext(
-            ContextFactory<C> contextFactory,
-            DistributedFunction<? super T, ? extends K> keyFn,
-            @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
-    ) {
-        checkSerializable(keyFn, "keyFn");
-        checkSerializable(filterFn, "filterFn");
-        return (RET) attach(new FilterUsingKeyedContextTransform(this.transform, contextFactory,
-                fnAdapter.adaptKeyFn(keyFn),
-                fnAdapter.adaptFilterUsingContextFn(filterFn)), fnAdapter);
-    }
-
-    @Nonnull
-    <R, RET> RET attachFlatMap(
-            @Nonnull DistributedFunction<? super T, ? extends Traverser<? extends R>> flatMapFn
-    ) {
-        checkSerializable(flatMapFn, "flatMapFn");
-        return attach(new FlatMapTransform<>(transform, fnAdapter.adaptFlatMapFn(flatMapFn)), fnAdapter);
-    }
-
-    @Nonnull
+    @SuppressWarnings("unchecked")
     <C, R, RET> RET attachFlatMapUsingContext(
             @Nonnull ContextFactory<C> contextFactory,
             @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<? extends R>> flatMapFn
     ) {
         checkSerializable(flatMapFn, "flatMapFn");
-        return attach(new FlatMapUsingContextTransform<>(transform, contextFactory,
-                fnAdapter.adaptFlatMapUsingContextFn(flatMapFn)), fnAdapter);
+        DistributedBiFunction adaptedFlatMapFn = fnAdapter.adaptFlatMapUsingContextFn(flatMapFn);
+        return (RET) attach(
+                flatMapUsingContextTransform(transform, contextFactory, adaptedFlatMapFn),
+                fnAdapter);
     }
 
     @Nonnull
-    <C, K, R, RET> RET attachFlatMapUsingKeyedContext(
-            ContextFactory<C> contextFactory,
-            DistributedFunction<? super T, ? extends K> keyFn,
+    @SuppressWarnings("unchecked")
+    <C, R, RET> RET attachFlatMapUsingContextAsync(
+            @Nonnull String operationName,
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Traverser<R>>> flatMapAsyncFn
+    ) {
+        checkSerializable(flatMapAsyncFn, operationName + "AsyncFn");
+        DistributedBiFunction adaptedFlatMapFn = fnAdapter.adaptFlatMapUsingContextAsyncFn(flatMapAsyncFn);
+        return (RET) attach(
+                flatMapUsingContextAsyncTransform(transform, operationName, contextFactory, adaptedFlatMapFn),
+                fnAdapter);
+    }
+
+    @Nonnull
+    @SuppressWarnings("unchecked")
+    <C, K, R, RET> RET attachMapUsingPartitionedContext(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedFunction<? super T, ? extends K> partitionKeyFn,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends R> mapFn
+    ) {
+        checkSerializable(mapFn, "mapFn");
+        checkSerializable(partitionKeyFn, "partitionKeyFn");
+        DistributedBiFunction adaptedMapFn = fnAdapter.adaptMapUsingContextFn(mapFn);
+        DistributedFunction adaptedPartitionKeyFn = fnAdapter.adaptKeyFn(partitionKeyFn);
+        return (RET) attach(
+                mapUsingContextPartitionedTransform(transform, contextFactory, adaptedMapFn, adaptedPartitionKeyFn),
+                fnAdapter);
+    }
+
+    @Nonnull
+    @SuppressWarnings("unchecked")
+    <C, K, RET> RET attachFilterUsingPartitionedContext(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedFunction<? super T, ? extends K> partitionKeyFn,
+            @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
+    ) {
+        checkSerializable(filterFn, "filterFn");
+        checkSerializable(partitionKeyFn, "partitionKeyFn");
+        DistributedBiPredicate adaptedFilterFn = fnAdapter.adaptFilterUsingContextFn(filterFn);
+        DistributedFunction adaptedPartitionKeyFn = fnAdapter.adaptKeyFn(partitionKeyFn);
+        return (RET) attach(
+                filterUsingPartitionedContextTransform(
+                        transform, contextFactory, adaptedFilterFn, adaptedPartitionKeyFn),
+                fnAdapter);
+    }
+
+    @Nonnull
+    @SuppressWarnings("unchecked")
+    <C, K, R, RET> RET attachFlatMapUsingPartitionedContext(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedFunction<? super T, ? extends K> partitionKeyFn,
             @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<? extends R>> flatMapFn
     ) {
-        checkSerializable(keyFn, "keyFn");
         checkSerializable(flatMapFn, "flatMapFn");
-        return (RET) attach(new FlatMapUsingKeyedContextTransform(this.transform, contextFactory,
-                fnAdapter.adaptKeyFn(keyFn),
-                fnAdapter.adaptFlatMapUsingContextFn(flatMapFn)), fnAdapter);
+        checkSerializable(partitionKeyFn, "partitionKeyFn");
+        DistributedBiFunction adaptedFlatMapFn = fnAdapter.adaptFlatMapUsingContextFn(flatMapFn);
+        DistributedFunction adaptedPartitionKeyFn = fnAdapter.adaptKeyFn(partitionKeyFn);
+        return (RET) attach(
+                flatMapUsingPartitionedContextTransform(
+                        transform, contextFactory, adaptedFlatMapFn, adaptedPartitionKeyFn),
+                fnAdapter);
+    }
+
+    @Nonnull
+    @SuppressWarnings("unchecked")
+    <C, K, R, RET> RET attachTransformUsingPartitionedContextAsync(
+            @Nonnull String operationName,
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedFunction<? super T, ? extends K> partitionKeyFn,
+            @Nonnull DistributedBiFunction<? super C, ? super T, CompletableFuture<Traverser<R>>> flatMapAsyncFn
+    ) {
+        checkSerializable(flatMapAsyncFn, operationName + "AsyncFn");
+        checkSerializable(partitionKeyFn, "partitionKeyFn");
+        DistributedBiFunction adaptedFlatMapFn = fnAdapter.adaptFlatMapUsingContextAsyncFn(flatMapAsyncFn);
+        DistributedFunction adaptedPartitionKeyFn = fnAdapter.adaptKeyFn(partitionKeyFn);
+        return (RET) attach(
+                flatMapUsingPartitionedContextAsyncTransform(
+                        transform, operationName, contextFactory, adaptedFlatMapFn, adaptedPartitionKeyFn),
+                fnAdapter);
+    }
+
+    @Nonnull
+    @SuppressWarnings("unchecked")
+    <K, R, OUT, RET> RET attachRollingAggregate(
+            DistributedFunction<? super T, ? extends K> keyFn,
+            @Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp,
+            @Nonnull DistributedBiFunction<? super K, ? super R, ? extends OUT> mapToOutputFn
+
+    ) {
+        checkSerializable(keyFn, "keyFn");
+        checkSerializable(mapToOutputFn, "mapToOutputFn");
+        return (RET) attach(new RollingAggregateTransform(
+                        transform,
+                        fnAdapter.adaptKeyFn(keyFn),
+                        fnAdapter.adaptAggregateOperation1(aggrOp),
+                        fnAdapter.adaptRollingAggregateOutputFn(mapToOutputFn)),
+                fnAdapter);
     }
 
     @Nonnull
@@ -221,7 +297,7 @@ public abstract class ComputeStageImplBase<T> extends AbstractStage {
             @Nonnull DistributedBiFunction<T, T1, R> mapToOutputFn
     ) {
         checkSerializable(mapToOutputFn, "mapToOutputFn");
-        return (RET) attach(new HashJoinTransform<>(
+        return attach(new HashJoinTransform<>(
                 asList(transform, transformOf(stage1)),
                 singletonList(fnAdapter.adaptJoinClause(joinClause)),
                 emptyList(),
@@ -231,7 +307,7 @@ public abstract class ComputeStageImplBase<T> extends AbstractStage {
 
     @Nonnull
     @SuppressWarnings("unchecked")
-    <K1, T1_IN, T1, K2, T2_IN, T2, R, RET> RET attachHashJoin2(
+    <K1, T1_IN, T1, K2, T2_IN, T2, R, TA, RET> RET attachHashJoin2(
             @Nonnull BatchStage<T1_IN> stage1,
             @Nonnull JoinClause<K1, ? super T, ? super T1_IN, ? extends T1> joinClause1,
             @Nonnull BatchStage<T2_IN> stage2,
@@ -239,7 +315,7 @@ public abstract class ComputeStageImplBase<T> extends AbstractStage {
             @Nonnull DistributedTriFunction<T, T1, T2, R> mapToOutputFn
     ) {
         checkSerializable(mapToOutputFn, "mapToOutputFn");
-        return (RET) attach(new HashJoinTransform<>(
+        return attach(new HashJoinTransform(
                 asList(transform, transformOf(stage1), transformOf(stage2)),
                 asList(fnAdapter.adaptJoinClause(joinClause1), fnAdapter.adaptJoinClause(joinClause2)),
                 emptyList(),
@@ -264,8 +340,18 @@ public abstract class ComputeStageImplBase<T> extends AbstractStage {
             @Nonnull String stageName,
             @Nonnull DistributedSupplier<Processor> procSupplier
     ) {
-        checkSerializable(procSupplier, "procSupplier");
-        return attach(new ProcessorTransform(transform, stageName, procSupplier), fnAdapter);
+        return attach(customProcessorTransform(stageName, transform, procSupplier), fnAdapter);
+    }
+
+    @Nonnull
+    <K, RET> RET attachPartitionedCustomTransform(
+            @Nonnull String stageName,
+            @Nonnull ProcessorSupplier procSupplier,
+            @Nonnull DistributedFunction<? super T, ? extends K> partitionKeyFn
+
+    ) {
+        return attach(partitionedCustomProcessorTransform(stageName, transform, procSupplier, partitionKeyFn),
+                fnAdapter);
     }
 
     @Nonnull

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 
 package com.hazelcast.jet.kafka;
 
+import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
-import com.hazelcast.jet.core.WatermarkGenerationParams;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.kafka.impl.StreamKafkaP;
 import com.hazelcast.jet.kafka.impl.WriteKafkaP;
@@ -42,18 +42,18 @@ public final class KafkaProcessors {
 
     /**
      * Returns a supplier of processors for {@link
-     * KafkaSources#kafka(Properties, DistributedFunction, String, String...)}.
+     * KafkaSources#kafka(Properties, DistributedFunction, String...)}.
      */
     public static <K, V, T> ProcessorMetaSupplier streamKafkaP(
             @Nonnull Properties properties,
-            @Nonnull DistributedFunction<ConsumerRecord<K, V>, T> projectionFn,
-            @Nonnull WatermarkGenerationParams<T> wmGenParams,
+            @Nonnull DistributedFunction<? super ConsumerRecord<K, V>, ? extends T> projectionFn,
+            @Nonnull EventTimePolicy<? super T> eventTimePolicy,
             @Nonnull String... topics
     ) {
         Preconditions.checkPositive(topics.length, "At least one topic must be supplied");
         properties.put("enable.auto.commit", false);
         return ProcessorMetaSupplier.of(
-                StreamKafkaP.processorSupplier(properties, Arrays.asList(topics), projectionFn, wmGenParams),
+                StreamKafkaP.processorSupplier(properties, Arrays.asList(topics), projectionFn, eventTimePolicy),
                 PREFERRED_LOCAL_PARALLELISM
         );
     }
@@ -65,8 +65,8 @@ public final class KafkaProcessors {
     public static <T, K, V> ProcessorMetaSupplier writeKafkaP(
             @Nonnull Properties properties,
             @Nonnull String topic,
-            @Nonnull DistributedFunction<? super T, K> extractKeyFn,
-            @Nonnull DistributedFunction<? super T, V> extractValueFn
+            @Nonnull DistributedFunction<? super T, ? extends K> extractKeyFn,
+            @Nonnull DistributedFunction<? super T, ? extends V> extractValueFn
     ) {
         return writeKafkaP(properties, (T t) ->
                 new ProducerRecord<>(topic, extractKeyFn.apply(t), extractValueFn.apply(t))
@@ -79,7 +79,7 @@ public final class KafkaProcessors {
      */
     public static <T, K, V> ProcessorMetaSupplier writeKafkaP(
             @Nonnull Properties properties,
-            @Nonnull DistributedFunction<? super T, ProducerRecord<K, V>> toRecordFn
+            @Nonnull DistributedFunction<? super T, ? extends ProducerRecord<K, V>> toRecordFn
     ) {
         return ProcessorMetaSupplier.of(new WriteKafkaP.Supplier<T, K, V>(properties, toRecordFn), 2);
     }

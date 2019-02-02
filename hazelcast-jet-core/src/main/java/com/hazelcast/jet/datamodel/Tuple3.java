@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -89,6 +89,6 @@ public final class Tuple3<E0, E1, E2> {
 
     @Override
     public String toString() {
-        return "Tuple3{" + f0 + ", " + f1 + ", " + f2 + '}';
+        return "(" + f0 + ", " + f1 + ", " + f2 + ')';
     }
 }

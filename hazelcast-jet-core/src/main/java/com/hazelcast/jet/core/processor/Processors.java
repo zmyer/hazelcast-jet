@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,45 +17,48 @@
 package com.hazelcast.jet.core.processor;
 
 import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.Util;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
-import com.hazelcast.jet.core.AbstractProcessor;
+import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.Inbox;
+import com.hazelcast.jet.core.Outbox;
 import com.hazelcast.jet.core.Processor;
-import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.ResettableSingletonTraverser;
 import com.hazelcast.jet.core.SlidingWindowPolicy;
 import com.hazelcast.jet.core.TimestampKind;
-import com.hazelcast.jet.core.WatermarkGenerationParams;
+import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.datamodel.TimestampedEntry;
 import com.hazelcast.jet.function.DistributedBiFunction;
 import com.hazelcast.jet.function.DistributedBiPredicate;
+import com.hazelcast.jet.function.DistributedConsumer;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.function.DistributedPredicate;
 import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.function.DistributedToLongFunction;
+import com.hazelcast.jet.function.DistributedTriFunction;
 import com.hazelcast.jet.function.KeyedWindowResultFunction;
+import com.hazelcast.jet.impl.processor.AsyncTransformUsingContextOrderedP;
+import com.hazelcast.jet.impl.processor.AsyncTransformUsingContextUnorderedP;
 import com.hazelcast.jet.impl.processor.GroupP;
 import com.hazelcast.jet.impl.processor.InsertWatermarksP;
+import com.hazelcast.jet.impl.processor.RollingAggregateP;
 import com.hazelcast.jet.impl.processor.SessionWindowP;
 import com.hazelcast.jet.impl.processor.SlidingWindowP;
 import com.hazelcast.jet.impl.processor.TransformP;
 import com.hazelcast.jet.impl.processor.TransformUsingContextP;
-import com.hazelcast.jet.impl.processor.TransformUsingKeyedContextP;
-import com.hazelcast.jet.impl.util.WrappingProcessorMetaSupplier;
-import com.hazelcast.jet.impl.util.WrappingProcessorSupplier;
 import com.hazelcast.jet.pipeline.ContextFactory;
 
 import javax.annotation.Nonnull;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.concurrent.CompletableFuture;
 
 import static com.hazelcast.jet.core.TimestampKind.EVENT;
 import static com.hazelcast.jet.function.DistributedFunction.identity;
 import static com.hazelcast.jet.function.DistributedFunctions.constantKey;
-import static com.hazelcast.jet.function.DistributedFunctions.noopConsumer;
 import static java.util.Collections.nCopies;
 import static java.util.Collections.singletonList;
 import static java.util.stream.Collectors.toList;
@@ -252,14 +255,14 @@ public final class Processors {
     public static <A, R> DistributedSupplier<Processor> accumulateP(@Nonnull AggregateOperation<A, R> aggrOp) {
         return () -> new GroupP<>(
                 nCopies(aggrOp.arity(), constantKey()),
-                aggrOp.withFinishFn(identity()),
+                aggrOp.withIdentityFinish(),
                 (k, r) -> r);
     }
 
     /**
      * Returns a supplier of processors for a vertex that performs the provided
      * aggregate operation on all the items it receives. After exhausting all
-     * its input it emits a single item of type {@code R} &mdash;the result of
+     * its input it emits a single item of type {@code R} &mdash; the result of
      * the aggregate operation.
      * <p>
      * Since the input to this vertex must be bounded, its primary use case is
@@ -300,6 +303,8 @@ public final class Processors {
      *
      * @param keyFns functions that compute the grouping key
      * @param aggrOp the aggregate operation
+     * @param mapToOutputFn function that takes the key and the aggregation result and returns
+     *                      the output item
      * @param <K> type of key
      * @param <A> type of accumulator returned from {@code aggrOp.createAccumulatorFn()}
      * @param <R> type of the result returned from {@code aggrOp.finishAccumulationFn()}
@@ -340,7 +345,7 @@ public final class Processors {
             @Nonnull List<DistributedFunction<?, ? extends K>> getKeyFns,
             @Nonnull AggregateOperation<A, ?> aggrOp
     ) {
-        return () -> new GroupP<>(getKeyFns, aggrOp.withFinishFn(identity()), Util::entry);
+        return () -> new GroupP<>(getKeyFns, aggrOp.withIdentityFinish(), Util::entry);
     }
 
     /**
@@ -359,6 +364,8 @@ public final class Processors {
      * restart, the state will be lost.
      *
      * @param aggrOp the aggregate operation to perform
+     * @param mapToOutputFn function that takes the key and the aggregation result and returns
+     *                      the output item
      * @param <A> type of accumulator returned from {@code aggrOp.createAccumulatorFn()}
      * @param <R> type of the finished result returned from
      *            {@code aggrOp.finishAccumulationFn()}
@@ -467,7 +474,7 @@ public final class Processors {
                 timestampFns,
                 timestampKind,
                 winPolicy.toTumblingByFrame(),
-                aggrOp.withFinishFn(identity()),
+                aggrOp.withIdentityFinish(),
                 TimestampedEntry::fromWindowResult,
                 false
         );
@@ -589,7 +596,7 @@ public final class Processors {
      * <p>
      * The functioning of this vertex is easiest to explain in terms of the
      * <em>event interval</em>: the range {@code [timestamp, timestamp +
-     * sessionTimeout]}. Initially an event causes a new session window to be
+     * sessionTimeout)}. Initially an event causes a new session window to be
      * created, covering exactly the event interval. A following event under
      * the same key belongs to this window iff its interval overlaps it. The
      * window is extended to cover the entire interval of the new event. The
@@ -630,7 +637,7 @@ public final class Processors {
      * Returns a supplier of processors for a vertex that inserts {@link
      * com.hazelcast.jet.core.Watermark watermark items} into the stream. The
      * value of the watermark is determined by the supplied {@link
-     * com.hazelcast.jet.core.WatermarkPolicy} instance.
+     * com.hazelcast.jet.core.EventTimePolicy} instance.
      * <p>
      * This processor also drops late items. It never allows an event which is
      * late with regard to already emitted watermark to pass.
@@ -650,9 +657,9 @@ public final class Processors {
      */
     @Nonnull
     public static <T> DistributedSupplier<Processor> insertWatermarksP(
-            @Nonnull WatermarkGenerationParams<T> wmGenParams
+            @Nonnull EventTimePolicy<? super T> eventTimePolicy
     ) {
-        return () -> new InsertWatermarksP<>(wmGenParams);
+        return () -> new InsertWatermarksP<>(eventTimePolicy);
     }
 
     /**
@@ -728,7 +735,7 @@ public final class Processors {
      * If the mapping result is {@code null}, the vertex emits nothing.
      * Therefore it can be used to implement filtering semantics as well.
      * <p>
-     * Unlike {@link #mapUsingKeyedContextP} (with the "{@code Keyed}" part),
+     * Unlike {@link #rollingAggregateP} (with the "{@code Keyed}" part),
      * this method creates one context object per processor (or per member, if
      * {@linkplain ContextFactory#shareLocally() shared}).
      * <p>
@@ -754,14 +761,39 @@ public final class Processors {
     }
 
     /**
+     * Asynchronous version of {@link #mapUsingContextP}: the {@code
+     * mapAsyncFn} returns a {@code CompletableFuture<R>} instead of just
+     * {@code R}.
+     * <p>
+     * The function can return a null future and the future can return a null
+     * result: in both cases it will act just like a filter.
+     * <p>
+     * The {@code extractKeyFn} is used to extract keys under which to save
+     * in-flight items to the snapshot. If the input to this processor is over
+     * a partitioned edge, you should use the same key. If it's a round-robin
+     * edge, you can use any key, for example {@code Object::hashCode}.
+     *
+     * @param contextFactory the context factory
+     * @param extractKeyFn a function to extract snapshot keys
+     * @param mapAsyncFn a stateless mapping function
+     * @param <C> type of context object
+     * @param <T> type of received item
+     */
+    @Nonnull
+    public static <C, T, K, R> ProcessorSupplier mapUsingContextAsyncP(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedFunction<T, K> extractKeyFn,
+            @Nonnull DistributedBiFunction<? super C, ? super T, CompletableFuture<R>> mapAsyncFn
+    ) {
+        return flatMapUsingContextAsyncP(contextFactory, extractKeyFn,
+                (c, t) -> mapAsyncFn.apply(c, t).thenApply(Traversers::singleton));
+    }
+
+    /**
      * Returns a supplier of processors for a vertex that emits the same items
      * it receives, but only those that pass the given predicate. The predicate
      * function receives another parameter, the context object which Jet will
      * create using the supplied {@code contextFactory}.
-     * <p>
-     * Unlike {@link #filterUsingKeyedContextP} (with the "{@code Keyed}"
-     * part), this method creates one context object per processor (or per
-     * member, if {@linkplain ContextFactory#shareLocally() shared}).
      * <p>
      * While it's allowed to store some local state in the context object, it
      * won't be saved to the snapshot and will misbehave in a fault-tolerant
@@ -784,16 +816,41 @@ public final class Processors {
     }
 
     /**
+     * Asynchronous version of {@link #filterUsingContextP}: the {@code
+     * filterAsyncFn} returns a {@code CompletableFuture<Boolean>} instead of
+     * just a {@code boolean}.
+     * <p>
+     * The function can return a null future, but the future must not return
+     * null {@code Boolean}.
+     * <p>
+     * The {@code extractKeyFn} is used to extract keys under which to save
+     * in-flight items to the snapshot. If the input to this processor is over
+     * a partitioned edge, you should use the same key. If it's a round-robin
+     * edge, you can use any key, for example {@code Object::hashCode}.
+     *
+     * @param contextFactory the context factory
+     * @param extractKeyFn a function to extract snapshot keys
+     * @param filterAsyncFn a stateless predicate to test each received item against
+     * @param <C> type of context object
+     * @param <T> type of received item
+     */
+    @Nonnull
+    public static <C, T, K> ProcessorSupplier filterUsingContextAsyncP(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedFunction<T, K> extractKeyFn,
+            @Nonnull DistributedBiFunction<? super C, ? super T, CompletableFuture<Boolean>> filterAsyncFn
+    ) {
+        return flatMapUsingContextAsyncP(contextFactory, extractKeyFn,
+                (c, t) -> filterAsyncFn.apply(c, t).thenApply(passed -> passed ? Traversers.singleton(t) : null));
+    }
+
+    /**
      * Returns a supplier of processors for a vertex that applies the provided
      * item-to-traverser mapping function to each received item and emits all
      * the items from the resulting traverser. The traverser must be
      * <em>null-terminated</em>. The mapping function receives another parameter,
      * the context object which Jet will create using the supplied {@code
      * contextFactory}.
-     * <p>
-     * Unlike {@link #flatMapUsingKeyedContextP} (with the "{@code Keyed}"
-     * part), this method creates one context object per processor (or per
-     * member, if {@linkplain ContextFactory#shareLocally() shared}).
      * <p>
      * While it's allowed to store some local state in the context object, it
      * won't be saved to the snapshot and will misbehave in a fault-tolerant
@@ -816,167 +873,101 @@ public final class Processors {
     }
 
     /**
-     * Returns a supplier of processors for a vertex which, for each received
-     * item, emits the result of applying the given mapping function to it. The
-     * mapping function receives another parameter, a context object which Jet
-     * will create using the supplied {@code contextFactory} for each key.
+     * Asynchronous version of {@link #flatMapUsingContextP}: the {@code
+     * flatMapAsyncFn} returns a {@code CompletableFuture<Traverser<R>>}
+     * instead of just a {@code Traverser<R>}.
      * <p>
-     * Unlike {@link #mapUsingContextP} (without the "{@code Keyed}" part),
-     * this method creates separate context object for each key. A context
-     * object, once created, is stored until the end of the job, so watch your
-     * number of keys.
+     * The function can return a null future and the future can return a null
+     * traverser: in both cases it will act just like a filter. The traverser
+     * can't return null items - null is a terminator in {@link Traverser}, see
+     * its documentation.
      * <p>
-     * If the mapping result is {@code null}, the vertex emits nothing.
-     * Therefore it can be used to implement filtering semantics as well.
-     * <p>
-     * This vertex saves the state to snapshot so the context objects will
-     * survive a job restart.
+     * The {@code extractKeyFn} is used to extract keys under which to save
+     * in-flight items to the snapshot. If the input to this processor is over
+     * a partitioned edge, you should use the same key. If it's a round-robin
+     * edge, you can use any key, for example {@code Object::hashCode}.
      *
      * @param contextFactory the context factory
-     * @param keyFn a function that computes the grouping key
-     * @param mapFn a stateless mapping function
-     *
-     * @param <C> context object type
-     * @param <T> received item type
-     * @param <K> key type
-     * @param <R> emitted item type
-     */
-    @Nonnull
-    public static <C, T, K, R> DistributedSupplier<Processor> mapUsingKeyedContextP(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedFunction<? super T, ? extends K> keyFn,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends R> mapFn
-    ) {
-        return () -> new TransformUsingKeyedContextP<C, T, K, R>(contextFactory, keyFn,
-                (singletonTraverser, context, item) -> {
-                    singletonTraverser.accept(mapFn.apply(context, item));
-                    return singletonTraverser;
-                });
-    }
-
-    /**
-     * Returns a supplier of processors for a vertex that emits the same items
-     * it receives, but only those that pass the given predicate. The predicate
-     * function receives another parameter, a context object which Jet will
-     * create using the supplied {@code contextFactory} for each key.
-     * <p>
-     * Unlike {@link #filterUsingContextP} (without the "{@code Keyed}" part),
-     * this method creates separate context object for each key. A context
-     * object, once created, is stored until the end of the job, so watch your
-     * number of keys.
-     * <p>
-     * This vertex saves the state to snapshot so the context objects will
-     * survive a job restart.
-     *
-     * @param contextFactory the context factory
-     * @param keyFn a function that computes the grouping key
-     * @param filterFn a stateless predicate to test each received item against
+     * @param extractKeyFn a function to extract snapshot keys
+     * @param flatMapAsyncFn  a stateless function that maps the received item
+     *      to a future returning a traverser over the output items
      * @param <C> type of context object
-     * @param <T> type of received and emitted item
-     * @param <K> key type
+     * @param <T> type of received item
      */
     @Nonnull
-    public static <C, T, K> DistributedSupplier<Processor> filterUsingKeyedContextP(
+    public static <C, T, K, R> ProcessorSupplier flatMapUsingContextAsyncP(
             @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedFunction<? super T, ? extends K> keyFn,
-            @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
+            @Nonnull DistributedFunction<? super T, ? extends K> extractKeyFn,
+            @Nonnull DistributedBiFunction<? super C, ? super T, CompletableFuture<Traverser<R>>> flatMapAsyncFn
     ) {
-        return () -> new TransformUsingKeyedContextP<C, T, K, T>(contextFactory, keyFn,
-                (singletonTraverser, context, item) -> {
-                    singletonTraverser.accept(filterFn.test(context, item) ? item : null);
-                    return singletonTraverser;
-                });
+        return contextFactory.isOrderedAsyncResponses()
+                ? AsyncTransformUsingContextOrderedP.supplier(contextFactory, flatMapAsyncFn)
+                : AsyncTransformUsingContextUnorderedP.supplier(contextFactory, flatMapAsyncFn, extractKeyFn);
     }
 
     /**
-     * Returns a supplier of processors for a vertex that applies the provided
-     * item-to-traverser mapping function to each received item and emits all
-     * the items from the resulting traverser. The traverser must be
-     * <em>null-terminated</em>. The mapping function receives another
-     * parameter, a context object which Jet will create using the supplied
-     * {@code contextFactory} for each key.
+     * Returns a supplier of processors for a vertex that performs a rolling
+     * aggregation. Every time it receives an item, it passes is to the
+     * accumulator and then calls the `export` primitive to emit the current
+     * state of aggregation.
      * <p>
-     * Unlike {@link #flatMapUsingContextP} (without the "{@code Keyed}" part),
-     * this method creates separate context object for each key. A context
-     * object, once created, is stored until the end of the job, so watch your
-     * number of keys.
+     * If the result after applying `mapToOutputFn` is {@code null}, the vertex
+     * emits nothing. Therefore it can be used to implement filtering semantics
+     * as well.
      * <p>
-     * This vertex saves the state to snapshot so the context objects will
-     * survive a job restart.
+     * This vertex saves the state to snapshot so the state of the accumulators
+     * will survive a job restart.
      *
-     * @param contextFactory the context factory
-     * @param keyFn a function that computes the grouping key
-     * @param flatMapFn a stateless function that maps the received item to a traverser over
-     *                  the output items
-     * @param <C> type of context object
-     * @param <T> received item type
-     * @param <K> key type
-     * @param <R> emitted item type
+     * @param <T> type of the input item
+     * @param <K> type of the key
+     * @param <A> type of the accumulator
+     * @param <R> type of the output item
+     * @param keyFn function that computes the grouping key
+     * @param aggrOp the aggregate operation to perform
+     * @param mapToOutputFn function that takes the input item, the key and the aggregation result
+     *                      and returns the output item
      */
     @Nonnull
-    public static <C, T, K, R> DistributedSupplier<Processor> flatMapUsingKeyedContextP(
-            @Nonnull ContextFactory<C> contextFactory,
+    public static <T, K, A, R, OUT> DistributedSupplier<Processor> rollingAggregateP(
             @Nonnull DistributedFunction<? super T, ? extends K> keyFn,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<? extends R>> flatMapFn
+            @Nonnull AggregateOperation1<? super T, A, ? extends R> aggrOp,
+            @Nonnull DistributedTriFunction<? super T, ? super K, ? super R, ? extends OUT> mapToOutputFn
     ) {
-        return () -> new TransformUsingKeyedContextP<C, T, K, R>(contextFactory, keyFn,
-                (singletonTraverser, context, item) -> flatMapFn.apply(context, item));
+        return () -> new RollingAggregateP<T, K, A, R, OUT>(keyFn, aggrOp, mapToOutputFn);
     }
 
     /**
-     * Returns a supplier of processor that consumes all its input (if any) and
-     * does nothing with it.
+     * Returns a supplier of a processor that swallows all its normal input (if
+     * any), does nothing with it, forwards the watermarks, produces no output
+     * and completes immediately. It also swallows any restored snapshot data.
      */
     @Nonnull
     public static DistributedSupplier<Processor> noopP() {
         return NoopP::new;
     }
 
-    /**
-     * Decorates a processor meta-supplier with one that will declare all its
-     * processors non-cooperative. The wrapped meta-supplier must return processors
-     * that are {@code instanceof} {@link AbstractProcessor}.
-     */
-    @Nonnull
-    public static ProcessorMetaSupplier nonCooperativeP(@Nonnull ProcessorMetaSupplier wrapped) {
-        return new WrappingProcessorMetaSupplier(wrapped, p -> {
-            ((AbstractProcessor) p).setCooperative(false);
-            return p;
-        });
-    }
-
-    /**
-     * Decorates a {@code ProcessorSupplier} with one that will declare all its
-     * processors non-cooperative. The wrapped supplier must return processors
-     * that are {@code instanceof} {@link AbstractProcessor}.
-     */
-    @Nonnull
-    public static ProcessorSupplier nonCooperativeP(@Nonnull ProcessorSupplier wrapped) {
-        return new WrappingProcessorSupplier(wrapped, p -> {
-            ((AbstractProcessor) p).setCooperative(false);
-            return p;
-        });
-    }
-
-    /**
-     * Decorates a {@code Supplier<Processor>} into one that will declare
-     * its processors non-cooperative. The wrapped supplier must return
-     * processors that are {@code instanceof} {@link AbstractProcessor}.
-     */
-    @Nonnull
-    public static DistributedSupplier<Processor> nonCooperativeP(@Nonnull DistributedSupplier<Processor> wrapped) {
-        return () -> {
-            final Processor p = wrapped.get();
-            ((AbstractProcessor) p).setCooperative(false);
-            return p;
-        };
-    }
-
     /** A no-operation processor. See {@link #noopP()} */
     private static class NoopP implements Processor {
+        private Outbox outbox;
+
+        @Override
+        public void init(@Nonnull Outbox outbox, @Nonnull Context context) throws Exception {
+            this.outbox = outbox;
+        }
+
         @Override
         public void process(int ordinal, @Nonnull Inbox inbox) {
-            inbox.drain(noopConsumer());
+            inbox.drain(DistributedConsumer.noop());
+        }
+
+        @Override
+        public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+            return outbox.offer(watermark);
+        }
+
+        @Override
+        public void restoreFromSnapshot(@Nonnull Inbox inbox) {
+            inbox.drain(DistributedConsumer.noop());
         }
     }
 }

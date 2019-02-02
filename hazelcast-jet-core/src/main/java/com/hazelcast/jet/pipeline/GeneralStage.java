@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,12 @@
 
 package com.hazelcast.jet.pipeline;
 
+import com.hazelcast.core.ICompletableFuture;
+import com.hazelcast.core.IMap;
+import com.hazelcast.core.ReplicatedMap;
 import com.hazelcast.jet.Traverser;
-import com.hazelcast.jet.aggregate.AggregateOperation;
+import com.hazelcast.jet.Util;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
-import com.hazelcast.jet.aggregate.AggregateOperations;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.function.DistributedBiFunction;
 import com.hazelcast.jet.function.DistributedBiPredicate;
@@ -30,13 +32,13 @@ import com.hazelcast.jet.function.DistributedToLongFunction;
 import com.hazelcast.jet.function.DistributedTriFunction;
 
 import javax.annotation.Nonnull;
+import java.util.concurrent.CompletableFuture;
 
-import static com.hazelcast.jet.function.DistributedFunctions.alwaysTrue;
+import static com.hazelcast.jet.function.DistributedPredicate.alwaysTrue;
 
 /**
- * Represents the common aspect of {@link BatchStage batch} and {@link
- * StreamStage stream} pipeline stages, defining those operations that
- * apply to both.
+ * The common aspect of {@link BatchStage batch} and {@link StreamStage
+ * stream} pipeline stages, defining those operations that apply to both.
  * <p>
  * Unless specified otherwise, all functions passed to methods of this
  * interface must be stateless.
@@ -46,11 +48,10 @@ import static com.hazelcast.jet.function.DistributedFunctions.alwaysTrue;
 public interface GeneralStage<T> extends Stage {
 
     /**
-     * Attaches to this stage a mapping stage, one which applies the supplied
-     * function to each input item independently and emits the function's
-     * result as the output item. If the result is {@code null}, it emits
-     * nothing. Therefore this stage can be used to implement filtering
-     * semantics as well.
+     * Attaches a mapping stage which applies the supplied function to each
+     * input item independently and emits the function's result as the output
+     * item. If the result is {@code null}, it emits nothing. Therefore this
+     * stage can be used to implement filtering semantics as well.
      *
      * @param mapFn a stateless mapping function
      * @param <R> the result type of the mapping function
@@ -60,9 +61,9 @@ public interface GeneralStage<T> extends Stage {
     <R> GeneralStage<R> map(@Nonnull DistributedFunction<? super T, ? extends R> mapFn);
 
     /**
-     * Attaches to this stage a filtering stage, one which applies the provided
-     * predicate function to each input item to decide whether to pass the item
-     * to the output or to discard it. Returns the newly attached stage.
+     * Attaches a filtering stage which applies the provided predicate function
+     * to each input item to decide whether to pass the item to the output or
+     * to discard it. Returns the newly attached stage.
      *
      * @param filterFn a stateless filter predicate function
      * @return the newly attached stage
@@ -71,10 +72,9 @@ public interface GeneralStage<T> extends Stage {
     GeneralStage<T> filter(@Nonnull DistributedPredicate<T> filterFn);
 
     /**
-     * Attaches to this stage a flat-mapping stage, one which applies the
-     * supplied function to each input item independently and emits all the
-     * items from the {@link Traverser} it returns. The traverser must be
-     * <em>null-terminated</em>.
+     * Attaches a flat-mapping stage which applies the supplied function to
+     * each input item independently and emits all the items from the {@link
+     * Traverser} it returns. The traverser must be <em>null-terminated</em>.
      *
      * @param flatMapFn a stateless flatmapping function, whose result type is
      *                  Jet's {@link Traverser}
@@ -87,29 +87,21 @@ public interface GeneralStage<T> extends Stage {
     );
 
     /**
-     * Attaches to this stage a mapping stage, one which applies the supplied
-     * function to each input item independently and emits the function's result
-     * as the output item. The mapping function receives another parameter, the
-     * context object which Jet will create using the supplied {@code
-     * contextFactory}.
+     * Attaches a mapping stage which applies the supplied function to each
+     * input item independently and emits the function's result as the output
+     * item. The mapping function receives another parameter, the context
+     * object, which Jet will create using the supplied {@code contextFactory}.
      * <p>
      * If the mapping result is {@code null}, it emits nothing. Therefore this
      * stage can be used to implement filtering semantics as well.
      *
-     * <h3>Note on state saving</h3>
-     * Any state you maintain in the context object does not automatically
-     * become a part of a fault-tolerant snapshot. If Jet must restore from a
-     * snapshot, your state will either be lost (if it was just local state) or
-     * not rewound to the checkpoint (if it was stored in some durable
-     * storage).
-     *
-     * <h3>Note on item retention in {@linkplain GeneralStage#addTimestamps
-     * jobs with timestamps}</h3>
-     *
-     * The context should not be used to accumulate stream items and emit the
-     * result later. For example to run an async operation for the item and
-     * return the result later with next item. This can cause that the
-     * watermark to overtake the items and render the items late.
+     * <h3>Interaction with fault-tolerant unbounded jobs</h3>
+     * If you use this stage in a fault-tolerant unbounded job, keep in mind
+     * that any state the context object maintains doesn't participate in Jet's
+     * fault tolerance protocol. If the state is local, it will be lost after a
+     * job restart; if it is saved to some durable storage, the state of that
+     * storage won't be rewound to the last checkpoint, so you'll perform
+     * duplicate updates.
      *
      * @param <C> type of context object
      * @param <R> the result type of the mapping function
@@ -124,18 +116,41 @@ public interface GeneralStage<T> extends Stage {
     );
 
     /**
-     * Attaches to this stage a filtering stage, one which applies the provided
-     * predicate function to each input item to decide whether to pass the item
-     * to the output or to discard it. The predicate function receives another
-     * parameter, the context object which Jet will create using the supplied
-     * {@code contextFactory}.
+     * Asynchronous version of {@link #mapUsingContext}: the {@code mapAsyncFn}
+     * returns a {@code CompletableFuture<R>} instead of just {@code R}.
+     * <p>
+     * The function can return a null future or the future can return a null
+     * result: in both cases it will act just like a filter.
+     * <p>
+     * The latency of the async call will add to the latency of items.
      *
-     * <h3>Note on state saving</h3>
-     * Any state you maintain in the context object does not automatically
-     * become a part of a fault-tolerant snapshot. If Jet must restore from a
-     * snapshot, your state will either be lost (if it was just local state) or
-     * not rewound to the checkpoint (if it was stored in some durable
-     * storage).
+     * @param <C> type of context object
+     * @param <R> the future's result type of the mapping function
+     * @param contextFactory the context factory
+     * @param mapAsyncFn a stateless mapping function. Can map to null (return
+     *      a null future)
+     * @return the newly attached stage
+     */
+    @Nonnull
+    <C, R> GeneralStage<R> mapUsingContextAsync(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
+    );
+
+    /**
+     * Attaches a filtering stage which applies the provided predicate function
+     * to each input item to decide whether to pass the item to the output or
+     * to discard it. The predicate function receives another parameter, the
+     * context object, which Jet will create using the supplied {@code
+     * contextFactory}.
+     *
+     * <h3>Interaction with fault-tolerant unbounded jobs</h3>
+     * If you use this stage in a fault-tolerant unbounded job, keep in mind
+     * that any state the context object maintains doesn't participate in Jet's
+     * fault tolerance protocol. If the state is local, it will be lost after a
+     * job restart; if it is saved to some durable storage, the state of that
+     * storage won't be rewound to the last checkpoint, so you'll perform
+     * duplicate updates.
      *
      * @param <C> type of context object
      * @param contextFactory the context factory
@@ -149,27 +164,40 @@ public interface GeneralStage<T> extends Stage {
     );
 
     /**
-     * Attaches to this stage a flat-mapping stage, one which applies the
-     * supplied function to each input item independently and emits all items
-     * from the {@link Traverser} it returns as the output items. The traverser
-     * must be <em>null-terminated</em>. The mapping function receives another
-     * parameter, the context object which Jet will create using the supplied
+     * Asynchronous version of {@link #filterUsingContext}: the {@code
+     * filterAsyncFn} returns a {@code CompletableFuture<Boolean>} instead of
+     * just a {@code boolean}.
+     * <p>
+     * The function must not return a null future.
+     * <p>
+     * The latency of the async call will add to the latency of items.
+     *
+     * @param <C> type of context object
+     * @param contextFactory the context factory
+     * @param filterAsyncFn a stateless filtering function
+     * @return the newly attached stage
+     */
+    @Nonnull
+    <C> GeneralStage<T> filterUsingContextAsync(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
+    );
+
+    /**
+     * Attaches a flat-mapping stage which applies the supplied function to
+     * each input item independently and emits all items from the {@link
+     * Traverser} it returns as the output items. The traverser must be
+     * <em>null-terminated</em>. The mapping function receives another
+     * parameter, the context object, which Jet will create using the supplied
      * {@code contextFactory}.
      *
-     * <h3>Note on state saving</h3>
-     * Any state you maintain in the context object does not automatically
-     * become a part of a fault-tolerant snapshot. If Jet must restore from a
-     * snapshot, your state will either be lost (if it was just local state) or
-     * not rewound to the checkpoint (if it was stored in some durable
-     * storage).
-     *
-     * <h3>Note on item retention in {@linkplain GeneralStage#addTimestamps
-     * jobs with timestamps}</h3>
-     *
-     * The context should not be used to accumulate stream items and emit the
-     * result later. For example to run an async operation for the item and
-     * return the result later with next item. This can cause that the
-     * watermark to overtake the items and render the items late.
+     * <h3>Interaction with fault-tolerant unbounded jobs</h3>
+     * If you use this stage in a fault-tolerant unbounded job, keep in mind
+     * that any state the context object maintains doesn't participate in Jet's
+     * fault tolerance protocol. If the state is local, it will be lost after a
+     * job restart; if it is saved to some durable storage, the state of that
+     * storage won't be rewound to the last checkpoint, so you'll perform
+     * duplicate updates.
      *
      * @param <C> type of context object
      * @param <R> the type of items in the result's traversers
@@ -181,38 +209,148 @@ public interface GeneralStage<T> extends Stage {
     @Nonnull
     <C, R> GeneralStage<R> flatMapUsingContext(
             @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<? extends R>> flatMapFn
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<R>> flatMapFn
     );
 
     /**
-     * Attaches a rolling aggregation stage. Every input item will be
-     * accumulated using the given {@code aggrOp} and a finished result will be
-     * emitted.
+     * Asynchronous version of {@link #flatMapUsingContext}: the {@code
+     * flatMapAsyncFn} returns a {@code CompletableFuture<Traverser<R>>}
+     * instead of just {@code Traverser<R>}.
      * <p>
-     * For example, if the input is {@code {2, 7, 8, -5}} and the aggregate
-     * operation is <em>summing</em>, the output will be {@code {2, 9, 17,
-     * 12}}. The number of input and output items is equal.
+     * The function can return a null future or the future can return a null
+     * traverser: in both cases it will act just like a filter.
      * <p>
-     * The accumulator is saved to state snapshot; after a restart, the
-     * computation is resumed.
-     * <p>
-     * <strong>NOTE:</strong> Take caution when using ever-growing accumulators
-     * in streaming jobs such as {@code toList()}: they will grow for the
-     * lifetime of the job, even after restart.
+     * The latency of the async call will add to the latency of items.
      *
-     * <h3>Limitation on aggregate operations</h3>
-     * The used aggregate operation must not return the accumulator in its
-     * {@linkplain AggregateOperation#finishFn() finish function}. An aggregate
-     * operation is normally allowed to do so, but unlike other stages, this
-     * stage continues to accumulate to the accumulator after finishing
-     * function was called. This stage throws an exception if the finish
-     * function returns the same instance for any accumulator at runtime.
+     * @param <C> type of context object
+     * @param <R> the type of the returned stage
+     * @param contextFactory the context factory
+     * @param flatMapAsyncFn a stateless flatmapping function. Can map to null
+     *      (return a null future)
+     * @return the newly attached stage
+     */
+    @Nonnull
+    <C, R> GeneralStage<R> flatMapUsingContextAsync(
+            @Nonnull ContextFactory<C> contextFactory,
+            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Traverser<R>>>
+                    flatMapAsyncFn
+    );
+
+    /**
+     * Attaches a {@link #mapUsingContext} stage where the context is a
+     * Hazelcast {@code ReplicatedMap} with the supplied name. The mapping
+     * function will receive it as the first argument.
+     *
+     * @param mapName name of the {@code ReplicatedMap}
+     * @param mapFn the mapping function
+     * @param <K> type of the key in the {@code ReplicatedMap}
+     * @param <V> type of the value in the {@code ReplicatedMap}
+     * @param <R> type of the output item
+     * @return the newly attached stage
+     */
+    @Nonnull
+    default <K, V, R> GeneralStage<R> mapUsingReplicatedMap(
+            @Nonnull String mapName,
+            @Nonnull DistributedBiFunction<? super ReplicatedMap<K, V>, ? super T, ? extends R> mapFn
+    ) {
+        return mapUsingContext(ContextFactories.replicatedMapContext(mapName), mapFn);
+    }
+
+    /**
+     * Attaches a {@link #mapUsingContext} stage where the context is a
+     * Hazelcast {@code ReplicatedMap}. <strong>It is not necessarily the
+     * map you provide here</strong>, but a replicated map with the same name
+     * in the Jet cluster that executes the pipeline. The mapping function
+     * will receive the replicated map as the first argument.
+     *
+     * @param replicatedMap the {@code ReplicatedMap} to use as context
+     * @param mapFn the mapping function
+     * @param <K> type of the key in the {@code ReplicatedMap}
+     * @param <V> type of the value in the {@code ReplicatedMap}
+     * @param <R> type of the output item
+     * @return the newly attached stage
+     */
+    @Nonnull
+    default <K, V, R> GeneralStage<R> mapUsingReplicatedMap(
+            @Nonnull ReplicatedMap<K, V> replicatedMap,
+            @Nonnull DistributedBiFunction<? super ReplicatedMap<K, V>, ? super T, ? extends R> mapFn
+    ) {
+        return mapUsingReplicatedMap(replicatedMap.getName(), mapFn);
+    }
+
+    /**
+     * Attaches a {@link #mapUsingContextAsync} stage where the context is a
+     * Hazelcast {@code IMap} with the supplied name. The mapping function will
+     * receive it as the first argument.
      * <p>
-     * For example, {@link AggregateOperations#summingLong
-     * summingLong()} is OK because its result is an immutable {@code Long}.
-     * {@link AggregateOperations#toSet() toSet()}
-     * is not because its result is the same {@code Set} instance to which it
-     * accumulates.
+     * The operations on {@link IMap} typically return Hazelcast's custom
+     * {@link com.hazelcast.core.ICompletableFuture}, not the standard {@link
+     * java.util.concurrent.CompletableFuture}. Use {@link
+     * Util#toCompletableFuture(ICompletableFuture)} to convert them.
+     * <p>
+     * See also {@link GeneralStageWithKey#mapUsingIMapAsync}.
+     *
+     * @param mapName name of the {@code IMap}
+     * @param mapFn the mapping function
+     * @param <K> type of the key in the {@code IMap}
+     * @param <V> type of the value in the {@code IMap}
+     * @param <R> type of the output item
+     * @return the newly attached stage
+     */
+    @Nonnull
+    default <K, V, R> GeneralStage<R> mapUsingIMapAsync(
+            @Nonnull String mapName,
+            @Nonnull DistributedBiFunction<? super IMap<K, V>, ? super T, ? extends CompletableFuture<R>> mapFn
+    ) {
+        return mapUsingContextAsync(ContextFactories.iMapContext(mapName), mapFn);
+    }
+
+    /**
+     * Attaches a {@link #mapUsingContextAsync} stage where the context is a
+     * Hazelcast {@code IMap}. The mapping function will receive the map as the
+     * first argument.
+     * <p>
+     * The operations on {@link IMap} typically return Hazelcast's custom
+     * {@link com.hazelcast.core.ICompletableFuture}, not the standard {@link
+     * java.util.concurrent.CompletableFuture}. Use {@link
+     * Util#toCompletableFuture(ICompletableFuture)} to convert them.
+     * <p>
+     * See also {@link GeneralStageWithKey#mapUsingIMapAsync}.
+     *
+     * @param iMap the {@code IMap} to use as the context
+     * @param mapFn the mapping function
+     * @param <K> type of the key in the {@code IMap}
+     * @param <V> type of the value in the {@code IMap}
+     * @param <R> type of the output item
+     * @return the newly attached stage
+     */
+    @Nonnull
+    default <K, V, R> GeneralStage<R> mapUsingIMapAsync(
+            @Nonnull IMap<K, V> iMap,
+            @Nonnull DistributedBiFunction<? super IMap<K, V>, ? super T, ? extends CompletableFuture<R>> mapFn
+    ) {
+        return mapUsingIMapAsync(iMap.getName(), mapFn);
+    }
+
+    /**
+     * Attaches a rolling aggregation stage. As opposed to regular aggregation,
+     * this stage emits the current aggregation result after receiving each
+     * item. For example, if your aggregation is <em>summing</em> and the input
+     * is {@code {2, 7, 8, -5}}, the output will be {@code {2, 9, 17, 12}}. The
+     * number of input and output items is equal.
+     * <p>
+     * This stage is fault-tolerant and saves its state to the snapshot.
+     * <p>
+     * <strong>NOTE 1:</strong> since the output for each item depends on all
+     * the previous items, this operation cannot be parallelized. Jet will
+     * perform it on a single member, single-threaded. Jet also supports
+     * {@link GeneralStageWithKey#rollingAggregate keyed rolling aggregation}
+     * which it can parallelize by partitioning.
+     * <p>
+     * <strong>NOTE 2:</strong> if you plan to use an aggregate operation whose
+     * result size grows with input size (such as {@code toList} and your data
+     * source is unbounded, you must carefully consider the memory demands this
+     * implies. The result will keep growing forever.
      *
      * @param aggrOp the aggregate operation to do the aggregation
      * @param <R> result type of the aggregate operation
@@ -220,7 +358,7 @@ public interface GeneralStage<T> extends Stage {
      * @return the newly attached stage
      */
     @Nonnull
-    <R> GeneralStage<R> aggregateRolling(@Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp);
+    <R> GeneralStage<R> rollingAggregate(@Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp);
 
     /**
      * Attaches to both this and the supplied stage a hash-joining stage and
@@ -284,36 +422,16 @@ public interface GeneralStage<T> extends Stage {
     GeneralHashJoinBuilder<T> hashJoinBuilder();
 
     /**
-     * Specifies the function that will extract the grouping key from the items
-     * in the associated pipeline stage, as a first step in the construction of a
-     * group-and-aggregate stage.
-     * <p>
-     * <b>Warning:</b> make sure the extracted key is not-null, it would fail the
-     * job. Also make sure that it implements {@code equals()} and {@code
-     * hashCode()}.
+     * Specifies the function that will extract a key from the items in the
+     * associated pipeline stage. This enables the operations that need the
+     * key, such as grouped aggregation. The key must not be null and must
+     * properly implement {@code equals()} and {@code hashCode()}.
      *
      * @param keyFn function that extracts the grouping key
      * @param <K> type of the key
      */
     @Nonnull
-    <K> GeneralStageWithGrouping<T, K> groupingKey(@Nonnull DistributedFunction<? super T, ? extends K> keyFn);
-
-    /**
-     * Adds a timestamp to each item in the stream using the current system
-     * time. <strong>NOTE:</strong> when snapshotting is enabled to achieve
-     * fault tolerance, after a restart Jet replays all the events that were
-     * already processed since the last snapshot. These events will now get
-     * different timestamps. If you want your job to be fault-tolerant, the
-     * events in the stream must carry their own timestamp and you must use
-     * {@link #addTimestamps(DistributedToLongFunction, long)
-     * addTimestamps(timestampFn, allowedLag} to extract them.
-     *
-     * @throws IllegalArgumentException if this stage already has timestamps
-     */
-    @Nonnull
-    default StreamStage<T> addTimestamps() {
-        return addTimestamps(t -> System.currentTimeMillis(), 0);
-    }
+    <K> GeneralStageWithKey<T, K> groupingKey(@Nonnull DistributedFunction<? super T, ? extends K> keyFn);
 
     /**
      * Adds a timestamp to each item in the stream using the supplied function
@@ -336,13 +454,19 @@ public interface GeneralStage<T> extends Stage {
      * don't allow enough lag, you face the risk of failing to account for the
      * data that came in after the results were already emitted.
      * <p>
-     * You should strongly prefer adding this stage right after the source. In
-     * that case Jet can compute the watermark inside the source connector,
-     * taking into account its partitioning. It can maintain a separate
-     * watermark value for each partition and coalesce them into the overall
-     * watermark without causing dropped events. If you add the timestamps
-     * later on, events from different partitions may be mixed, increasing
-     * the perceived event lag and causing more dropped events.
+     * <b>Note:</b> This method adds the timestamps after the source emitted
+     * them. When timestamps are added at this moment, source partitions won't
+     * be coalesced properly and will be treated as a single stream. The
+     * allowed lag will need to cover for the additional disorder introduced by
+     * merging the streams. The streams are merged in an unpredictable order
+     * and it can happen, for example, that after the job was suspended for a
+     * long time, there can be a very recent event in partition1 and a very old
+     * event partition2. If partition1 happens to be merged first, the recent
+     * event could render the old one late, if the allowed lag is not large
+     * enough.<br>
+     * To add timestamps in source, use {@link
+     * StreamSourceStage#withTimestamps(DistributedToLongFunction, long)
+     * withTimestamps()}.
      * <p>
      * <b>Warning:</b> make sure the property you access in {@code timestampFn}
      * isn't null, it would fail the job. Also that there are no nonsensical
@@ -361,7 +485,7 @@ public interface GeneralStage<T> extends Stage {
     StreamStage<T> addTimestamps(@Nonnull DistributedToLongFunction<? super T> timestampFn, long allowedLag);
 
     /**
-     * Attaches to this stage a sink stage, one that accepts data but doesn't
+     * Attaches a sink stage, one that accepts data but doesn't
      * emit any. The supplied argument specifies what to do with the received
      * data (typically push it to some outside resource).
      *
@@ -387,7 +511,7 @@ public interface GeneralStage<T> extends Stage {
      * on a local machine.
      *
      * @param shouldLogFn a function to filter the logged items. You can use {@link
-     *                    com.hazelcast.jet.function.DistributedFunctions#alwaysTrue()
+     *                    DistributedPredicate#alwaysTrue()
      *                    alwaysTrue()} as a pass-through filter when you don't need any
      *                    filtering.
      * @param toStringFn  a function that returns a string representation of the item
@@ -441,10 +565,7 @@ public interface GeneralStage<T> extends Stage {
 
     /**
      * Attaches a stage with a custom transform based on the provided supplier
-     * of Core API {@link Processor}s. To be compatible with the rest of the
-     * pipeline, the processor must expect a single inbound edge and
-     * arbitrarily many outbound edges, and it must push the same data to all
-     * outbound edges.
+     * of Core API {@link Processor}s.
      * <p>
      * Note that the returned stage's type parameter is inferred from the call
      * site and not propagated from the processor that will produce the result,
@@ -457,5 +578,4 @@ public interface GeneralStage<T> extends Stage {
     @Nonnull
     <R> GeneralStage<R> customTransform(
             @Nonnull String stageName, @Nonnull DistributedSupplier<Processor> procSupplier);
-
 }

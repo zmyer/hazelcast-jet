@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,15 +21,16 @@ import com.hazelcast.jet.datamodel.Tag;
 import com.hazelcast.jet.function.DistributedBiFunction;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.function.KeyedWindowResultFunction;
+import com.hazelcast.jet.impl.JetEvent;
 import com.hazelcast.jet.impl.pipeline.transform.GroupTransform;
 import com.hazelcast.jet.impl.pipeline.transform.Transform;
 import com.hazelcast.jet.impl.pipeline.transform.WindowGroupTransform;
 import com.hazelcast.jet.pipeline.BatchStage;
+import com.hazelcast.jet.pipeline.BatchStageWithKey;
 import com.hazelcast.jet.pipeline.GroupAggregateBuilder1;
-import com.hazelcast.jet.pipeline.StageWithGrouping;
-import com.hazelcast.jet.pipeline.StageWithGroupingAndWindow;
+import com.hazelcast.jet.pipeline.StageWithKeyAndWindow;
 import com.hazelcast.jet.pipeline.StreamStage;
-import com.hazelcast.jet.pipeline.StreamStageWithGrouping;
+import com.hazelcast.jet.pipeline.StreamStageWithKey;
 import com.hazelcast.jet.pipeline.WindowDefinition;
 import com.hazelcast.jet.pipeline.WindowGroupAggregateBuilder1;
 
@@ -40,7 +41,7 @@ import java.util.List;
 import static com.hazelcast.jet.datamodel.Tag.tag;
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ADAPT_TO_JET_EVENT;
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ensureJetEvents;
-import static com.hazelcast.jet.impl.pipeline.JetEventFunctionAdapter.adaptAggregateOperation;
+import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static java.util.stream.Collectors.toList;
 
 /**
@@ -58,7 +59,7 @@ public class GrAggBuilder<K> {
     private final List<DistributedFunction<?, ? extends K>> keyFns = new ArrayList<>();
 
     @SuppressWarnings("unchecked")
-    public GrAggBuilder(StageWithGrouping<?, K> stage0) {
+    public GrAggBuilder(BatchStageWithKey<?, K> stage0) {
         ComputeStageImplBase computeStage = ((StageWithGroupingBase) stage0).computeStage;
         pipelineImpl = (PipelineImpl) computeStage.getPipeline();
         wDef = null;
@@ -67,7 +68,7 @@ public class GrAggBuilder<K> {
     }
 
     @SuppressWarnings("unchecked")
-    public GrAggBuilder(StageWithGroupingAndWindow<?, K> stage) {
+    public GrAggBuilder(StageWithKeyAndWindow<?, K> stage) {
         ComputeStageImplBase computeStage = ((StageWithGroupingBase) stage).computeStage;
         ensureJetEvents(computeStage, "This pipeline stage");
         pipelineImpl = (PipelineImpl) computeStage.getPipeline();
@@ -77,7 +78,7 @@ public class GrAggBuilder<K> {
     }
 
     @SuppressWarnings("unchecked")
-    public <T> Tag<T> add(StreamStageWithGrouping<T, K> stage) {
+    public <T> Tag<T> add(StreamStageWithKey<T, K> stage) {
         ComputeStageImplBase computeStage = ((StageWithGroupingBase) stage).computeStage;
         ensureJetEvents(computeStage, "This pipeline stage");
         upstreamStages.add(computeStage);
@@ -86,7 +87,7 @@ public class GrAggBuilder<K> {
     }
 
     @SuppressWarnings("unchecked")
-    public <E> Tag<E> add(StageWithGrouping<E, K> stage) {
+    public <E> Tag<E> add(BatchStageWithKey<E, K> stage) {
         upstreamStages.add(((StageWithGroupingBase) stage).computeStage);
         keyFns.add(stage.keyFn());
         return (Tag<E>) tag(upstreamStages.size() - 1);
@@ -97,6 +98,7 @@ public class GrAggBuilder<K> {
             @Nonnull AggregateOperation<A, ? extends R> aggrOp,
             @Nonnull DistributedBiFunction<? super K, ? super R, OUT> mapToOutputFn
     ) {
+        checkSerializable(mapToOutputFn, "mapToOutputFn");
         List<Transform> upstreamTransforms = upstreamStages.stream().map(s -> s.transform).collect(toList());
         Transform transform = new GroupTransform<>(upstreamTransforms, keyFns, aggrOp, mapToOutputFn);
         pipelineImpl.connect(upstreamTransforms, transform);
@@ -108,6 +110,7 @@ public class GrAggBuilder<K> {
             @Nonnull AggregateOperation<A, ? extends R> aggrOp,
             @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn
     ) {
+        checkSerializable(mapToOutputFn, "mapToOutputFn");
         List<Transform> upstreamTransforms = upstreamStages.stream().map(s -> s.transform).collect(toList());
         JetEventFunctionAdapter fnAdapter = ADAPT_TO_JET_EVENT;
 
@@ -117,8 +120,8 @@ public class GrAggBuilder<K> {
             adaptedKeyFns.add(fnAdapter.adaptKeyFn(keyFn));
         }
 
-        Transform transform = new WindowGroupTransform<K, A, R, JetEvent<OUT>>(
-                upstreamTransforms, wDef, adaptedKeyFns, adaptAggregateOperation(aggrOp),
+        Transform transform = new WindowGroupTransform<K, R, JetEvent<OUT>>(
+                upstreamTransforms, wDef, adaptedKeyFns, fnAdapter.adaptAggregateOperation(aggrOp),
                 fnAdapter.adaptKeyedWindowResultFn(mapToOutputFn)
         );
         pipelineImpl.connect(upstreamTransforms, transform);

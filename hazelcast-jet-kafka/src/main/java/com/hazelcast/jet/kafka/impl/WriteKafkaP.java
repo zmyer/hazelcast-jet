@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package com.hazelcast.jet.kafka.impl;
 import com.hazelcast.jet.core.Inbox;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorSupplier;
+import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.kafka.KafkaProcessors;
 import org.apache.kafka.clients.producer.Callback;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -40,7 +41,7 @@ import static java.util.stream.Collectors.toList;
 public final class WriteKafkaP<T, K, V> implements Processor {
 
     private final KafkaProducer<K, V> producer;
-    private final Function<T, ProducerRecord<K, V>> toRecordFn;
+    private final Function<? super T, ? extends ProducerRecord<K, V>> toRecordFn;
     private final AtomicReference<Throwable> lastError = new AtomicReference<>();
 
     private final Callback callback = (metadata, exception) -> {
@@ -50,7 +51,7 @@ public final class WriteKafkaP<T, K, V> implements Processor {
         }
     };
 
-    WriteKafkaP(KafkaProducer<K, V> producer, Function<T, ProducerRecord<K, V>> toRecordFn) {
+    private WriteKafkaP(KafkaProducer<K, V> producer, Function<? super T, ? extends ProducerRecord<K, V>> toRecordFn) {
         this.producer = producer;
         this.toRecordFn = toRecordFn;
     }
@@ -74,6 +75,11 @@ public final class WriteKafkaP<T, K, V> implements Processor {
             // will stay so, unless they change API.
             producer.send(toRecordFn.apply((T) item), callback);
         });
+    }
+
+    @Override
+    public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+        return true;
     }
 
     @Override
@@ -107,11 +113,11 @@ public final class WriteKafkaP<T, K, V> implements Processor {
         private static final long serialVersionUID = 1L;
 
         private final Properties properties;
-        private final Function<? super T, ProducerRecord<K, V>> toRecordFn;
+        private final Function<? super T, ? extends ProducerRecord<K, V>> toRecordFn;
 
         private transient KafkaProducer<K, V> producer;
 
-        public Supplier(Properties properties, Function<? super T, ProducerRecord<K, V>> toRecordFn) {
+        public Supplier(Properties properties, Function<? super T, ? extends ProducerRecord<K, V>> toRecordFn) {
             this.properties = properties;
             this.toRecordFn = toRecordFn;
         }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,41 +16,44 @@
 
 package com.hazelcast.jet.impl.pipeline.transform;
 
-import com.hazelcast.jet.core.WatermarkGenerationParams;
+import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.impl.pipeline.Planner;
 import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
 
 import javax.annotation.Nonnull;
 
 import static com.hazelcast.jet.core.processor.Processors.insertWatermarksP;
+import static com.hazelcast.util.Preconditions.checkNotNull;
 
 public class TimestampTransform<T> extends AbstractTransform {
     @Nonnull
-    public WatermarkGenerationParams wmGenParams;
+    private EventTimePolicy<? super T> eventTimePolicy;
 
     public TimestampTransform(
             @Nonnull Transform upstream,
-            @Nonnull WatermarkGenerationParams wmGenParams
+            @Nonnull EventTimePolicy<? super T> eventTimePolicy
     ) {
-        super("timestamp", upstream);
-        this.wmGenParams = wmGenParams;
+        super("add-timestamps", upstream);
+        this.eventTimePolicy = eventTimePolicy;
+        checkNotNull(eventTimePolicy.timestampFn(),
+                "timestampFn must not be null if timestamps aren't added in the source");
     }
 
     @Override
     public void addToDag(Planner p) {
         @SuppressWarnings("unchecked")
         PlannerVertex pv = p.addVertex(
-                this, p.uniqueVertexName(name(), ""), localParallelism(), insertWatermarksP(wmGenParams)
+                this, p.uniqueVertexName(name()), localParallelism(), insertWatermarksP(eventTimePolicy)
         );
         p.addEdges(this, pv.v);
     }
 
     @Nonnull
-    public WatermarkGenerationParams getWmGenParams() {
-        return wmGenParams;
+    public EventTimePolicy<? super T> getEventTimePolicy() {
+        return eventTimePolicy;
     }
 
-    public void setWmGenerationParams(@Nonnull WatermarkGenerationParams wmGenParams) {
-        this.wmGenParams = wmGenParams;
+    public void setEventTimePolicy(@Nonnull EventTimePolicy<? super T> eventTimePolicy) {
+        this.eventTimePolicy = eventTimePolicy;
     }
 }

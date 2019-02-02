@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ import static org.mockito.Mockito.verifyZeroInteractions;
 public class WriteLoggerPTest {
 
     @Test
-    public void test() {
+    public void test() throws Exception {
         // Given
         Processor p = supplierFrom(writeLoggerP()).get();
         TestInbox inbox = new TestInbox();

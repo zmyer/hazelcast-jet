@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,12 @@
 
 package com.hazelcast.jet.impl.connector;
 
+import com.hazelcast.jet.IListJet;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Util;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.JetTestSupport;
 import com.hazelcast.jet.core.Vertex;
-import com.hazelcast.jet.IListJet;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Before;
 import org.junit.Test;

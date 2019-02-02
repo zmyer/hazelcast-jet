@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,27 +16,32 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.core.IMap;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.config.ProcessingGuarantee;
-import com.hazelcast.jet.impl.SnapshotRepository;
-import com.hazelcast.jet.impl.execution.SnapshotRecord;
-import com.hazelcast.jet.impl.execution.SnapshotRecord.SnapshotStatus;
-import com.hazelcast.jet.IMapJet;
+import com.hazelcast.jet.impl.JobExecutionRecord;
+import com.hazelcast.jet.impl.JobRepository;
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 
 import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.Edge.from;
+import static com.hazelcast.jet.core.ExportSnapshotTest.getSnapshotMap;
+import static com.hazelcast.jet.core.JobStatus.RUNNING;
 import static com.hazelcast.jet.core.processor.DiagnosticProcessors.writeLoggerP;
-import static com.hazelcast.jet.impl.execution.SnapshotRecord.SnapshotStatus.ONGOING;
-import static com.hazelcast.jet.impl.execution.SnapshotRecord.SnapshotStatus.SUCCESSFUL;
+import static com.hazelcast.jet.impl.JobExecutionRecord.NO_SNAPSHOT;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+@RunWith(HazelcastSerialClassRunner.class)
 public class PostponedSnapshotTest extends JetTestSupport {
 
     private static volatile AtomicIntegerArray latches;
@@ -50,10 +55,67 @@ public class PostponedSnapshotTest extends JetTestSupport {
     }
 
     @Test
-    public void when_jobHasHigherPriorityEdge_then_noSnapshotUntilEdgeDone() throws InterruptedException {
+    public void when_jobHasHigherPriorityEdge_then_noSnapshotUntilEdgeDone() {
+        Job job = startJob(100);
+
+        latches.set(0, 1);
+        JobRepository jr = new JobRepository(instance);
+        assertTrueEventually(() ->
+                assertTrue(jr.getJobExecutionRecord(job.getId()).dataMapIndex() != NO_SNAPSHOT));
+
+        // finish the job
+        latches.set(1, 1);
+        job.join();
+    }
+
+    @Test
+    public void when_gracefulShutdownWhilePostponed_then_shutsDown() {
+        startJob(100);
+
+        // When
+        Future shutdownFuture = spawn(() -> instance.shutdown());
+        assertTrueAllTheTime(() -> assertFalse(shutdownFuture.isDone()), 3);
+
+        // finish the job
+        latches.set(0, 1);
+
+        // Then
+        assertTrueEventually(() -> assertTrue(shutdownFuture.isDone()));
+    }
+
+    @Test
+    public void when_exportStateWhilePostponed_beforeFirstSnapshot_then_exportWaits() {
+        when_exportStateWhilePostponed_then_exportWaits(true);
+    }
+
+    @Test
+    public void when_exportStateWhilePostponed_afterFirstSnapshot_then_exportWaits() {
+        when_exportStateWhilePostponed_then_exportWaits(false);
+    }
+
+    private void when_exportStateWhilePostponed_then_exportWaits(boolean beforeFirstSnapshot) {
+        Job job = startJob(beforeFirstSnapshot ? 20_000 : 10);
+
+        // When
+        Future snapshotFuture = spawn(() -> job.exportSnapshot("state"));
+        IMap<Object, Object> snapshotMap = getSnapshotMap(instance, "state");
+        assertTrueAllTheTime(() -> {
+            assertFalse(snapshotFuture.isDone());
+            assertTrue(snapshotMap.isEmpty());
+        }, 3);
+
+        // finish the job
+        latches.set(0, 1);
+
+        // Then
+        assertTrueEventually(() -> assertTrue(snapshotFuture.isDone()));
+        assertFalse(snapshotMap.isEmpty());
+    }
+
+    private Job startJob(long snapshotInterval) {
         DAG dag = new DAG();
-        Vertex highPrioritySource = dag.newVertex("highPrioritySource", () -> new SourceP(0));
-        Vertex lowPrioritySource = dag.newVertex("lowPrioritySource", () -> new SourceP(1));
+        Vertex highPrioritySource = dag.newVertex("highPrioritySource", () -> new SourceP(0)).localParallelism(1);
+        Vertex lowPrioritySource = dag.newVertex("lowPrioritySource", () -> new SourceP(1)).localParallelism(1);
         Vertex sink = dag.newVertex("sink", writeLoggerP());
 
         dag.edge(between(highPrioritySource, sink).priority(-1))
@@ -61,29 +123,28 @@ public class PostponedSnapshotTest extends JetTestSupport {
 
         JobConfig config = new JobConfig();
         config.setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE);
-        config.setSnapshotIntervalMillis(100);
-        Job job = instance.newJob(dag, config);
+        config.setSnapshotIntervalMillis(snapshotInterval);
 
-        IMapJet<Object, Object> snapshotsMap = instance.getMap(SnapshotRepository.snapshotsMapName(job.getId()));
+        Job job = instance.newJob(dag, config);
+        JobRepository jr = new JobRepository(instance);
 
         // check, that snapshot starts, but stays in ONGOING state
-        assertTrueEventually(() -> assertTrue(existsSnapshot(snapshotsMap, ONGOING)), 5);
-        Thread.sleep(1000);
-        assertFalse(existsSnapshot(snapshotsMap, SUCCESSFUL));
-
-        latches.set(0, 1);
-        assertTrueEventually(() -> assertTrue(existsSnapshot(snapshotsMap, SUCCESSFUL)), 5);
-
-        // finish the job
-        latches.set(1, 1);
-        job.join();
-    }
-
-    private boolean existsSnapshot(IMapJet<Object, Object> snapshotsMap, SnapshotStatus state) {
-        return snapshotsMap.entrySet().stream()
-                           .filter(e -> e.getValue() instanceof SnapshotRecord)
-                           .map(e -> (SnapshotRecord) e.getValue())
-                           .anyMatch(rec -> rec.status() == state);
+        if (snapshotInterval < 1000) {
+            assertTrueEventually(() -> {
+                JobExecutionRecord record = jr.getJobExecutionRecord(job.getId());
+                assertNotNull("record is null", record);
+                assertTrue(record.ongoingSnapshotId() >= 0);
+            }, 5);
+            assertTrueAllTheTime(() -> {
+                JobExecutionRecord record = jr.getJobExecutionRecord(job.getId());
+                assertTrue(record.ongoingSnapshotId() >= 0);
+                assertTrue("snapshotId=" + record.snapshotId(),
+                        record.snapshotId() < 0);
+            }, 2);
+        } else {
+            assertJobStatusEventually(job, RUNNING);
+        }
+        return job;
     }
 
     private static final class SourceP extends AbstractProcessor {

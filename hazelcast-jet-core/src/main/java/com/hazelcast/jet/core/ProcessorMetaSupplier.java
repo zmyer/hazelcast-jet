@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.hazelcast.jet.core;
 
 import com.hazelcast.jet.JetInstance;
+import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.logging.ILogger;
@@ -74,7 +75,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      * instance's services and provides the parallelism parameters determined
      * from the cluster size.
      */
-    default void init(@Nonnull Context context) {
+    default void init(@Nonnull Context context) throws Exception {
     }
 
     /**
@@ -89,7 +90,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      * been called.
      */
     @Nonnull
-    Function<Address, ProcessorSupplier> get(@Nonnull List<Address> addresses);
+    Function<? super Address, ? extends ProcessorSupplier> get(@Nonnull List<Address> addresses);
 
     /**
      * Called on coordinator member after execution has finished on all
@@ -109,7 +110,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      * @param error the exception (if any) that caused the job to fail;
      *              {@code null} in the case of successful job completion
      */
-    default void close(@Nullable Throwable error) {
+    default void close(@Nullable Throwable error) throws Exception {
     }
 
     /**
@@ -145,7 +146,8 @@ public interface ProcessorMetaSupplier extends Serializable {
      */
     @Nonnull
     static ProcessorMetaSupplier of(
-            @Nonnull DistributedSupplier<? extends Processor> procSupplier, int preferredLocalParallelism
+            @Nonnull DistributedSupplier<? extends Processor> procSupplier,
+            int preferredLocalParallelism
     ) {
         return of(ProcessorSupplier.of(procSupplier), preferredLocalParallelism);
     }
@@ -171,8 +173,9 @@ public interface ProcessorMetaSupplier extends Serializable {
      * @param addressToSupplier the mapping from address to ProcessorSupplier
      * @param preferredLocalParallelism the value to return from {@link #preferredLocalParallelism()}
      */
+    @Nonnull
     static ProcessorMetaSupplier of(
-            DistributedFunction<Address, ProcessorSupplier> addressToSupplier,
+            @Nonnull DistributedFunction<? super Address, ? extends ProcessorSupplier> addressToSupplier,
             int preferredLocalParallelism
     ) {
         Vertex.checkLocalParallelism(preferredLocalParallelism);
@@ -183,7 +186,7 @@ public interface ProcessorMetaSupplier extends Serializable {
             }
 
             @Nonnull @Override
-            public Function<Address, ProcessorSupplier> get(@Nonnull List<Address> addresses) {
+            public Function<? super Address, ? extends ProcessorSupplier> get(@Nonnull List<Address> addresses) {
                 return addressToSupplier;
             }
         };
@@ -195,7 +198,10 @@ public interface ProcessorMetaSupplier extends Serializable {
      * ProcessorSupplier}. The {@link #preferredLocalParallelism()} of
      * the meta-supplier will be {@link Vertex#LOCAL_PARALLELISM_USE_DEFAULT}.
      */
-    static ProcessorMetaSupplier of(DistributedFunction<Address, ProcessorSupplier> addressToSupplier) {
+    @Nonnull
+    static ProcessorMetaSupplier of(
+            @Nonnull DistributedFunction<? super Address, ? extends ProcessorSupplier> addressToSupplier
+    ) {
         return of(addressToSupplier, Vertex.LOCAL_PARALLELISM_USE_DEFAULT);
     }
 
@@ -208,7 +214,8 @@ public interface ProcessorMetaSupplier extends Serializable {
      * The parallelism will be overriden if the {@link Vertex#localParallelism(int)} is
      * set to a specific value.
      */
-    static ProcessorMetaSupplier preferLocalParallelismOne(ProcessorSupplier supplier) {
+    @Nonnull
+    static ProcessorMetaSupplier preferLocalParallelismOne(@Nonnull ProcessorSupplier supplier) {
         return of(supplier, 1);
     }
 
@@ -228,7 +235,8 @@ public interface ProcessorMetaSupplier extends Serializable {
      * Variant of {@link #forceTotalParallelismOne(ProcessorSupplier, String)} where the node
      * for the supplier will be chosen randomly.
      */
-    static ProcessorMetaSupplier forceTotalParallelismOne(ProcessorSupplier supplier) {
+    @Nonnull
+    static ProcessorMetaSupplier forceTotalParallelismOne(@Nonnull ProcessorSupplier supplier) {
         return forceTotalParallelismOne(supplier, newUnsecureUuidString());
     }
 
@@ -252,7 +260,10 @@ public interface ProcessorMetaSupplier extends Serializable {
      *
      * @throws IllegalArgumentException if vertex has local parallelism setting of greater than 1
      */
-    static ProcessorMetaSupplier forceTotalParallelismOne(ProcessorSupplier supplier, String partitionKey) {
+    @Nonnull
+    static ProcessorMetaSupplier forceTotalParallelismOne(
+            @Nonnull ProcessorSupplier supplier, @Nonnull String partitionKey
+    ) {
         return new ProcessorMetaSupplier() {
 
             private transient Address ownerAddress;
@@ -305,6 +316,25 @@ public interface ProcessorMetaSupplier extends Serializable {
          */
         @Nonnull
         JetInstance jetInstance();
+
+        /**
+         * Returns the job ID. Job id is unique for job submission and doesn't
+         * change when the job restarts. It's also unique for all running and
+         * archived jobs.
+         */
+        long jobId();
+
+        /**
+         * Returns the job execution ID. It's unique for one execution, but
+         * changes when the job restarts.
+         */
+        long executionId();
+
+        /**
+         * Returns the {@link JobConfig}.
+         */
+        @Nonnull
+        JobConfig jobConfig();
 
         /**
          * Returns the total number of {@code Processor}s that will be created

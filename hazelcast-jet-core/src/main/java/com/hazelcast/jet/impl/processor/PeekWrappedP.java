@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@ import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.DiagnosticProcessors;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.impl.execution.init.Contexts.ProcCtx;
+import com.hazelcast.jet.impl.JetEvent;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.spi.NodeEngine;
 
@@ -34,6 +35,7 @@ import java.util.stream.IntStream;
 
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.impl.execution.init.ExecutionPlan.createLoggerName;
+import static com.hazelcast.jet.impl.util.Util.toLocalTime;
 
 /**
  * Internal API, see {@link DiagnosticProcessors}.
@@ -67,7 +69,7 @@ public final class PeekWrappedP<T> extends ProcessorWrapper {
     }
 
     @Override
-    public void init(@Nonnull Outbox outbox, @Nonnull Context context) {
+    public void init(@Nonnull Outbox outbox, @Nonnull Context context) throws Exception {
         logger = context.logger();
         outbox = new LoggingOutbox(outbox, peekOutput, peekSnapshot);
 
@@ -78,10 +80,15 @@ public final class PeekWrappedP<T> extends ProcessorWrapper {
             ProcCtx c = (ProcCtx) context;
             NodeEngine nodeEngine = ((HazelcastInstanceImpl) c.jetInstance().getHazelcastInstance()).node.nodeEngine;
             ILogger newLogger = nodeEngine.getLogger(
-                    createLoggerName(wrapped.getClass().getName(), c.vertexName(), c.globalProcessorIndex()));
-            context = new ProcCtx(c.jetInstance(), c.getSerializationService(), newLogger, c.vertexName(),
-                    c.localProcessorIndex(), c.globalProcessorIndex(), c.processingGuarantee(), c.localParallelism(),
-                    c.memberIndex(), c.memberCount());
+                    createLoggerName(
+                            getWrapped().getClass().getName(),
+                            c.jobConfig().getName(),
+                            c.vertexName(),
+                            c.globalProcessorIndex())
+            );
+            context = new ProcCtx(c.jetInstance(), c.jobId(), c.executionId(), c.jobConfig(),
+                    newLogger, c.vertexName(), c.localProcessorIndex(), c.globalProcessorIndex(), c.processingGuarantee(),
+                    c.localParallelism(), c.memberIndex(), c.memberCount());
         }
         super.init(outbox, context);
     }
@@ -97,10 +104,12 @@ public final class PeekWrappedP<T> extends ProcessorWrapper {
         }
     }
 
-    private void log(String prefix, T object) {
-        // null object can come from poll()
-        if (object != null && shouldLogFn.test(object)) {
-            logger.info(prefix + ": " + toStringFn.apply(object));
+    private void log(String prefix, @Nonnull T object) {
+        if (shouldLogFn.test(object)) {
+            logger.info(prefix + ": " + toStringFn.apply(object)
+                    + (object instanceof JetEvent
+                            ? " (eventTime=" + toLocalTime(((JetEvent) object).timestamp()) + ")"
+                            : ""));
         }
     }
 
@@ -112,9 +121,6 @@ public final class PeekWrappedP<T> extends ProcessorWrapper {
         }
         if (super.tryProcessWatermark(watermark)) {
             peekedWatermarkLogged = false;
-            if (peekOutput) {
-                logger.info("Output forwarded: " + watermark);
-            }
             return true;
         }
         return false;
@@ -152,7 +158,7 @@ public final class PeekWrappedP<T> extends ProcessorWrapper {
             return res;
         }
 
-        private void log(T res) {
+        private void log(@Nonnull T res) {
             PeekWrappedP.this.log("Input from ordinal " + ordinal, res);
         }
 
@@ -231,6 +237,11 @@ public final class PeekWrappedP<T> extends ProcessorWrapper {
                 log("Output to snapshot", (T) entry(key, value));
             }
             return true;
+        }
+
+        @Override
+        public boolean hasUnfinishedItem() {
+            return wrappedOutbox.hasUnfinishedItem();
         }
     }
 }

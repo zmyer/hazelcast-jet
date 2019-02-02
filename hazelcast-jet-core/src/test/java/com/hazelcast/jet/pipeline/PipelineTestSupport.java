@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,6 +42,7 @@ import java.util.stream.IntStream;
 import static com.hazelcast.query.TruePredicate.truePredicate;
 import static java.util.stream.Collectors.toList;
 
+@SuppressWarnings("WeakerAccess")
 public abstract class PipelineTestSupport extends TestInClusterSupport {
 
     protected int itemCount = 1_000;
@@ -50,12 +51,13 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
 
     protected Pipeline p;
     protected Sink<Object> sink;
+    protected BatchSource<Object> source;
 
     protected IMap<String, Integer> srcMap;
     protected IList<Object> srcList;
     protected IList<Object> sinkList;
 
-    private ICache<String, Integer> srcCache;
+    protected ICache<String, Integer> srcCache;
 
     @Before
     public void beforePipelineTestSupport() {
@@ -63,6 +65,8 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         srcMap = jet().getMap(srcName);
         srcCache = jet().getCacheManager().getCache(srcName);
         srcList = jet().getList(srcName);
+        source = Sources.list(srcName);
+
         sink = Sinks.list(sinkName);
         sinkList = jet().getList(sinkName);
     }
@@ -71,7 +75,7 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         return testMode.getJet();
     }
 
-    void execute() {
+    protected void execute() {
         jet().newJob(p).join();
     }
 
@@ -83,7 +87,7 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         return randomMapName(JOURNALED_MAP_PREFIX);
     }
 
-    void addToSrcList(Collection<Integer> data) {
+    protected void addToSrcList(Collection<Integer> data) {
         srcList.addAll(data);
     }
 
@@ -105,6 +109,10 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         data.forEach(i -> dest.put(String.valueOf(key[0]++), i));
     }
 
+    <T> Sink<T> sinkList() {
+        return Sinks.list(sinkName);
+    }
+
     @SuppressWarnings("unchecked")
     <T> Map<T, Integer> sinkToBag() {
         return toBag((List<T>) this.sinkList);
@@ -123,7 +131,7 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         return bag;
     }
 
-    static List<Integer> sequence(int itemCount) {
+    protected static List<Integer> sequence(int itemCount) {
         return IntStream.range(0, itemCount).boxed().collect(toList());
     }
 

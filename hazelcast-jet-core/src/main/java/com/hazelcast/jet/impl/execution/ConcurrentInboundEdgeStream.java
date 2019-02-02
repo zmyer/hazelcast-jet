@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package com.hazelcast.jet.impl.execution;
 import com.hazelcast.internal.util.concurrent.ConcurrentConveyor;
 import com.hazelcast.internal.util.concurrent.Pipe;
 import com.hazelcast.internal.util.concurrent.QueuedPipe;
-import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.impl.util.ProgressState;
 import com.hazelcast.jet.impl.util.ProgressTracker;
@@ -34,6 +33,7 @@ import static com.hazelcast.jet.impl.execution.DoneItem.DONE_ITEM;
 import static com.hazelcast.jet.impl.execution.WatermarkCoalescer.NO_NEW_WM;
 import static com.hazelcast.jet.impl.util.ProgressState.DONE;
 import static com.hazelcast.jet.impl.util.ProgressState.MADE_PROGRESS;
+import static com.hazelcast.jet.impl.util.Util.toLocalTime;
 
 /**
  * {@link InboundEdgeStream} implemented in terms of a {@link ConcurrentConveyor}.
@@ -44,7 +44,6 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
 
     private final int ordinal;
     private final int priority;
-    private final boolean waitForSnapshot;
     private final ConcurrentConveyor<Object> conveyor;
     private final ProgressTracker tracker = new ProgressTracker();
     private final ItemDetector itemDetector = new ItemDetector();
@@ -52,28 +51,32 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
     private final WatermarkCoalescer watermarkCoalescer;
     private final BitSet receivedBarriers; // indicates if current snapshot is received on the queue
     private final ILogger logger;
-    private long pendingSnapshotId; // next snapshot barrier to emit
+
+    // Tells whether we are operating in exactly-once or at-least-once mode.
+    // In other words, whether a barrier from all queues must be present before
+    // draining more items from a queue where a barrier has been reached.
+    // Once a terminal snapshot barrier is reached, this is always true.
+    private boolean waitForAllBarriers;
+    private SnapshotBarrier currentBarrier;  // next snapshot barrier to emit
     private long numActiveQueues; // number of active queues remaining
 
     /**
-     * @param waitForSnapshot If {@code true}, a queue that had a barrier won't
+     * @param waitForAllBarriers If {@code true}, a queue that had a barrier won't
      *          be drained until the same barrier is received from all other
      *          queues. This will enforce exactly-once vs. at-least-once, if it
      *          is {@code false}.
      */
     public ConcurrentInboundEdgeStream(ConcurrentConveyor<Object> conveyor, int ordinal, int priority,
-                                       long lastSnapshotId, boolean waitForSnapshot, int maxWatermarkRetainMillis,
-                                       String debugName) {
+                                       boolean waitForAllBarriers, String debugName) {
         this.conveyor = conveyor;
         this.ordinal = ordinal;
         this.priority = priority;
-        this.waitForSnapshot = waitForSnapshot;
+        this.waitForAllBarriers = waitForAllBarriers;
 
-        watermarkCoalescer = WatermarkCoalescer.create(maxWatermarkRetainMillis, conveyor.queueCount());
+        watermarkCoalescer = WatermarkCoalescer.create(conveyor.queueCount());
 
         numActiveQueues = conveyor.queueCount();
         receivedBarriers = new BitSet(conveyor.queueCount());
-        pendingSnapshotId = lastSnapshotId + 1;
         logger = Logger.getLogger(ConcurrentInboundEdgeStream.class.getName() + "." + debugName);
         logger.finest("Coalescing " + conveyor.queueCount() + " input queues");
     }
@@ -90,11 +93,6 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
 
     @Override
     public ProgressState drainTo(Predicate<Object> dest) {
-        return drainTo(watermarkCoalescer.getTime(), dest);
-    }
-
-    // package-visible for testing
-    ProgressState drainTo(long now, Predicate<Object> dest) {
         tracker.reset();
         for (int queueIndex = 0; queueIndex < conveyor.queueCount(); queueIndex++) {
             final QueuedPipe<Object> q = conveyor.queue(queueIndex);
@@ -103,7 +101,7 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
             }
 
             // skip queues where a snapshot barrier has already been received
-            if (waitForSnapshot && receivedBarriers.get(queueIndex)) {
+            if (waitForAllBarriers && receivedBarriers.get(queueIndex)) {
                 continue;
             }
 
@@ -114,21 +112,27 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
                 conveyor.removeQueue(queueIndex);
                 receivedBarriers.clear(queueIndex);
                 numActiveQueues--;
-                if (maybeEmitWm(watermarkCoalescer.queueDone(queueIndex), dest)) {
+                long wmTimestamp = watermarkCoalescer.queueDone(queueIndex);
+                if (maybeEmitWm(wmTimestamp, dest)) {
+                    if (logger.isFinestEnabled()) {
+                        logger.finest("Queue " + queueIndex + " is done, forwarding " + new Watermark(wmTimestamp));
+                    }
                     return numActiveQueues == 0 ? DONE : MADE_PROGRESS;
                 }
             } else if (itemDetector.item instanceof Watermark) {
                 long wmTimestamp = ((Watermark) itemDetector.item).timestamp();
-                boolean forwarded = maybeEmitWm(watermarkCoalescer.observeWm(now, queueIndex, wmTimestamp), dest);
+                boolean forwarded = maybeEmitWm(watermarkCoalescer.observeWm(queueIndex, wmTimestamp), dest);
                 if (logger.isFinestEnabled()) {
                     logger.finest("Received " + itemDetector.item + " from queue " + queueIndex
-                            + (forwarded ? ", forwarded" : ", not forwarded"));
+                            + (forwarded ? ", forwarded=" : ", not forwarded")
+                            + ", coalescedWm=" + toLocalTime(watermarkCoalescer.coalescedWm())
+                            + ", topObservedWm=" + toLocalTime(topObservedWm()));
                 }
                 if (forwarded) {
                     return MADE_PROGRESS;
                 }
             } else if (itemDetector.item instanceof SnapshotBarrier) {
-                observeBarrier(queueIndex, ((SnapshotBarrier) itemDetector.item).snapshotId());
+                observeBarrier(queueIndex, (SnapshotBarrier) itemDetector.item);
             } else if (result.isMadeProgress()) {
                 watermarkCoalescer.observeEvent(queueIndex);
             }
@@ -140,9 +144,10 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
             if (itemDetector.item != null) {
                 // if we have received the current snapshot from all active queues, forward it
                 if (receivedBarriers.cardinality() == numActiveQueues) {
-                    boolean res = dest.test(new SnapshotBarrier(pendingSnapshotId));
+                    assert currentBarrier != null : "currentBarrier == null";
+                    boolean res = dest.test(currentBarrier);
                     assert res : "test result expected to be true";
-                    pendingSnapshotId++;
+                    currentBarrier = null;
                     receivedBarriers.clear();
                     return MADE_PROGRESS;
                 }
@@ -150,7 +155,7 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
         }
 
         // try to emit WM based on history
-        if (maybeEmitWm(watermarkCoalescer.checkWmHistory(now), dest)) {
+        if (maybeEmitWm(watermarkCoalescer.checkWmHistory(), dest)) {
             return MADE_PROGRESS;
         }
 
@@ -188,10 +193,18 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
         return ProgressState.valueOf(drainedCount > 0, itemDetector.item == DONE_ITEM);
     }
 
-    private void observeBarrier(int queueIndex, long snapshotId) {
-        if (snapshotId != pendingSnapshotId) {
-            throw new JetException("Unexpected snapshot barrier "
-                    + snapshotId + ", expected " + pendingSnapshotId);
+    private void observeBarrier(int queueIndex, SnapshotBarrier barrier) {
+        if (currentBarrier == null) {
+            currentBarrier = barrier;
+        } else {
+            assert currentBarrier.equals(barrier) : currentBarrier + " != " + barrier;
+        }
+        if (barrier.isTerminal()) {
+            // Switch to exactly-once mode. The reason is that there will be DONE_ITEM just after the
+            // terminal barrier and if we process it before receiving the other barriers, it could cause
+            // the watermark to advance. The exactly-once mode disallows processing of any items after
+            // the barrier before the barrier is processed.
+            waitForAllBarriers = true;
         }
         receivedBarriers.set(queueIndex);
     }
@@ -240,5 +253,15 @@ public class ConcurrentInboundEdgeStream implements InboundEdgeStream {
             }
         }
         return sum;
+    }
+
+    @Override
+    public long topObservedWm() {
+        return watermarkCoalescer.topObservedWm();
+    }
+
+    @Override
+    public long coalescedWm() {
+        return watermarkCoalescer.coalescedWm();
     }
 }

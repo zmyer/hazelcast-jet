@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import com.hazelcast.jet.IMapJet;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.AbstractProcessor;
@@ -28,10 +29,6 @@ import com.hazelcast.jet.kafka.impl.KafkaTestSupport;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sources;
 import com.hazelcast.test.HazelcastSerialClassRunner;
-import java.io.IOException;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Properties;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -40,6 +37,11 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+
+import java.io.IOException;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Properties;
 
 import static com.hazelcast.jet.Util.entry;
 import static java.util.Collections.singletonMap;
@@ -77,7 +79,7 @@ public class KafkaSinkTest extends KafkaTestSupport {
     }
 
     @Test
-    public void testWriteToTopic() throws Exception {
+    public void testWriteToTopic() {
         Pipeline p = Pipeline.create();
         p.drawFrom(Sources.map(SOURCE_IMAP_NAME))
          .drainTo(KafkaSinks.kafka(properties, topic));
@@ -87,7 +89,7 @@ public class KafkaSinkTest extends KafkaTestSupport {
     }
 
     @Test
-    public void testWriteToSpecificPartitions() throws Exception {
+    public void testWriteToSpecificPartitions() {
         String localTopic = topic;
 
         Pipeline p = Pipeline.create();
@@ -101,7 +103,7 @@ public class KafkaSinkTest extends KafkaTestSupport {
     }
 
     @Test
-    public void when_recordLingerEnabled_then_sentOnCompletion() throws Exception {
+    public void when_recordLingerEnabled_then_sentOnCompletion() {
         // When
         properties.setProperty("linger.ms", "3600000"); // 1 hour
 
@@ -126,7 +128,7 @@ public class KafkaSinkTest extends KafkaTestSupport {
     }
 
     @Test
-    public void when_recordLingerEnabled_then_sentOnSnapshot() throws Exception {
+    public void when_recordLingerEnabled_then_sentOnSnapshot() {
         // When
         properties.setProperty("linger.ms", "3600000"); // 1 hour
 
@@ -173,13 +175,17 @@ public class KafkaSinkTest extends KafkaTestSupport {
         static volatile boolean isDone;
         static volatile boolean allowSnapshot;
 
-        private Traverser<Entry<String, String>> t = Traverser.over(entry("k", "v"));
+        private Traverser<Entry<String, String>> t = Traversers.singleton(entry("k", "v"));
 
         private ProcessorWithEntryAndLatch() {
             // reset so that values from previous run don't remain
             isDone = false;
             allowSnapshot = false;
-            setCooperative(false);
+        }
+
+        @Override
+        public boolean isCooperative() {
+            return false;
         }
 
         @Override

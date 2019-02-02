@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,9 @@ import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.BroadcastKey;
+import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.Processor;
-import com.hazelcast.jet.core.WatermarkGenerationParams;
-import com.hazelcast.jet.core.WatermarkSourceUtil;
+import com.hazelcast.jet.core.EventTimeMapper;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.kafka.KafkaProcessors;
@@ -31,10 +31,8 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.InterruptException;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -43,6 +41,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -66,8 +65,8 @@ public final class StreamKafkaP<K, V, T> extends AbstractProcessor {
 
     private final Properties properties;
     private final List<String> topics;
-    private final DistributedFunction<ConsumerRecord<K, V>, T> projectionFn;
-    private final WatermarkSourceUtil<T> watermarkSourceUtil;
+    private final DistributedFunction<? super ConsumerRecord<K, V>, ? extends T> projectionFn;
+    private final EventTimeMapper<? super T> eventTimeMapper;
     private int totalParallelism;
     private boolean snapshottingEnabled;
 
@@ -88,14 +87,19 @@ public final class StreamKafkaP<K, V, T> extends AbstractProcessor {
     StreamKafkaP(
             @Nonnull Properties properties,
             @Nonnull List<String> topics,
-            @Nonnull DistributedFunction<ConsumerRecord<K, V>, T> projectionFn,
-            @Nonnull WatermarkGenerationParams<? super T> wmGenParams
+            @Nonnull DistributedFunction<? super ConsumerRecord<K, V>, ? extends T> projectionFn,
+            @Nonnull EventTimePolicy<? super T> eventTimePolicy
     ) {
         this.properties = properties;
         this.topics = topics;
         this.projectionFn = projectionFn;
-        watermarkSourceUtil = new WatermarkSourceUtil<>(wmGenParams);
+        eventTimeMapper = new EventTimeMapper<>(eventTimePolicy);
         partitionCounts = new int[topics.size()];
+    }
+
+    @Override
+    public boolean isCooperative() {
+        return false;
     }
 
     @Override
@@ -131,7 +135,7 @@ public final class StreamKafkaP<K, V, T> extends AbstractProcessor {
             for (TopicPartition tp : newAssignments) {
                 currentAssignment.put(tp, currentAssignment.size());
             }
-            watermarkSourceUtil.increasePartitionCount(currentAssignment.size());
+            eventTimeMapper.increasePartitionCount(currentAssignment.size());
             consumer.assign(currentAssignment.keySet());
             if (seekToBeginning) {
                 // for newly detected partitions, we should always seek to the beginning
@@ -166,52 +170,46 @@ public final class StreamKafkaP<K, V, T> extends AbstractProcessor {
             return false;
         }
 
-        ConsumerRecords<K, V> records = null;
         try {
+            ConsumerRecords<K, V> records = null;
             assignPartitions(true);
             if (!currentAssignment.isEmpty()) {
                 records = consumer.poll(POLL_TIMEOUT_MS);
             }
-        } catch (InterruptException e) {
-            // note this is Kafka's exception, not Java's
-            Thread.currentThread().interrupt();
+
+            traverser = isEmpty(records)
+                    ? eventTimeMapper.flatMapIdle()
+                    : traverseIterable(records).flatMap(record -> {
+                        offsets.get(record.topic())[record.partition()] = record.offset();
+                        T projectedRecord = projectionFn.apply(record);
+                        if (projectedRecord == null) {
+                            return Traversers.empty();
+                        }
+                        TopicPartition topicPartition = new TopicPartition(record.topic(), record.partition());
+                        return eventTimeMapper.flatMapEvent(projectedRecord, currentAssignment.get(topicPartition),
+                                record.timestamp());
+                    });
+
+            emitFromTraverser(traverser);
+
+            if (!snapshottingEnabled) {
+                consumer.commitSync();
+            }
+        } catch (org.apache.kafka.common.errors.InterruptException e) {
             return false;
         }
 
-        traverser = isEmpty(records)
-                ? watermarkSourceUtil.handleNoEvent()
-                : traverseIterable(records).flatMap(record -> {
-                    offsets.get(record.topic())[record.partition()] = record.offset();
-                    T projectedRecord = projectionFn.apply(record);
-                    if (projectedRecord == null) {
-                        return Traversers.empty();
-                    }
-                    TopicPartition topicPartition = new TopicPartition(record.topic(), record.partition());
-                    return watermarkSourceUtil.handleEvent(projectedRecord, currentAssignment.get(topicPartition));
-                });
-
-        emitFromTraverser(traverser);
-
-        if (!snapshottingEnabled) {
-            consumer.commitSync();
-        }
-
         return false;
     }
 
     @Override
-    public void close(@Nullable Throwable error) {
+    public void close() {
         if (consumer != null) {
             try {
                 consumer.close();
-            } catch (InterruptException ignored) {
+            } catch (org.apache.kafka.common.errors.InterruptException ignored) {
             }
         }
-    }
-
-    @Override
-    public boolean isCooperative() {
-        return false;
     }
 
     @Override
@@ -228,11 +226,17 @@ public final class StreamKafkaP<K, V, T> extends AbstractProcessor {
                                   .mapToObj(partition -> {
                                       TopicPartition key = new TopicPartition(entry.getKey(), partition);
                                       long offset = entry.getValue()[partition];
-                                      long watermark = watermarkSourceUtil.getWatermark(currentAssignment.get(key));
+                                      long watermark = eventTimeMapper.getWatermark(currentAssignment.get(key));
                                       return entry(broadcastKey(key), new long[]{offset, watermark});
                                   }));
             snapshotTraverser = traverseStream(snapshotStream)
-                    .onFirstNull(() -> snapshotTraverser = null);
+                    .onFirstNull(() -> {
+                        snapshotTraverser = null;
+                        if (getLogger().isFineEnabled()) {
+                            getLogger().fine("Finished saving snapshot." +
+                                    " Saved offsets: " + offsets() + ", Saved watermarks: " + watermarks());
+                        }
+                    });
         }
         return emitFromTraverserToSnapshot(snapshotTraverser);
     }
@@ -245,12 +249,12 @@ public final class StreamKafkaP<K, V, T> extends AbstractProcessor {
         long watermark = value1[1];
         long[] topicOffsets = offsets.get(topicPartition.topic());
         if (topicOffsets == null) {
-            getLogger().severe("Offset for topic '" + topicPartition.topic()
+            getLogger().warning("Offset for topic '" + topicPartition.topic()
                     + "' is present in snapshot, but the topic is not supposed to be read");
             return;
         }
         if (topicPartition.partition() >= topicOffsets.length) {
-            getLogger().severe("Offset for partition '" + topicPartition + "' is present in snapshot," +
+            getLogger().warning("Offset for partition '" + topicPartition + "' is present in snapshot," +
                     " but that topic currently has only " + topicOffsets.length + " partitions");
         }
         Integer partitionIndex = currentAssignment.get(topicPartition);
@@ -259,22 +263,41 @@ public final class StreamKafkaP<K, V, T> extends AbstractProcessor {
                     + "' restored, offset1=" + topicOffsets[topicPartition.partition()] + ", offset2=" + offset;
             topicOffsets[topicPartition.partition()] = offset;
             consumer.seek(topicPartition, offset + 1);
-            watermarkSourceUtil.restoreWatermark(partitionIndex, watermark);
+            eventTimeMapper.restoreWatermark(partitionIndex, watermark);
         }
+    }
+
+    @Override
+    public boolean finishSnapshotRestore() {
+        if (getLogger().isFineEnabled()) {
+            getLogger().fine("Finished restoring snapshot. Restored offsets: " + offsets()
+                    + " and watermarks:" + watermarks());
+        }
+        return true;
     }
 
     private boolean isEmpty(ConsumerRecords<K, V> records) {
         return records == null || records.isEmpty();
     }
 
+    private Map<TopicPartition, Long> offsets() {
+        return currentAssignment.keySet().stream()
+                .collect(Collectors.toMap(tp -> tp, tp -> offsets.get(tp.topic())[tp.partition()]));
+    }
+
+    private Map<TopicPartition, Long> watermarks() {
+        return currentAssignment.entrySet().stream()
+                .collect(Collectors.toMap(Entry::getKey, e -> eventTimeMapper.getWatermark(e.getValue())));
+    }
+
     @Nonnull
     public static <K, V, T> DistributedSupplier<Processor> processorSupplier(
             @Nonnull Properties properties,
             @Nonnull List<String> topics,
-            @Nonnull DistributedFunction<ConsumerRecord<K, V>, T> projectionFn,
-            @Nonnull WatermarkGenerationParams<T> wmGenParams
+            @Nonnull DistributedFunction<? super ConsumerRecord<K, V>, ? extends T> projectionFn,
+            @Nonnull EventTimePolicy<? super T> eventTimePolicy
     ) {
-        return () -> new StreamKafkaP<>(properties, topics, projectionFn, wmGenParams);
+        return () -> new StreamKafkaP<>(properties, topics, projectionFn, eventTimePolicy);
     }
 
     /**

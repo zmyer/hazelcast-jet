@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.function.DistributedPredicate;
 import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.jet.impl.JetEvent;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.test.HazelcastParametersRunnerFactory;
 import org.junit.Before;
@@ -41,6 +42,8 @@ import static com.hazelcast.jet.core.processor.DiagnosticProcessors.peekInputP;
 import static com.hazelcast.jet.core.processor.DiagnosticProcessors.peekOutputP;
 import static com.hazelcast.jet.core.processor.DiagnosticProcessors.peekSnapshotP;
 import static com.hazelcast.jet.core.test.TestSupport.supplierFrom;
+import static com.hazelcast.jet.impl.JetEvent.jetEvent;
+import static com.hazelcast.jet.impl.util.Util.toLocalTime;
 import static com.hazelcast.jet.impl.util.Util.uncheckCall;
 import static java.util.Arrays.asList;
 import static org.junit.Assert.assertEquals;
@@ -55,6 +58,8 @@ import static org.mockito.Mockito.verifyZeroInteractions;
 @Parameterized.UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
 public class PeekingWrapperTest {
 
+    private static final JetEvent<Integer> TEST_JET_EVENT = jetEvent(2, 123);
+
     @Parameter
     public String mode;
 
@@ -67,8 +72,9 @@ public class PeekingWrapperTest {
 
     private DistributedFunction<Entry<Integer, Integer>, String> snapshotToStringFn;
     private DistributedPredicate<Entry<Integer, Integer>> snapshotShouldLogFn;
+    private String testJetEventString;
 
-    @Parameters(name = "toStringFn={0}, shouldLogFn={1}")
+    @Parameters(name = "mode={0}")
     public static Collection<Object> parameters() {
         return asList("defaultFunctions", "customFunctions");
     }
@@ -88,10 +94,12 @@ public class PeekingWrapperTest {
             shouldLogFn = null;
             snapshotShouldLogFn = null;
         }
+        testJetEventString = format(TEST_JET_EVENT)
+                + " (eventTime=" + toLocalTime(TEST_JET_EVENT.timestamp()) + ")";
     }
 
     @Test
-    public void when_peekInputWithPeekingProcessor_distributedSupplier() {
+    public void when_peekInputWithPeekingProcessor_distributedSupplier() throws Exception {
         // Given
         DistributedSupplier<Processor> wrappedSupplier = procSupplier(TestPeekRemoveProcessor.class);
         peekP = (toStringFn == null
@@ -104,7 +112,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekInputWithPollingProcessor_distributedSupplier() {
+    public void when_peekInputWithPollingProcessor_distributedSupplier() throws Exception {
         // Given
         DistributedSupplier<Processor> passThroughPSupplier = procSupplier(TestPollProcessor.class);
         peekP = (toStringFn == null
@@ -117,7 +125,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekInput_processorSupplier() {
+    public void when_peekInput_processorSupplier() throws Exception {
         // Given
         ProcessorSupplier wrappedProcSupplier = ProcessorSupplier.of(procSupplier(TestPeekRemoveProcessor.class));
         ProcessorSupplier peekingProcSupplier = toStringFn == null
@@ -130,7 +138,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekInput_metaSupplier() {
+    public void when_peekInput_metaSupplier() throws Exception {
         // Given
         ProcessorMetaSupplier wrappedMetaSupplier =
                 ProcessorMetaSupplier.of(procSupplier(TestPeekRemoveProcessor.class));
@@ -144,11 +152,11 @@ public class PeekingWrapperTest {
     }
 
     private DistributedSupplier<Processor> peekOutputProcessorSupplier() {
-        return () -> new ListSource(0, 1, new Watermark(2));
+        return () -> new ListSource(0, 1, new Watermark(2), TEST_JET_EVENT);
     }
 
     @Test
-    public void when_peekOutput_distributedSupplier() {
+    public void when_peekOutput_distributedSupplier() throws Exception {
         // Given
         DistributedSupplier<Processor> passThroughPSupplier = peekOutputProcessorSupplier();
         peekP = (toStringFn == null
@@ -161,7 +169,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekOutput_processorSupplier() {
+    public void when_peekOutput_processorSupplier() throws Exception {
         // Given
         ProcessorSupplier wrappedProcSupplier = ProcessorSupplier.of(peekOutputProcessorSupplier());
         ProcessorSupplier peekingProcSupplier = toStringFn == null
@@ -174,7 +182,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekOutput_metaSupplier() {
+    public void when_peekOutput_metaSupplier() throws Exception {
         // Given
         ProcessorMetaSupplier passThroughPSupplier = ProcessorMetaSupplier.of(peekOutputProcessorSupplier());
         ProcessorMetaSupplier peekingMetaSupplier = toStringFn == null
@@ -187,7 +195,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekSnapshot_distributedSupplier() {
+    public void when_peekSnapshot_distributedSupplier() throws Exception {
         // Given
         DistributedSupplier<Processor> wrappedSupplier = procSupplier(TestSourceProcessor.class);
         peekP = (toStringFn == null
@@ -200,7 +208,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekSnapshot_procSupplier() {
+    public void when_peekSnapshot_procSupplier() throws Exception {
         // Given
         ProcessorSupplier wrappedProcSupplier = ProcessorSupplier.of(procSupplier(TestSourceProcessor.class));
         ProcessorSupplier peekingProcSupplier = toStringFn == null
@@ -213,7 +221,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekSnapshot_metaSupplier() {
+    public void when_peekSnapshot_metaSupplier() throws Exception {
         // Given
         ProcessorMetaSupplier wrappedMetaSupplier = ProcessorMetaSupplier.of(procSupplier(TestSourceProcessor.class));
         ProcessorMetaSupplier peekingMetaSupplier = toStringFn == null
@@ -229,7 +237,7 @@ public class PeekingWrapperTest {
         return () -> uncheckCall(processor::newInstance);
     }
 
-    private void assertPeekInput() {
+    private void assertPeekInput() throws Exception {
         peekP.init(mock(Outbox.class), context);
 
         TestInbox inbox = new TestInbox();
@@ -252,11 +260,24 @@ public class PeekingWrapperTest {
         Watermark wm = new Watermark(1);
         peekP.tryProcessWatermark(wm);
         verify(logger).info("Input: " + wm);
+
+        inbox.add(TEST_JET_EVENT);
+        peekP.process(0, inbox);
+        verify(logger).info("Input from ordinal 0: " + testJetEventString);
     }
 
-    private void assertPeekOutput() {
+    private void assertPeekOutput() throws Exception {
         TestOutbox outbox = new TestOutbox(1, 1);
         peekP.init(outbox, context);
+
+        Watermark wm = new Watermark(3);
+        peekP.tryProcessWatermark(wm);
+        verify(logger).info("Output to ordinal 0: " + wm);
+        verify(logger).info("Output to ordinal 1: " + wm);
+        outbox.queue(0).clear();
+        outbox.queue(1).clear();
+        outbox.reset();
+        verifyZeroInteractions(logger);
 
         peekP.complete();
         verify(logger).info("Output to ordinal 0: " + format(0));
@@ -278,17 +299,21 @@ public class PeekingWrapperTest {
         verifyZeroInteractions(logger);
 
         peekP.complete();
-        Watermark wm = new Watermark(2);
+        wm = new Watermark(2);
         verify(logger).info("Output to ordinal 0: " + wm);
         verify(logger).info("Output to ordinal 1: " + wm);
+        outbox.queue(0).clear();
+        outbox.queue(1).clear();
+        outbox.reset();
+        verifyZeroInteractions(logger);
 
-        wm = new Watermark(3);
-        peekP.tryProcessWatermark(wm);
-        verify(logger).info("Output forwarded: " + wm);
+        peekP.complete();
+        verify(logger).info("Output to ordinal 0: " + testJetEventString);
+        verify(logger).info("Output to ordinal 1: " + testJetEventString);
         verifyZeroInteractions(logger);
     }
 
-    private void assertPeekSnapshot() {
+    private void assertPeekSnapshot() throws Exception {
         TestOutbox outbox = new TestOutbox(new int[]{16}, 16);
         peekP.init(outbox, context);
 
@@ -330,7 +355,6 @@ public class PeekingWrapperTest {
      * A processor that will pass through inbox to outbox using inbox.peek() + inbox.remove()
      */
     static class TestPeekRemoveProcessor extends TestProcessor {
-
         @Override
         public void process(int ordinal, @Nonnull Inbox inbox) {
             for (Object o; (o = inbox.peek()) != null; ) {
@@ -344,6 +368,11 @@ public class PeekingWrapperTest {
                 fail("Remove didn't fail");
             } catch (NoSuchElementException expected) {
             }
+        }
+
+        @Override
+        public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+            return true;
         }
     }
 
@@ -359,6 +388,11 @@ public class PeekingWrapperTest {
 
             assertNull(inbox.poll());
         }
+
+        @Override
+        public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+            return true;
+        }
     }
 
     /**
@@ -367,6 +401,11 @@ public class PeekingWrapperTest {
      */
     static class TestSourceProcessor extends TestProcessor {
         private int counter;
+
+        @Override
+        public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+            return true;
+        }
 
         @Override
         public boolean complete() {

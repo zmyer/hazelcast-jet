@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import com.hazelcast.config.EventJournalConfig;
 import com.hazelcast.core.DistributedObject;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.instance.HazelcastInstanceFactory;
 import com.hazelcast.jet.IListJet;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.JetTestInstanceFactory;
@@ -39,19 +40,19 @@ import com.hazelcast.nio.Address;
 import com.hazelcast.projection.Projections;
 import com.hazelcast.query.Predicates;
 import com.hazelcast.test.HazelcastSerialClassRunner;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.stream.IntStream;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.stream.IntStream;
+
 import static com.hazelcast.jet.core.Edge.between;
-import static com.hazelcast.jet.core.WatermarkEmissionPolicy.noThrottling;
-import static com.hazelcast.jet.core.WatermarkGenerationParams.wmGenParams;
-import static com.hazelcast.jet.core.WatermarkPolicies.limitingLag;
+import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
+import static com.hazelcast.jet.core.WatermarkPolicy.limitingLag;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeListP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeRemoteCacheP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeRemoteMapP;
@@ -109,8 +110,8 @@ public class HazelcastRemoteConnectorTest extends JetTestSupport {
 
     @AfterClass
     public static void teardown() {
-        Hazelcast.shutdownAll();
-        factory.shutdownAll();
+        HazelcastInstanceFactory.terminateAll();
+        factory.terminateAll();
     }
 
     @Before
@@ -124,7 +125,6 @@ public class HazelcastRemoteConnectorTest extends JetTestSupport {
     public void destroyObjects(HazelcastInstance hz) {
         hz.getDistributedObjects().forEach(DistributedObject::destroy);
     }
-
 
     @Test
     public void when_readRemoteMap_withNativePredicateAndProjection() {
@@ -207,7 +207,7 @@ public class HazelcastRemoteConnectorTest extends JetTestSupport {
     public void when_streamRemoteMap() {
         DAG dag = new DAG();
         Vertex source = dag.newVertex(SOURCE_NAME, streamRemoteMapP(SOURCE_NAME, clientConfig, START_FROM_OLDEST,
-                wmGenParams(Entry<Integer, Integer>::getValue, limitingLag(0), noThrottling(), 10_000)));
+                eventTimePolicy(Entry<Integer, Integer>::getValue, limitingLag(0), 1, 0, 10_000)));
         Vertex sink = dag.newVertex(SINK_NAME, writeListP(SINK_NAME));
         dag.edge(between(source, sink));
 
@@ -224,7 +224,7 @@ public class HazelcastRemoteConnectorTest extends JetTestSupport {
         DAG dag = new DAG();
         Vertex source = dag.newVertex(SOURCE_NAME, SourceProcessors.<Integer, Integer, Integer>streamRemoteMapP(
                 SOURCE_NAME, clientConfig, event -> event.getKey() != 0, EventJournalMapEvent::getKey, START_FROM_OLDEST,
-                wmGenParams(i -> i, limitingLag(0), noThrottling(), 10_000)));
+                eventTimePolicy(i -> i, limitingLag(0), 1, 0, 10_000)));
         Vertex sink = dag.newVertex(SINK_NAME, writeListP(SINK_NAME));
         dag.edge(between(source, sink));
 
@@ -243,7 +243,7 @@ public class HazelcastRemoteConnectorTest extends JetTestSupport {
         DAG dag = new DAG();
         Vertex source = dag.newVertex(SOURCE_NAME,
                 streamRemoteCacheP(SOURCE_NAME, clientConfig, START_FROM_OLDEST,
-                        wmGenParams(Entry<Integer, Integer>::getValue, limitingLag(0), noThrottling(), 10_000))
+                        eventTimePolicy(Entry<Integer, Integer>::getValue, limitingLag(0), 1, 0, 10_000))
         ).localParallelism(4);
         Vertex sink = dag.newVertex(SINK_NAME, writeListP(SINK_NAME)).localParallelism(1);
         dag.edge(between(source, sink));
@@ -262,7 +262,7 @@ public class HazelcastRemoteConnectorTest extends JetTestSupport {
         Vertex source = dag.newVertex(SOURCE_NAME, SourceProcessors.<Integer, Integer, Integer>streamRemoteCacheP(
                 SOURCE_NAME, clientConfig, event -> !event.getKey().equals(0), EventJournalCacheEvent::getKey,
                 START_FROM_OLDEST,
-                wmGenParams(i -> i, limitingLag(0), noThrottling(), 10_000)));
+                eventTimePolicy(i -> i, limitingLag(0), 1, 0, 10_000)));
         Vertex sink = dag.newVertex(SINK_NAME, writeListP(SINK_NAME));
         dag.edge(between(source, sink));
 

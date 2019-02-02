@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -93,7 +93,7 @@ public class StreamFilesPTest extends JetTestSupport {
     }
 
     @Test
-    public void when_metaSupplier_then_returnsCorrectProcessors() {
+    public void when_metaSupplier_then_returnsCorrectProcessors() throws Exception {
         ProcessorMetaSupplier metaSupplier = streamFilesP(workDir.getAbsolutePath(), UTF_8, "*", false, Util::entry);
         Address a = new Address();
         ProcessorSupplier supplier = metaSupplier.get(singletonList(a)).apply(a);
@@ -161,7 +161,7 @@ public class StreamFilesPTest extends JetTestSupport {
     public void when_preExistingFile_then_seeAppendedLines() throws Exception {
         // Test will fail because Windows does not notify the watcher
         // if the file is appended to, but not closed.
-        assumeNotWindows();
+        assumeThatNoWindowsOS();
 
         // Given
         try (PrintWriter w = new PrintWriter(new FileWriter(new File(workDir, "a.txt")))) {
@@ -232,7 +232,7 @@ public class StreamFilesPTest extends JetTestSupport {
     }
 
     @Test
-    public void when_watchedDirDeleted_then_complete() {
+    public void when_watchedDirDeleted_then_complete() throws Exception {
         // Given
         initializeProcessor(null);
         driverThread.start();
@@ -293,7 +293,7 @@ public class StreamFilesPTest extends JetTestSupport {
         fileOffsetsSize = processor.fileOffsets.size();
     }
 
-    private void initializeProcessor(String glob) {
+    private void initializeProcessor(String glob) throws Exception {
         if (glob == null) {
             glob = "*";
         }

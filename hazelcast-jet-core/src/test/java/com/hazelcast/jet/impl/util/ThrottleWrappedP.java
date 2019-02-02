@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,12 +19,13 @@ package com.hazelcast.jet.impl.util;
 import com.hazelcast.jet.core.Inbox;
 import com.hazelcast.jet.core.Outbox;
 import com.hazelcast.jet.core.Processor;
+import com.hazelcast.jet.core.Watermark;
 
 import javax.annotation.Nonnull;
-import java.util.concurrent.TimeUnit;
 
 import static com.hazelcast.util.Preconditions.checkNotNull;
 import static com.hazelcast.util.Preconditions.checkTrue;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
  * A wrapper processor to throttle the output of a processor.
@@ -43,7 +44,7 @@ public final class ThrottleWrappedP implements Processor {
     }
 
     @Override
-    public void init(@Nonnull Outbox outbox, @Nonnull Context context) {
+    public void init(@Nonnull Outbox outbox, @Nonnull Context context) throws Exception {
         wrappedProcessor.init(new ThrottlingOutbox(outbox), context);
     }
 
@@ -55,6 +56,11 @@ public final class ThrottleWrappedP implements Processor {
     @Override
     public void process(int ordinal, @Nonnull Inbox inbox) {
         wrappedProcessor.process(ordinal, inbox);
+    }
+
+    @Override
+    public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+        return wrappedProcessor.tryProcessWatermark(watermark);
     }
 
     @Override
@@ -90,7 +96,7 @@ public final class ThrottleWrappedP implements Processor {
     private final class ThrottlingOutbox implements Outbox {
         private final Outbox wrappedOutbox;
         private long emitCount;
-        private long ts;
+        private long startTs = Long.MIN_VALUE;
 
         private ThrottlingOutbox(Outbox wrappedOutbox) {
             this.wrappedOutbox = wrappedOutbox;
@@ -103,22 +109,16 @@ public final class ThrottleWrappedP implements Processor {
 
         @Override
         public boolean offer(int ordinal, @Nonnull Object item) {
-            long currentTs = System.nanoTime();
-            long elapsed = currentTs - ts;
-            if (TimeUnit.NANOSECONDS.toSeconds(elapsed) >= 1) {
-                ts = currentTs;
-                emitCount = 0;
-            } else {
-                double emitRate = TimeUnit.SECONDS.toNanos(1) * (double) emitCount / elapsed;
-                if (emitRate > itemsPerSecond) {
-                    return false;
-                }
+            if (startTs == Long.MIN_VALUE) {
+                startTs = System.nanoTime();
             }
-            boolean offered = wrappedOutbox.offer(ordinal, item);
-            if (offered) {
-                emitCount++;
+            long elapsed = System.nanoTime() - startTs;
+            if (NANOSECONDS.toSeconds(elapsed * itemsPerSecond) <= emitCount
+                    || !wrappedOutbox.offer(ordinal, item)) {
+                return false;
             }
-            return offered;
+            emitCount++;
+            return true;
         }
 
         @Override
@@ -129,6 +129,11 @@ public final class ThrottleWrappedP implements Processor {
         @Override
         public boolean offerToSnapshot(@Nonnull Object key, @Nonnull Object value) {
             return wrappedOutbox.offerToSnapshot(key, value);
+        }
+
+        @Override
+        public boolean hasUnfinishedItem() {
+            return wrappedOutbox.hasUnfinishedItem();
         }
     }
 }

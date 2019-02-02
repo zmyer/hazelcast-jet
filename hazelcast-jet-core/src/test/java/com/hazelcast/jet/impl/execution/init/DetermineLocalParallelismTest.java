@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ import javax.annotation.Nonnull;
 import java.util.List;
 import java.util.function.Function;
 
-import static com.hazelcast.jet.impl.execution.SnapshotContext.NO_SNAPSHOT;
+import static com.hazelcast.jet.impl.JobExecutionRecord.NO_SNAPSHOT;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(HazelcastParallelClassRunner.class)
@@ -89,7 +89,7 @@ public class DetermineLocalParallelismTest extends JetTestSupport {
         ExecutionPlanBuilder.createExecutionPlans(
                 nodeEngine,
                 ((ClusterServiceImpl) nodeEngine.getClusterService()).getMembershipManager().getMembersView(),
-                dag, new JobConfig(), NO_SNAPSHOT);
+                dag, 1, 1, new JobConfig(), NO_SNAPSHOT);
     }
 
     private static class ValidatingMetaSupplier implements ProcessorMetaSupplier {

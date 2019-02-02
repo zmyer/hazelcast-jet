@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,6 @@ import com.hazelcast.jet.function.DistributedBiFunction;
 import com.hazelcast.jet.function.DistributedFunction;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
@@ -47,28 +46,36 @@ import static com.hazelcast.jet.Traversers.traverseStream;
  * one file is only read by one thread, so extra parallelism won't improve
  * performance if there aren't enough files to read.
  */
-public final class ReadFilesP<W, R> extends AbstractProcessor {
+public final class ReadFilesP<R, T> extends AbstractProcessor {
 
     private final Path directory;
     private final String glob;
     private final boolean sharedFileSystem;
-    private final DistributedFunction<Path, Stream<W>> readFileFn;
-    private final DistributedBiFunction<String, W, R> mapOutputFn;
+    private final DistributedFunction<? super Path, ? extends Stream<R>> readFileFn;
+    private final DistributedBiFunction<? super String, ? super R, ? extends T> mapOutputFn;
 
     private int processorIndex;
     private int parallelism;
     private DirectoryStream<Path> directoryStream;
-    private Traverser<R> outputTraverser;
-    private Stream<W> currentStream;
+    private Traverser<? extends T> outputTraverser;
+    private Stream<R> currentStream;
 
-    private ReadFilesP(@Nonnull String directory, @Nonnull String glob, boolean sharedFileSystem,
-                       @Nonnull DistributedFunction<Path, Stream<W>> readFileFn,
-                       @Nonnull DistributedBiFunction<String, W, R> mapOutputFn) {
+    private ReadFilesP(
+            @Nonnull String directory,
+            @Nonnull String glob, boolean sharedFileSystem,
+            @Nonnull DistributedFunction<? super Path, ? extends Stream<R>> readFileFn,
+            @Nonnull DistributedBiFunction<? super String, ? super R, ? extends T> mapOutputFn
+    ) {
         this.directory = Paths.get(directory);
         this.glob = glob;
         this.readFileFn = readFileFn;
         this.mapOutputFn = mapOutputFn;
         this.sharedFileSystem = sharedFileSystem;
+    }
+
+    @Override
+    public boolean isCooperative() {
+        return false;
     }
 
     @Override
@@ -95,7 +102,7 @@ public final class ReadFilesP<W, R> extends AbstractProcessor {
         return ((hashCode & Integer.MAX_VALUE) % parallelism) == processorIndex;
     }
 
-    private Traverser<R> processFile(Path file) {
+    private Traverser<? extends T> processFile(Path file) {
         if (getLogger().isFinestEnabled()) {
             getLogger().finest("Processing file " + file);
         }
@@ -111,7 +118,7 @@ public final class ReadFilesP<W, R> extends AbstractProcessor {
     }
 
     @Override
-    public void close(@Nullable Throwable error) throws IOException {
+    public void close() throws IOException {
         IOException ex = null;
         if (directoryStream != null) {
             try {
@@ -128,22 +135,18 @@ public final class ReadFilesP<W, R> extends AbstractProcessor {
         }
     }
 
-    @Override
-    public boolean isCooperative() {
-        return false;
-    }
-
     /**
      * Private API. Use {@link SourceProcessors#readFilesP} instead.
      */
-    public static <W, R> ProcessorMetaSupplier metaSupplier(
+    public static <W, T> ProcessorMetaSupplier metaSupplier(
             @Nonnull String directory,
             @Nonnull String glob,
             boolean sharedFileSystem,
-            @Nonnull DistributedFunction<Path, Stream<W>> readFileFn,
-            @Nonnull DistributedBiFunction<String, W, R> mapOutputFn
+            @Nonnull DistributedFunction<? super Path, ? extends Stream<W>> readFileFn,
+            @Nonnull DistributedBiFunction<? super String, ? super W, ? extends T> mapOutputFn
     ) {
-        return ProcessorMetaSupplier.of(() -> new ReadFilesP<>(directory, glob, sharedFileSystem, readFileFn, mapOutputFn),
+        return ProcessorMetaSupplier.of(() -> new ReadFilesP<>(
+                directory, glob, sharedFileSystem, readFileFn, mapOutputFn),
                 2);
     }
 }

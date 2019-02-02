@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.impl.execution;
 
+import com.hazelcast.jet.core.BroadcastKey;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import nl.jqno.equalsverifier.EqualsVerifier;
 import org.junit.Test;
@@ -26,7 +27,7 @@ public class EqualityTest {
 
     @Test
     public void testEqualsAndHashCode_whenBroadcastKeyReference() {
-        EqualsVerifier.forClass(BroadcastKeyReference.class)
+        EqualsVerifier.forClass(BroadcastKey.class)
                       .usingGetClass()
                       .verify();
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2018, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,18 +16,21 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.core.DistributedObject;
+import com.hazelcast.core.IMap;
 import com.hazelcast.internal.cluster.MemberInfo;
 import com.hazelcast.internal.cluster.impl.ClusterServiceImpl;
 import com.hazelcast.internal.cluster.impl.MembersView;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
-import com.hazelcast.jet.config.JetConfig;
+import com.hazelcast.jet.TestInClusterSupport;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.TestProcessors.ListSource;
 import com.hazelcast.jet.core.TestProcessors.MockP;
 import com.hazelcast.jet.core.TestProcessors.MockPMS;
 import com.hazelcast.jet.core.TestProcessors.MockPS;
-import com.hazelcast.jet.core.TestProcessors.StuckProcessor;
+import com.hazelcast.jet.core.TestProcessors.NoOutputSourceP;
+import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.impl.JetService;
 import com.hazelcast.jet.impl.JobResult;
 import com.hazelcast.jet.impl.execution.ExecutionContext;
@@ -51,15 +54,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.function.Function;
 
 import static com.hazelcast.jet.core.Edge.between;
+import static com.hazelcast.jet.core.JobStatus.COMPLETING;
 import static com.hazelcast.jet.core.TestUtil.assertExceptionInCauses;
 import static com.hazelcast.jet.core.TestUtil.executeAndPeel;
-import static com.hazelcast.jet.core.processor.Processors.nonCooperativeP;
 import static com.hazelcast.jet.core.processor.Processors.noopP;
-import static com.hazelcast.jet.impl.execution.SnapshotContext.NO_SNAPSHOT;
+import static com.hazelcast.jet.impl.JobExecutionRecord.NO_SNAPSHOT;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.peel;
 import static java.util.Collections.singletonList;
 import static org.junit.Assert.assertEquals;
@@ -70,47 +72,23 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 @RunWith(HazelcastSerialClassRunner.class)
-public class ExecutionLifecycleTest extends JetTestSupport {
-
-    private static final int NODE_COUNT = 2;
-    private static final int LOCAL_PARALLELISM = 4;
-    private static final int TOTAL_PARALLELISM = NODE_COUNT * LOCAL_PARALLELISM;
+public class ExecutionLifecycleTest extends TestInClusterSupport {
 
     @Rule
     public ExpectedException expectedException = ExpectedException.none();
 
-    private JetInstance instance;
-
     @Before
     public void setup() {
-        MockPMS.initCalled.set(false);
-        MockPMS.closeCalled.set(false);
-        MockPMS.receivedCloseError.set(null);
-
-        MockPS.closeCount.set(0);
-        MockPS.initCount.set(0);
-        MockPS.receivedCloseErrors.clear();
-
-        MockP.initCount.set(0);
-        MockP.closeCount.set(0);
-        MockP.receivedCloseErrors.clear();
-
-        StuckProcessor.proceedLatch = new CountDownLatch(1);
-        StuckProcessor.executionStarted = new CountDownLatch(NODE_COUNT * LOCAL_PARALLELISM);
-
-        JetConfig config = new JetConfig();
-        config.getInstanceConfig().setCooperativeThreadCount(LOCAL_PARALLELISM);
-        instance = createJetMember(config);
-        createJetMember(config);
+        TestProcessors.reset(MEMBER_COUNT * parallelism);
     }
 
     @Test
     public void when_jobCompletesSuccessfully_then_closeCalled() {
         // Given
-        DAG dag = new DAG().vertex(new Vertex("test", new MockPMS(() -> new MockPS(MockP::new, NODE_COUNT))));
+        DAG dag = new DAG().vertex(new Vertex("test", new MockPMS(() -> new MockPS(MockP::new, MEMBER_COUNT))));
 
         // When
-        Job job = instance.newJob(dag);
+        Job job = member.newJob(dag);
         job.join();
 
         // Then
@@ -121,11 +99,26 @@ public class ExecutionLifecycleTest extends JetTestSupport {
     }
 
     @Test
+    public void when_processorCompletesSuccessfully_then_closeCalledImmediately() {
+        DAG dag = new DAG();
+        Vertex v1 = dag.newVertex("v1", MockP::new);
+        Vertex v2 = dag.newVertex("v2", () -> new NoOutputSourceP());
+        dag.edge(between(v1, v2));
+
+        Job job = member.newJob(dag);
+        assertTrueEventually(this::assertPClosedWithoutError);
+        assertEquals(JobStatus.RUNNING, job.getStatus());
+        NoOutputSourceP.proceedLatch.countDown();
+        job.join();
+        assertJobSucceeded(job);
+    }
+
+    @Test
     public void when_pmsInitThrows_then_jobFails() {
         // Given
         RuntimeException e = new RuntimeException("mock error");
         DAG dag = new DAG().vertex(new Vertex("test",
-                new MockPMS(() -> new MockPS(MockP::new, NODE_COUNT)).setInitError(e)));
+                new MockPMS(() -> new MockPS(MockP::new, MEMBER_COUNT)).setInitError(e)));
 
         // When
         Job job = runJobExpectFailure(dag, e);
@@ -140,18 +133,18 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         // Given
         RuntimeException e = new RuntimeException("mock error");
         DAG dagFaulty = new DAG().vertex(new Vertex("faulty",
-                new MockPMS(() -> new MockPS(() -> new MockP().setCompleteError(e), NODE_COUNT))));
+                new MockPMS(() -> new MockPS(() -> new MockP().setCompleteError(e), MEMBER_COUNT))));
         DAG dagGood = new DAG();
-        dagGood.newVertex("good", () -> new StuckProcessor());
+        dagGood.newVertex("good", () -> new NoOutputSourceP());
 
         // When
-        Job jobGood = instance.newJob(dagGood);
-        StuckProcessor.executionStarted.await();
+        Job jobGood = member.newJob(dagGood);
+        NoOutputSourceP.executionStarted.await();
         runJobExpectFailure(dagFaulty, e);
 
         // Then
         assertTrueAllTheTime(() -> assertEquals(JobStatus.RUNNING, jobGood.getStatus()), 5);
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
         jobGood.join();
     }
 
@@ -160,7 +153,7 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         // Given
         RuntimeException e = new RuntimeException("mock error");
         DAG dag = new DAG().vertex(new Vertex("faulty",
-                new MockPMS(() -> new MockPS(MockP::new, NODE_COUNT)).setGetError(e)));
+                new MockPMS(() -> new MockPS(MockP::new, MEMBER_COUNT)).setGetError(e)));
 
         // When
         Job job = runJobExpectFailure(dag, e);
@@ -175,10 +168,10 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         // Given
         RuntimeException e = new RuntimeException("mock error");
         DAG dag = new DAG().vertex(new Vertex("test",
-                new MockPMS(() -> new MockPS(MockP::new, NODE_COUNT)).setCloseError(e)));
+                new MockPMS(() -> new MockPS(MockP::new, MEMBER_COUNT)).setCloseError(e)));
 
         // When
-        Job job = instance.newJob(dag);
+        Job job = member.newJob(dag);
         job.join();
 
         // Then
@@ -193,7 +186,7 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         // Given
         RuntimeException e = new RuntimeException("mock error");
         DAG dag = new DAG().vertex(new Vertex("test",
-                new MockPMS(() -> new MockPS(MockP::new, NODE_COUNT).setInitError(e))));
+                new MockPMS(() -> new MockPS(MockP::new, MEMBER_COUNT).setInitError(e))));
 
         // When
         Job job = runJobExpectFailure(dag, e);
@@ -209,7 +202,7 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         // Given
         RuntimeException e = new RuntimeException("mock error");
         DAG dag = new DAG().vertex(new Vertex("faulty",
-                new MockPMS(() -> new MockPS(MockP::new, NODE_COUNT).setGetError(e))));
+                new MockPMS(() -> new MockPS(MockP::new, MEMBER_COUNT).setGetError(e))));
 
         // When
         Job job = runJobExpectFailure(dag, e);
@@ -224,7 +217,7 @@ public class ExecutionLifecycleTest extends JetTestSupport {
     public void when_psGetOnOtherNodeThrows_then_jobFails() throws Throwable {
         // Given
         RuntimeException e = new RuntimeException("mock error");
-        final int localPort = instance.getCluster().getLocalMember().getAddress().getPort();
+        final int localPort = member.getCluster().getLocalMember().getAddress().getPort();
 
         DAG dag = new DAG().vertex(new Vertex("faulty",
                 ProcessorMetaSupplier.of(
@@ -239,7 +232,7 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         expectedException.expectMessage(e.getMessage());
 
         // When
-        executeAndPeel(instance.newJob(dag));
+        executeAndPeel(member.newJob(dag));
     }
 
     @Test
@@ -247,10 +240,10 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         // Given
         RuntimeException e = new RuntimeException("mock error");
         DAG dag = new DAG().vertex(new Vertex("faulty",
-                new MockPMS(() -> new MockPS(MockP::new, NODE_COUNT).setCloseError(e))));
+                new MockPMS(() -> new MockPS(MockP::new, MEMBER_COUNT).setCloseError(e))));
 
         // When
-        Job job = instance.newJob(dag);
+        Job job = member.newJob(dag);
         job.join();
 
         // Then
@@ -266,13 +259,13 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         DAG dag = new DAG();
         RuntimeException e = new RuntimeException("mock error");
         dag.newVertex("faulty",
-                new MockPMS(() -> new MockPS(() -> new MockP().setInitError(e), NODE_COUNT)));
+                new MockPMS(() -> new MockPS(() -> new MockP().setInitError(e), MEMBER_COUNT)));
 
         // When
         Job job = runJobExpectFailure(dag, e);
 
         // Then
-        assertPClosedWithError(e);
+        assertPClosedWithError();
         assertPsClosedWithError(e);
         assertPmsClosedWithError(e);
         assertJobFailed(job, e);
@@ -285,14 +278,14 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         RuntimeException e = new RuntimeException("mock error");
         Vertex source = dag.newVertex("source", ListSource.supplier(singletonList(1)));
         Vertex process = dag.newVertex("faulty",
-                new MockPMS(() -> new MockPS(() -> new MockP().setProcessError(e), NODE_COUNT)));
+                new MockPMS(() -> new MockPS(() -> new MockP().setProcessError(e), MEMBER_COUNT)));
         dag.edge(between(source, process));
 
         // When
         Job job = runJobExpectFailure(dag, e);
 
         // Then
-        assertPClosedWithError(e);
+        assertPClosedWithError();
         assertPsClosedWithError(e);
         assertPmsClosedWithError(e);
         assertJobFailed(job, e);
@@ -304,13 +297,13 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         DAG dag = new DAG();
         RuntimeException e = new RuntimeException("mock error");
         dag.newVertex("faulty",
-                new MockPMS(() -> new MockPS(() -> new MockP().setCompleteError(e), NODE_COUNT)));
+                new MockPMS(() -> new MockPS(() -> new MockP().setCompleteError(e), MEMBER_COUNT)));
 
         // When
         Job job = runJobExpectFailure(dag, e);
 
         // Then
-        assertPClosedWithError(e);
+        assertPClosedWithError();
         assertPsClosedWithError(e);
         assertPmsClosedWithError(e);
         assertJobFailed(job, e);
@@ -321,14 +314,14 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         // Given
         DAG dag = new DAG();
         RuntimeException e = new RuntimeException("mock error");
-        dag.newVertex("faulty", nonCooperativeP(
-                new MockPMS(() -> new MockPS(() -> new MockP().setCompleteError(e), NODE_COUNT))));
+        dag.newVertex("faulty", new MockPMS(() -> new MockPS(() ->
+                new MockP().nonCooperative().setCompleteError(e), MEMBER_COUNT)));
 
         // When
         Job job = runJobExpectFailure(dag, e);
 
         // Then
-        assertPClosedWithError(e);
+        assertPClosedWithError();
         assertPsClosedWithError(e);
         assertPmsClosedWithError(e);
         assertJobFailed(job, e);
@@ -340,10 +333,10 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         DAG dag = new DAG();
         RuntimeException e = new RuntimeException("mock error");
         dag.newVertex("faulty",
-                new MockPMS(() -> new MockPS(() -> new MockP().setCloseError(e), NODE_COUNT)));
+                new MockPMS(() -> new MockPS(() -> new MockP().setCloseError(e), MEMBER_COUNT)));
 
         // When
-        Job job = instance.newJob(dag);
+        Job job = member.newJob(dag);
         job.join();
 
         // Then
@@ -357,12 +350,12 @@ public class ExecutionLifecycleTest extends JetTestSupport {
     public void when_executionCancelled_then_jobCompletedWithCancellationException() throws Throwable {
         // Given
         DAG dag = new DAG().vertex(new Vertex("test",
-                new MockPMS(() -> new MockPS(StuckProcessor::new, NODE_COUNT))));
+                new MockPMS(() -> new MockPS(NoOutputSourceP::new, MEMBER_COUNT))));
 
         // When
-        Job job = instance.newJob(dag);
+        Job job = member.newJob(dag);
         try {
-            StuckProcessor.executionStarted.await();
+            NoOutputSourceP.executionStarted.await();
             job.cancel();
             job.join();
             fail("Job execution should fail");
@@ -380,18 +373,18 @@ public class ExecutionLifecycleTest extends JetTestSupport {
     public void when_executionCancelledBeforeStart_then_jobFutureIsCancelledOnExecute() {
         // Given
         DAG dag = new DAG().vertex(new Vertex("test",
-                new MockPS(StuckProcessor::new, NODE_COUNT)));
+                new MockPS(NoOutputSourceP::new, MEMBER_COUNT)));
 
-        NodeEngineImpl nodeEngineImpl = getNodeEngineImpl(instance.getHazelcastInstance());
+        NodeEngineImpl nodeEngineImpl = getNodeEngineImpl(member.getHazelcastInstance());
         Address localAddress = nodeEngineImpl.getThisAddress();
         ClusterServiceImpl clusterService = (ClusterServiceImpl) nodeEngineImpl.getClusterService();
         MembersView membersView = clusterService.getMembershipManager().getMembersView();
         int memberListVersion = membersView.getVersion();
 
-        JetService jetService = getJetService(instance);
+        JetService jetService = getJetService(member);
         final Map<MemberInfo, ExecutionPlan> executionPlans =
-                ExecutionPlanBuilder.createExecutionPlans(nodeEngineImpl, membersView, dag, new JobConfig(),
-                        NO_SNAPSHOT);
+                ExecutionPlanBuilder.createExecutionPlans(nodeEngineImpl, membersView, dag, 1, 1,
+                        new JobConfig(), NO_SNAPSHOT);
         ExecutionPlan executionPlan = executionPlans.get(membersView.getMember(localAddress));
         long jobId = 0;
         long executionId = 1;
@@ -402,7 +395,7 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         );
 
         ExecutionContext executionContext = jetService.getJobExecutionService().getExecutionContext(executionId);
-        executionContext.cancelExecution();
+        executionContext.terminateExecution(null);
 
         // When
         CompletableFuture<Void> future = executionContext.beginExecution();
@@ -416,29 +409,30 @@ public class ExecutionLifecycleTest extends JetTestSupport {
     public void when_jobCancelled_then_psCloseNotCalledBeforeTaskletsDone() {
         // Given
         DAG dag = new DAG().vertex(new Vertex("test",
-                new MockPS(() -> new StuckProcessor(10_000), NODE_COUNT)));
+                new MockPS(() -> new NoOutputSourceP(10_000), MEMBER_COUNT)));
 
         // When
-        Job job = instance.newJob(dag);
+        Job job = member.newJob(dag);
 
-        assertOpenEventually(StuckProcessor.executionStarted);
+        assertOpenEventually(NoOutputSourceP.executionStarted);
 
         // Then
         job.cancel();
 
-        assertTrueEventually(() -> assertEquals(JobStatus.COMPLETING, job.getStatus()), 3);
+
+        assertJobStatusEventually(job, COMPLETING, 3);
 
         assertTrueFiveSeconds(() -> {
-            assertEquals(JobStatus.COMPLETING, job.getStatus());
+            assertEquals(COMPLETING, job.getStatus());
             assertEquals("PS.close called before execution finished", 0, MockPS.closeCount.get());
         });
 
-        StuckProcessor.proceedLatch.countDown();
+        NoOutputSourceP.proceedLatch.countDown();
 
         expectedException.expect(CancellationException.class);
         job.join();
 
-        assertEquals("PS.close not called after execution finished", NODE_COUNT, MockPS.closeCount.get());
+        assertEquals("PS.close not called after execution finished", MEMBER_COUNT, MockPS.closeCount.get());
     }
 
     @Test
@@ -478,6 +472,21 @@ public class ExecutionLifecycleTest extends JetTestSupport {
         when_deserializationOnMasterFails_then_jobSubmissionFails(createJetClient());
     }
 
+    @Test
+    public void when_job_withNoSnapshots_completed_then_noSnapshotMapsLeft() {
+        JetInstance instance = createJetMember();
+        DAG dag = new DAG();
+        dag.newVertex("noop", Processors.noopP());
+        instance.newJob(dag).join();
+        Collection<DistributedObject> objects = instance.getHazelcastInstance().getDistributedObjects();
+        long snapshotMaps = objects.stream()
+                .filter(obj -> obj instanceof IMap)
+                .filter(obj -> obj.getName().contains("snapshots.data"))
+                .count();
+
+        assertEquals(0, snapshotMaps);
+    }
+
     private void when_deserializationOnMasterFails_then_jobSubmissionFails(JetInstance instance) throws Throwable {
         // Given
         DAG dag = new DAG();
@@ -499,7 +508,7 @@ public class ExecutionLifecycleTest extends JetTestSupport {
     private Job runJobExpectFailure(@Nonnull DAG dag, @Nonnull RuntimeException expectedException) {
         Job job = null;
         try {
-            job = instance.newJob(dag);
+            job = member.newJob(dag);
             job.join();
             fail("Job execution should have failed");
         } catch (Exception actual) {
@@ -522,52 +531,45 @@ public class ExecutionLifecycleTest extends JetTestSupport {
     }
 
     private void assertPsClosedWithoutError() {
-        assertEquals(NODE_COUNT, MockPS.initCount.get());
-        assertEquals(NODE_COUNT, MockPS.closeCount.get());
+        assertEquals(MEMBER_COUNT, MockPS.initCount.get());
+        assertEquals(MEMBER_COUNT, MockPS.closeCount.get());
         assertEquals(0, MockPS.receivedCloseErrors.size());
     }
 
     private void assertPsClosedWithError(Throwable e) {
-        assertEquals(NODE_COUNT, MockPS.initCount.get());
-        assertEquals(NODE_COUNT, MockPS.closeCount.get());
-        assertEquals(NODE_COUNT, MockPS.receivedCloseErrors.size());
+        assertEquals(MEMBER_COUNT, MockPS.initCount.get());
+        assertEquals(MEMBER_COUNT, MockPS.closeCount.get());
+        assertEquals(MEMBER_COUNT, MockPS.receivedCloseErrors.size());
 
-        for (int i = 0; i < NODE_COUNT; i++) {
+        for (int i = 0; i < MEMBER_COUNT; i++) {
             assertExceptionInCauses(e, MockPS.receivedCloseErrors.get(i));
         }
     }
 
     private void assertPClosedWithoutError() {
-        assertEquals(TOTAL_PARALLELISM, MockP.initCount.get());
-        assertEquals(TOTAL_PARALLELISM, MockP.closeCount.get());
-        assertEquals(0, MockP.receivedCloseErrors.size());
+        assertEquals(MEMBER_COUNT * parallelism, MockP.initCount.get());
+        assertEquals(MEMBER_COUNT * parallelism, MockP.closeCount.get());
     }
 
-    private void assertPClosedWithError(Throwable e) {
-        assertEquals(TOTAL_PARALLELISM, MockP.closeCount.get());
-        assertEquals(TOTAL_PARALLELISM, MockP.receivedCloseErrors.size());
-
-        for (int i = 0; i < NODE_COUNT; i++) {
-            assertExceptionInCauses(e, MockP.receivedCloseErrors.get(i));
-        }
+    private void assertPClosedWithError() {
+        assertEquals(MEMBER_COUNT * parallelism, MockP.closeCount.get());
     }
 
     private void assertJobSucceeded(Job job) {
         JobResult jobResult = getJobResult(job);
         assertTrue(jobResult.isSuccessful());
-        assertNull(jobResult.getFailure());
+        assertNull(jobResult.getFailureText());
     }
 
     private void assertJobFailed(Job job, Throwable e) {
         JobResult jobResult = getJobResult(job);
         assertFalse("jobResult.isSuccessful", jobResult.isSuccessful());
-        assertExceptionInCauses(e, jobResult.getFailure());
-        JobStatus expectedStatus = e instanceof CancellationException ? JobStatus.COMPLETED : JobStatus.FAILED;
-        assertEquals("jobStatus", expectedStatus, job.getStatus());
+        assertContains(jobResult.getFailureText(), e.toString());
+        assertEquals("jobStatus", JobStatus.FAILED, job.getStatus());
     }
 
     private JobResult getJobResult(Job job) {
-        JetService jetService = getJetService(instance);
+        JetService jetService = getJetService(member);
         assertNull(jetService.getJobRepository().getJobRecord(job.getId()));
         JobResult jobResult = jetService.getJobRepository().getJobResult(job.getId());
         assertNotNull(jobResult);
