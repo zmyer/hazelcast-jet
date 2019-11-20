@@ -17,17 +17,30 @@
 package com.hazelcast.jet.impl;
 
 import com.hazelcast.cluster.ClusterState;
-import com.hazelcast.instance.DefaultNodeExtension;
-import com.hazelcast.instance.Node;
-import com.hazelcast.nio.Packet;
+import com.hazelcast.instance.impl.DefaultNodeExtension;
+import com.hazelcast.instance.impl.Node;
+import com.hazelcast.internal.nio.Packet;
+import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.spi.impl.NodeEngineImpl.JetPacketConsumer;
+
+import java.util.Map;
 
 public class JetNodeExtension extends DefaultNodeExtension implements JetPacketConsumer {
     private final NodeExtensionCommon extCommon;
 
     public JetNodeExtension(Node node) {
         super(node);
-        extCommon = new NodeExtensionCommon(node);
+        extCommon = new NodeExtensionCommon(node, new JetService(node));
+    }
+
+    @Override
+    public void beforeStart() {
+        JetConfig config = JetService.findJetServiceConfig(node.getConfig());
+        if (config.getInstanceConfig().isLosslessRestartEnabled()) {
+            throw new UnsupportedOperationException("Lossless Restart is not available in the open-source version of " +
+                    "Hazelcast Jet");
+        }
+        super.beforeStart();
     }
 
     @Override
@@ -46,6 +59,11 @@ public class JetNodeExtension extends DefaultNodeExtension implements JetPacketC
     public void onClusterStateChange(ClusterState newState, boolean isTransient) {
         super.onClusterStateChange(newState, isTransient);
         extCommon.onClusterStateChange(newState);
+    }
+
+    @Override
+    public Map<String, Object> createExtensionServices() {
+        return extCommon.createExtensionServices();
     }
 
     @Override

@@ -17,6 +17,7 @@
 package com.hazelcast.jet.impl.deployment;
 
 import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.cluster.Address;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
@@ -29,7 +30,6 @@ import com.hazelcast.jet.pipeline.JournalInitialPosition;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.jet.pipeline.Sources;
-import com.hazelcast.nio.Address;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
 import org.junit.Test;
@@ -51,20 +51,20 @@ public class NonSmartClientTest extends JetTestSupport {
     @Before
     public void setUp() {
         JetConfig jetConfig = new JetConfig();
-        jetConfig.getHazelcastConfig().getMapEventJournalConfig("journal*").setEnabled(true);
+        jetConfig.getHazelcastConfig().getMapConfig("journal*").getEventJournalConfig().setEnabled(true);
         instance = createJetMember(jetConfig);
         JetInstance jetInstance = createJetMember(jetConfig);
         Address address = jetInstance.getCluster().getLocalMember().getAddress();
         ClientConfig clientConfig = new ClientConfig();
         clientConfig.getNetworkConfig().setSmartRouting(false);
-        clientConfig.getGroupConfig().setName(jetConfig.getHazelcastConfig().getGroupConfig().getName());
+        clientConfig.setClusterName(jetConfig.getHazelcastConfig().getClusterName());
         clientConfig.getNetworkConfig().getAddresses().clear();
         clientConfig.getNetworkConfig().getAddresses().add(address.getHost() + ":" + address.getPort());
         client = createJetClient(clientConfig);
     }
 
     @Test
-    public void when_jobSubmitted_Then_executedSuccessfully() {
+    public void when_jobSubmitted_then_executedSuccessfully() {
         //Given
         String sourceName = "source";
         String sinkName = "sink";
@@ -72,8 +72,8 @@ public class NonSmartClientTest extends JetTestSupport {
 
         //When
         Pipeline p = Pipeline.create();
-        p.drawFrom(Sources.list(sourceName))
-         .drainTo(Sinks.list(sinkName));
+        p.readFrom(Sources.list(sourceName))
+         .writeTo(Sinks.list(sinkName));
         client.newJob(p).join();
 
         //Then
@@ -81,7 +81,7 @@ public class NonSmartClientTest extends JetTestSupport {
     }
 
     @Test
-    public void when_jobSubmitted_Then_jobCanBeFetchedByIdOrName() {
+    public void when_jobSubmitted_then_jobCanBeFetchedByIdOrName() {
         //Given
         String jobName = randomName();
 
@@ -107,7 +107,7 @@ public class NonSmartClientTest extends JetTestSupport {
 
 
     @Test
-    public void when_jobSuspended_Then_jobStatusIsSuspended() {
+    public void when_jobSuspended_then_jobStatusIsSuspended() {
         //Given
         Job job = startJobAndVerifyItIsRunning();
 
@@ -119,7 +119,7 @@ public class NonSmartClientTest extends JetTestSupport {
     }
 
     @Test
-    public void when_jobResumed_Then_jobStatusIsRunning() {
+    public void when_jobResumed_then_jobStatusIsRunning() {
         //Given
         Job job = startJobAndVerifyItIsRunning();
         job.suspend();
@@ -134,7 +134,7 @@ public class NonSmartClientTest extends JetTestSupport {
     }
 
     @Test
-    public void when_jobCancelled_Then_jobStatusIsCompleted() {
+    public void when_jobCancelled_then_jobStatusIsCompleted() {
         //Given
         Job job = startJobAndVerifyItIsRunning();
 
@@ -146,7 +146,7 @@ public class NonSmartClientTest extends JetTestSupport {
     }
 
     @Test
-    public void when_jobSummaryListIsAsked_Then_jobSummaryListReturned() {
+    public void when_jobSummaryListIsAsked_then_jobSummaryListReturned() {
         //Given
         startJobAndVerifyItIsRunning();
 
@@ -168,9 +168,9 @@ public class NonSmartClientTest extends JetTestSupport {
 
     private Pipeline streamingPipeline() {
         Pipeline p = Pipeline.create();
-        p.drawFrom(Sources.mapJournal("journal" + randomMapName(), JournalInitialPosition.START_FROM_OLDEST))
+        p.readFrom(Sources.mapJournal("journal" + randomMapName(), JournalInitialPosition.START_FROM_OLDEST))
          .withoutTimestamps()
-         .drainTo(Sinks.map(randomMapName()));
+         .writeTo(Sinks.map(randomMapName()));
         return p;
     }
 }

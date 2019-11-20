@@ -16,9 +16,13 @@
 
 package com.hazelcast.jet.pipeline;
 
-import com.hazelcast.core.IList;
-import com.hazelcast.core.IMap;
-import com.hazelcast.map.journal.EventJournalMapEvent;
+import com.hazelcast.collection.IList;
+import com.hazelcast.jet.core.DAG;
+import com.hazelcast.jet.core.ProcessorMetaSupplier;
+import com.hazelcast.jet.core.ProcessorSupplier;
+import com.hazelcast.jet.core.Vertex;
+import com.hazelcast.map.IMap;
+import com.hazelcast.map.EventJournalMapEvent;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -28,7 +32,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Map.Entry;
 
-import static com.hazelcast.jet.function.DistributedPredicate.alwaysTrue;
+import static com.hazelcast.function.PredicateEx.alwaysTrue;
+import static com.hazelcast.jet.core.processor.Processors.noopP;
 import static com.hazelcast.jet.pipeline.JournalInitialPosition.START_FROM_OLDEST;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
@@ -39,14 +44,15 @@ public class StreamSourceStageTest extends StreamSourceStageTestBase {
 
     @BeforeClass
     public static void beforeClass1() {
-        IMap<Integer, Integer> sourceMap = instances[0].getMap(JOURNALED_MAP_NAME);
+        IMap<Integer, Integer> sourceMap = instance.getMap(JOURNALED_MAP_NAME);
         sourceMap.put(1, 1);
         sourceMap.put(2, 2);
     }
 
     private static StreamSource<Integer> createSourceJournal() {
-        return Sources.<Integer, Integer, Integer>mapJournal(JOURNALED_MAP_NAME, alwaysTrue(),
-                EventJournalMapEvent::getKey, START_FROM_OLDEST);
+        return Sources.<Integer, Integer, Integer>mapJournal(
+                JOURNALED_MAP_NAME, START_FROM_OLDEST, EventJournalMapEvent::getKey, alwaysTrue()
+        );
     }
 
     private static StreamSource<Integer> createTimestampedSourceBuilder() {
@@ -122,24 +128,87 @@ public class StreamSourceStageTest extends StreamSourceStageTestBase {
 
     @Test
     public void test_withTimestampsButTimestampsNotUsed() {
-        IList sinkList = instances[0].getList("sinkList");
+        IList sinkList = instance.getList("sinkList");
 
         Pipeline p = Pipeline.create();
-        p.drawFrom(createSourceJournal())
+        p.readFrom(createSourceJournal())
          .withIngestionTimestamps()
-         .drainTo(Sinks.list(sinkList));
+         .writeTo(Sinks.list(sinkList));
 
-        instances[0].newJob(p);
+        instance.newJob(p);
         assertTrueEventually(() -> assertEquals(Arrays.asList(1, 2), new ArrayList<>(sinkList)), 5);
     }
 
     @Test
     public void when_withTimestampsAndAddTimestamps_then_fail() {
         Pipeline p = Pipeline.create();
-        StreamStage<Entry<Object, Object>> stage = p.drawFrom(Sources.mapJournal("foo", START_FROM_OLDEST))
+        StreamStage<Entry<Object, Object>> stage = p.readFrom(Sources.mapJournal("foo", START_FROM_OLDEST))
                                                   .withIngestionTimestamps();
 
         expectedException.expectMessage("This stage already has timestamps assigned to it");
         stage.addTimestamps(o -> 0L, 0);
+    }
+
+    @Test
+    public void when_sourceHasPreferredLocalParallelism_then_lpMatchSource() {
+        // Given
+        int lp = 11;
+
+        // When
+        Pipeline p = Pipeline.create();
+        p.readFrom(Sources.streamFromProcessor("src",
+                ProcessorMetaSupplier.of(lp, ProcessorSupplier.of(noopP()))))
+         .withTimestamps(o -> 0L, 0)
+         .writeTo(Sinks.noop());
+        DAG dag = p.toDag();
+
+        // Then
+        Vertex srcVertex = dag.getVertex("src");
+        Vertex tsVertex = dag.getVertex("src-add-timestamps");
+        assertEquals(lp, srcVertex.determineLocalParallelism(-1));
+        assertEquals(lp,  tsVertex.determineLocalParallelism(-1));
+}
+
+    @Test
+    public void when_sourceHasExplicitLocalParallelism_then_lpMatchSource() {
+        // Given
+        int lp = 11;
+
+        // When
+        Pipeline p = Pipeline.create();
+        p.readFrom(Sources.streamFromProcessor("src",
+                ProcessorMetaSupplier.of(ProcessorSupplier.of(noopP()))))
+         .withTimestamps(o -> 0L, 0)
+         .setLocalParallelism(lp)
+         .writeTo(Sinks.noop());
+        DAG dag = p.toDag();
+
+        // Then
+        Vertex srcVertex = dag.getVertex("src");
+        Vertex tsVertex = dag.getVertex("src-add-timestamps");
+        assertEquals(lp, srcVertex.getLocalParallelism());
+        assertEquals(lp, tsVertex.getLocalParallelism());
+    }
+
+
+    @Test
+    public void when_sourceHasNoPreferredLocalParallelism_then_lpMatchSource() {
+        // Given
+        StreamSource<Object> source = Sources.streamFromProcessor("src",
+                ProcessorMetaSupplier.of(ProcessorSupplier.of(noopP())));
+
+        // When
+        Pipeline p = Pipeline.create();
+        p.readFrom(source)
+         .withTimestamps(o -> 0L, 0)
+         .writeTo(Sinks.noop());
+        DAG dag = p.toDag();
+
+        // Then
+        Vertex srcVertex = dag.getVertex("src");
+        Vertex tsVertex = dag.getVertex("src-add-timestamps");
+        int lp1 = srcVertex.determineLocalParallelism(-1);
+        int lp2 = tsVertex.determineLocalParallelism(-1);
+        assertEquals(lp1, lp2);
     }
 }

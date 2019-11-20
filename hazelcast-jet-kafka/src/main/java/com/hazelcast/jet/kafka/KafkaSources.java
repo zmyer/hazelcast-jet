@@ -16,9 +16,9 @@
 
 package com.hazelcast.jet.kafka;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.Processor;
-import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.pipeline.Stage;
 import com.hazelcast.jet.pipeline.StreamSource;
 import com.hazelcast.jet.pipeline.StreamSourceStage;
@@ -29,13 +29,15 @@ import javax.annotation.Nonnull;
 import java.util.Map.Entry;
 import java.util.Properties;
 
+import static com.hazelcast.internal.util.Preconditions.checkPositive;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.kafka.KafkaProcessors.streamKafkaP;
 import static com.hazelcast.jet.pipeline.Sources.streamFromProcessorWithWatermarks;
-import static com.hazelcast.util.Preconditions.checkPositive;
 
 /**
  * Contains factory methods for Apache Kafka sources.
+ *
+ * @since 3.0
  */
 public final class KafkaSources {
 
@@ -43,7 +45,7 @@ public final class KafkaSources {
     }
 
     /**
-     * Convenience for {@link #kafka(Properties, DistributedFunction, String...)}
+     * Convenience for {@link #kafka(Properties, FunctionEx, String...)}
      * wrapping the output in {@code Map.Entry}.
      */
     @Nonnull
@@ -72,20 +74,30 @@ public final class KafkaSources {
      * If you start a new job from an exported state, you can change the source
      * parameters as needed:<ul>
      *     <li>if you add a topic, it will be consumed from the default position
-     *     <li>if you remove a topic, restored offsets will be ignored (there
-     *     will be a warning logged)
+     *     <li>if you remove a topic, restored offsets for that topic will be
+     *     ignored (there will be a warning logged)
      *     <li>if you connect to another cluster, the offsets will be used based
-     *     on the equality of the topic name. To avoid this, give different
-     *     {@linkplain Stage#setName name} to this source
+     *     on the equality of the topic name. If you want to start from default
+     *     position, give different {@linkplain Stage#setName name} to this
+     *     source
      *     <li>if the partition count is lower after a restart, the extra
      *     offsets will be ignored
      * </ul>
      * <p>
-     * If and only if snapshotting is disabled, the source commits the offsets
-     * to Kafka using {@link KafkaConsumer#commitSync()}. Note however that
-     * offsets can be committed before or after the event is fully processed.
-     * You can configure {@code group.id} in this case.
-     * <p>
+     * The source can work in two modes:
+     * <ol>
+     *     <li>if {@linkplain JobConfig#setProcessingGuarantee processing
+     *     guarantee} is enabled, offsets are stored to the snapshot and after a
+     *     restart or failure, the reading continues from the saved offset. You
+     *     can achieve exactly-once or at-least-once behavior.
+     *
+     *     <li>if processing guarantee is disabled, the source commits the
+     *     offsets to Kafka using {@link KafkaConsumer#commitSync()}. But the
+     *     offsets are committed before or after the event is fully processed.
+     *     Therefore some events can be processed twice or not at all. You can
+     *     configure {@code group.id} in this case.
+     * </ol>
+     *
      * If you add Kafka partitions at run-time, consumption from them will
      * start after a delay, based on the {@code metadata.max.age.ms} Kafka
      * property. Note, however, that events from them can be dropped as late if
@@ -116,11 +128,11 @@ public final class KafkaSources {
     @Nonnull
     public static <K, V, T> StreamSource<T> kafka(
             @Nonnull Properties properties,
-            @Nonnull DistributedFunction<ConsumerRecord<K, V>, T> projectionFn,
+            @Nonnull FunctionEx<ConsumerRecord<K, V>, T> projectionFn,
             @Nonnull String ... topics
     ) {
         checkPositive(topics.length, "At least one topic required");
-        return streamFromProcessorWithWatermarks("streamKafka",
-                w -> streamKafkaP(properties, projectionFn, w, topics), true);
+        return streamFromProcessorWithWatermarks("streamKafka(" + String.join(",", topics) + ")",
+                true, w -> streamKafkaP(properties, projectionFn, w, topics));
     }
 }

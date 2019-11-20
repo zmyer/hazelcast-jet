@@ -54,7 +54,7 @@ public class SnapshotValidationRecord implements IdentifiedDataSerializable {
         return snapshotId;
     }
 
-    long numChunks() {
+    public long numChunks() {
         return numChunks;
     }
 
@@ -84,7 +84,7 @@ public class SnapshotValidationRecord implements IdentifiedDataSerializable {
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return JetInitDataSerializerHook.SNAPSHOT_VALIDATION_RECORD;
     }
 

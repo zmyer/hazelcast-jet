@@ -16,7 +16,10 @@
 
 package com.hazelcast.jet.impl.execution;
 
-import com.hazelcast.test.HazelcastParallelClassRunner;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.instance.BuildInfoProvider;
+import com.hazelcast.logging.impl.LoggingServiceImpl;
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -31,7 +34,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-@RunWith(HazelcastParallelClassRunner.class)
+@RunWith(HazelcastSerialClassRunner.class)
 public class ReceiverTaskletSendLimitTest {
 
     private static final long START = SECONDS.toNanos(10);
@@ -39,11 +42,12 @@ public class ReceiverTaskletSendLimitTest {
     private static final int RWIN_MULTIPLIER = 3;
     private static final int FLOW_CONTROL_PERIOD_MS = 100;
 
-    ReceiverTasklet tasklet;
+    private ReceiverTasklet tasklet;
 
     @Before
     public void before() {
-        tasklet = new ReceiverTasklet(null, RWIN_MULTIPLIER, FLOW_CONTROL_PERIOD_MS);
+        tasklet = new ReceiverTasklet(null, RWIN_MULTIPLIER, FLOW_CONTROL_PERIOD_MS,
+                new LoggingServiceImpl(null, null, BuildInfoProvider.getBuildInfo()), new Address(), 0, "");
     }
 
     @Test

@@ -16,17 +16,17 @@
 
 package com.hazelcast.jet.impl.processor;
 
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
+import com.hazelcast.function.ToLongFunctionEx;
 import com.hazelcast.jet.accumulator.LongAccumulator;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.TimestampKind;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.Processors;
-import com.hazelcast.jet.datamodel.TimestampedEntry;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
-import com.hazelcast.jet.function.DistributedToLongFunction;
+import com.hazelcast.jet.datamodel.KeyedWindowResult;
 import com.hazelcast.test.HazelcastParallelClassRunner;
-import com.hazelcast.test.annotation.ParallelTest;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -48,7 +48,7 @@ import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static org.junit.Assert.assertTrue;
 
-@Category(ParallelTest.class)
+@Category(ParallelJVMTest.class)
 @RunWith(HazelcastParallelClassRunner.class)
 public class SlidingWindowP_stage1Test {
 
@@ -58,13 +58,12 @@ public class SlidingWindowP_stage1Test {
     public ExpectedException exception = ExpectedException.none();
 
     private List<SlidingWindowP> suppliedProcessors = new ArrayList<>();
-    private DistributedSupplier<Processor> supplier;
+    private SupplierEx<Processor> supplier;
 
     @Before
-    @SuppressWarnings("unchecked")
     public void before() {
-        DistributedFunction<Entry<Long, Long>, Object> keyFn = x -> KEY;
-        DistributedToLongFunction<Entry<Long, Long>> timestampFn = Entry::getKey;
+        FunctionEx<Entry<Long, Long>, Object> keyFn = x -> KEY;
+        ToLongFunctionEx<Entry<Long, Long>> timestampFn = Entry::getKey;
         supplier = () -> {
             SlidingWindowP res = (SlidingWindowP) Processors.accumulateByFrameP(
                     singletonList(keyFn),
@@ -194,7 +193,7 @@ public class SlidingWindowP_stage1Test {
                 .expectOutput(singletonList(wm(16)));
     }
 
-    private static TimestampedEntry<Long, LongAccumulator> frame(long timestamp, long value) {
-        return new TimestampedEntry<>(timestamp, KEY, new LongAccumulator(value));
+    private static <V> KeyedWindowResult<Long, LongAccumulator> frame(long ts, long value) {
+        return new KeyedWindowResult<>(ts - 4, ts, KEY, new LongAccumulator(value));
     }
 }

@@ -16,9 +16,9 @@
 
 package com.hazelcast.jet.pipeline;
 
+import com.hazelcast.function.BiFunctionEx;
 import com.hazelcast.jet.datamodel.ItemsByTag;
 import com.hazelcast.jet.datamodel.Tag;
-import com.hazelcast.jet.function.DistributedBiFunction;
 import com.hazelcast.jet.impl.pipeline.ComputeStageImplBase;
 import com.hazelcast.jet.impl.pipeline.FunctionAdapter;
 import com.hazelcast.jet.impl.pipeline.PipelineImpl;
@@ -52,6 +52,8 @@ import static java.util.stream.Stream.concat;
  * type safety.
  *
  * @param <T0> the type of the items in the primary stage
+ *
+ * @since 3.0
  */
 public abstract class GeneralHashJoinBuilder<T0> {
     private final Transform transform0;
@@ -85,7 +87,7 @@ public abstract class GeneralHashJoinBuilder<T0> {
     }
 
     @SuppressWarnings("unchecked")
-    <R> GeneralStage<R> build0(DistributedBiFunction<T0, ItemsByTag, R> mapToOutputFn) {
+    <R> GeneralStage<R> build0(BiFunctionEx<T0, ItemsByTag, R> mapToOutputFn) {
         checkSerializable(mapToOutputFn, "mapToOutputFn");
         List<Entry<Tag<?>, TransformAndClause>> orderedClauses = clauses.entrySet().stream()
                                                                         .sorted(comparing(Entry::getKey))
@@ -121,7 +123,6 @@ public abstract class GeneralHashJoinBuilder<T0> {
         private final Transform transform;
         private final JoinClause<K, E0, T1, T1_OUT> joinClause;
 
-        @SuppressWarnings("unchecked")
         TransformAndClause(GeneralStage<T1> stage, JoinClause<K, E0, T1, T1_OUT> joinClause) {
             this.transform = transformOf(stage);
             this.joinClause = joinClause;

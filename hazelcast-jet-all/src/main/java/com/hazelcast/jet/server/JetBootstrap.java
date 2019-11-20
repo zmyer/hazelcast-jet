@@ -16,14 +16,12 @@
 
 package com.hazelcast.jet.server;
 
-import com.hazelcast.client.config.ClientConfig;
-import com.hazelcast.core.Cluster;
+import com.hazelcast.cluster.Cluster;
+import com.hazelcast.collection.IList;
 import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.core.ReplicatedMap;
-import com.hazelcast.jet.IListJet;
-import com.hazelcast.jet.IMapJet;
 import com.hazelcast.jet.Jet;
 import com.hazelcast.jet.JetCacheManager;
+import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
@@ -32,6 +30,8 @@ import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.impl.AbstractJetInstance;
 import com.hazelcast.jet.impl.util.ConcurrentMemoizingSupplier;
 import com.hazelcast.logging.ILogger;
+import com.hazelcast.map.IMap;
+import com.hazelcast.replicatedmap.ReplicatedMap;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -42,6 +42,7 @@ import java.net.URLClassLoader;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.List;
+import java.util.function.Supplier;
 import java.util.jar.JarFile;
 
 /**
@@ -64,7 +65,7 @@ import java.util.jar.JarFile;
  * Main-Class} in {@code MANIFEST.MF}.
  * </li><li>
  * Run your JAR, but instead of {@code java -jar jetjob.jar} use {@code
- * jet.sh submit jetjob.jar}. The script is found in the Jet distribution
+ * jet submit jetjob.jar}. The script is found in the Jet distribution
  * zipfile, in the {@code bin} directory. On Windows use {@code
  * jet.bat}.
  * </li><li>
@@ -89,34 +90,30 @@ import java.util.jar.JarFile;
  * <p>
  * After building the JAR, submit the job:
  * <pre>
- * $ jet.sh submit jetjob.jar
+ * $ jet submit jetjob.jar
  * </pre>
+ *
+ * @since 3.0
  */
 public final class JetBootstrap {
 
     // these params must be set before a job is submitted
-    private static ClientConfig config;
     private static String jarName;
     private static String snapshotName;
     private static String jobName;
+    private static ConcurrentMemoizingSupplier<JetInstance> supplier;
 
-    private static final ConcurrentMemoizingSupplier<JetBootstrap> SUPPLIER =
-            new ConcurrentMemoizingSupplier<>(() -> new JetBootstrap(Jet.newJetClient(config)));
-
-    private final JetInstance instance;
-
-    private JetBootstrap(JetInstance instance) {
-        this.instance = new InstanceProxy((AbstractJetInstance) instance);
+    private JetBootstrap() {
     }
 
-    static void executeJar(
-            @Nonnull ClientConfig clientConfig, @Nonnull String jar, @Nullable String snapshotName,
-            @Nullable String jobName, @Nonnull List<String> args
+    static synchronized void executeJar(@Nonnull Supplier<JetInstance> supplier,
+                           @Nonnull String jar, @Nullable String snapshotName,
+                           @Nullable String jobName, @Nonnull List<String> args
     ) throws Exception {
-        JetBootstrap.config = clientConfig;
         JetBootstrap.jarName = jar;
         JetBootstrap.snapshotName = snapshotName;
         JetBootstrap.jobName = jobName;
+        JetBootstrap.supplier = new ConcurrentMemoizingSupplier<>(() -> new InstanceProxy(supplier.get()));
 
         try (JarFile jarFile = new JarFile(jar)) {
             if (jarFile.getManifest() == null) {
@@ -144,9 +141,9 @@ public final class JetBootstrap {
             // upcast args to Object so it's passed as a single array-typed argument
             main.invoke(null, (Object) jobArgs);
         } finally {
-            JetBootstrap remembered = SUPPLIER.remembered();
+            JetInstance remembered = JetBootstrap.supplier.remembered();
             if (remembered != null) {
-                remembered.instance.shutdown();
+                remembered.shutdown();
             }
         }
     }
@@ -161,16 +158,21 @@ public final class JetBootstrap {
      * automatically shut down once the {@code main()} method of the JAR returns.
      */
     public static JetInstance getInstance() {
-        return SUPPLIER.get().instance;
+        if (supplier == null) {
+            throw new JetException(
+                    "JetBootstrap.getInstance() should be used in conjunction with the jet submit command"
+            );
+        }
+        return supplier.get();
     }
 
     private static class InstanceProxy extends AbstractJetInstance {
 
         private final AbstractJetInstance instance;
 
-        InstanceProxy(AbstractJetInstance instance) {
+        InstanceProxy(JetInstance instance) {
             super(instance.getHazelcastInstance());
-            this.instance = instance;
+            this.instance = (AbstractJetInstance) instance;
         }
 
         @Nonnull @Override
@@ -194,11 +196,6 @@ public final class JetBootstrap {
         }
 
         @Nonnull @Override
-        public Job newJob(@Nonnull DAG dag) {
-            return newJob(dag, new JobConfig());
-        }
-
-        @Nonnull @Override
         public Job newJob(@Nonnull DAG dag, @Nonnull JobConfig config) {
             return instance.newJob(dag, updateJobConfig(config));
         }
@@ -212,8 +209,12 @@ public final class JetBootstrap {
             if (jarName != null) {
                 config.addJar(jarName);
             }
-            config.setInitialSnapshotName(snapshotName);
-            config.setName(jobName);
+            if (snapshotName != null) {
+                config.setInitialSnapshotName(snapshotName);
+            }
+            if (jobName != null) {
+                config.setName(jobName);
+            }
             return config;
         }
 
@@ -233,7 +234,7 @@ public final class JetBootstrap {
         }
 
         @Nonnull @Override
-        public <K, V> IMapJet<K, V> getMap(@Nonnull String name) {
+        public <K, V> IMap<K, V> getMap(@Nonnull String name) {
             return instance.getMap(name);
         }
 
@@ -248,7 +249,7 @@ public final class JetBootstrap {
         }
 
         @Nonnull @Override
-        public <E> IListJet<E> getList(@Nonnull String name) {
+        public <E> IList<E> getList(@Nonnull String name) {
             return instance.getList(name);
         }
 

@@ -16,28 +16,35 @@
 
 package com.hazelcast.jet.impl;
 
-import com.hazelcast.core.EntryView;
+import com.hazelcast.core.DistributedObject;
 import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.core.IMap;
+import com.hazelcast.flakeidgen.FlakeIdGenerator;
+import com.hazelcast.internal.nio.IOUtil;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.config.ResourceConfig;
+import com.hazelcast.jet.core.JetProperties;
 import com.hazelcast.jet.core.JobNotFoundException;
+import com.hazelcast.jet.core.metrics.JobMetrics;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
+import com.hazelcast.jet.impl.metrics.RawJobMetrics;
+import com.hazelcast.jet.impl.util.ImdgUtil;
 import com.hazelcast.jet.impl.util.Util;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.map.EntryBackupProcessor;
 import com.hazelcast.map.EntryProcessor;
-import com.hazelcast.nio.IOUtil;
+import com.hazelcast.map.IMap;
+import com.hazelcast.map.impl.MapService;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 import com.hazelcast.query.Predicate;
+import com.hazelcast.spi.impl.NodeEngine;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -50,14 +57,16 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.jar.JarEntry;
 import java.util.jar.JarInputStream;
+import java.util.stream.Collectors;
 import java.util.zip.DeflaterOutputStream;
 
+import static com.hazelcast.jet.Util.idFromString;
 import static com.hazelcast.jet.Util.idToString;
 import static com.hazelcast.jet.impl.util.LoggingUtil.logFine;
-import static java.util.Collections.newSetFromMap;
 import static java.util.Comparator.comparing;
 import static java.util.concurrent.TimeUnit.HOURS;
 import static java.util.stream.Collectors.toList;
@@ -87,9 +96,9 @@ public class JobRepository {
     public static final String RESOURCES_MAP_NAME_PREFIX = INTERNAL_JET_OBJECTS_PREFIX + "resources.";
 
     /**
-     * Name of internal IMap which is used for unique id generation.
+     * Name of internal flake ID generator which is used for unique id generation.
      */
-    public static final String RANDOM_IDS_MAP_NAME = INTERNAL_JET_OBJECTS_PREFIX + "ids";
+    public static final String RANDOM_ID_GENERATOR_NAME = INTERNAL_JET_OBJECTS_PREFIX + "ids";
 
     /**
      * Name of internal IMap which stores {@link JobRecord}s.
@@ -107,6 +116,11 @@ public class JobRepository {
     public static final String JOB_RESULTS_MAP_NAME = INTERNAL_JET_OBJECTS_PREFIX + "results";
 
     /**
+     * Name of internal IMap which stores {@link JobMetrics}s.
+     */
+    public static final String JOB_METRICS_MAP_NAME = INTERNAL_JET_OBJECTS_PREFIX + "results.metrics";
+
+    /**
      * Prefix for internal IMaps which store snapshot data. Snapshot data for
      * one snapshot is stored in either of the following two maps:
      * <ul>
@@ -117,40 +131,36 @@ public class JobRepository {
      */
     public static final String SNAPSHOT_DATA_MAP_PREFIX = INTERNAL_JET_OBJECTS_PREFIX + "snapshot.";
 
-    private static final String RESOURCE_MARKER = "__jet.resourceMarker";
+    /**
+     * Only do the cleanup if the number of JobResults exceeds the maximum
+     * number by at least 5% (1/20 = 0.05 = 5%).
+     */
+    private static final int MAX_NO_RESULTS_OVERHEAD = 20;
     private static final long DEFAULT_RESOURCES_EXPIRATION_MILLIS = HOURS.toMillis(2);
+    private static final int JOB_ID_STRING_LENGTH = idToString(0L).length();
+
 
     private final HazelcastInstance instance;
     private final ILogger logger;
 
-    private final IMap<Long, Long> randomIds;
     private final IMap<Long, JobRecord> jobRecords;
     private final IMap<Long, JobExecutionRecord> jobExecutionRecords;
     private final IMap<Long, JobResult> jobResults;
+    private final IMap<Long, List<RawJobMetrics>> jobMetrics;
     private final IMap<String, SnapshotValidationRecord> exportedSnapshotDetailsCache;
-    private long resourcesExpirationMillis = DEFAULT_RESOURCES_EXPIRATION_MILLIS;
+    private final FlakeIdGenerator idGenerator;
 
-    /**
-     * Because the member can fail at any moment we try to delete job data regularly
-     * for completed jobs. However, this creates overhead:
-     * <pre>{@code
-     *     IMap map = instance.getMap("map");
-     *     map.destroy();
-     * }</pre>
-     *
-     * To avoid it, we store the deleted jobIds in this set. If it's found there, we don't
-     * retry to delete it.
-     */
-    private final Set<Long> deletedJobs = newSetFromMap(new ConcurrentHashMap<>());
+    private long resourcesExpirationMillis = DEFAULT_RESOURCES_EXPIRATION_MILLIS;
 
     public JobRepository(JetInstance jetInstance) {
         this.instance = jetInstance.getHazelcastInstance();
         this.logger = instance.getLoggingService().getLogger(getClass());
 
-        this.randomIds = instance.getMap(RANDOM_IDS_MAP_NAME);
+        this.idGenerator = instance.getFlakeIdGenerator(RANDOM_ID_GENERATOR_NAME);
         this.jobRecords = instance.getMap(JOB_RECORDS_MAP_NAME);
         this.jobExecutionRecords = instance.getMap(JOB_EXECUTION_RECORDS_MAP_NAME);
         this.jobResults = instance.getMap(JOB_RESULTS_MAP_NAME);
+        this.jobMetrics = instance.getMap(JOB_METRICS_MAP_NAME);
         this.exportedSnapshotDetailsCache = instance.getMap(EXPORTED_SNAPSHOTS_DETAIL_CACHE);
     }
 
@@ -164,47 +174,37 @@ public class JobRepository {
      * If the upload process fails for any reason, such as being unable to access a resource,
      * uploaded resources are cleaned up.
      */
-    public long uploadJobResources(JobConfig jobConfig) {
+    long uploadJobResources(JobConfig jobConfig) {
         long jobId = newJobId();
-
-        IMap<String, Object> jobResourcesMap = getJobResources(jobId);
-        for (ResourceConfig rc : jobConfig.getResourceConfigs()) {
-            Map<String, byte[]> tmpMap = new HashMap<>();
-            if (rc.isArchive()) {
-                try {
+        Map<String, byte[]> tmpMap = new HashMap<>();
+        try {
+            for (ResourceConfig rc : jobConfig.getResourceConfigs()) {
+                if (rc.isArchive()) {
                     loadJar(tmpMap, rc.getUrl());
-                } catch (IOException e) {
-                    cleanupJobResourcesAndSnapshots(jobId, jobResourcesMap);
-                    randomIds.remove(jobId);
-                    throw new JetException("Job resource upload failed", e);
-                }
-            } else {
-                try {
+                } else {
                     InputStream in = rc.getUrl().openStream();
                     readStreamAndPutCompressedToMap(rc.getId(), tmpMap, in);
-                } catch (IOException e) {
-                    cleanupJobResourcesAndSnapshots(jobId, jobResourcesMap);
-                    randomIds.remove(jobId);
-                    throw new JetException("Job resource upload failed", e);
                 }
             }
-
-            // now upload it all
-            jobResourcesMap.putAll(tmpMap);
+        } catch (Exception e) {
+            throw new JetException("Job resource upload failed", e);
         }
-
-        // the marker object will be used to decide when to clean up job resources
-        jobResourcesMap.put(RESOURCE_MARKER, System.currentTimeMillis());
-
+        // avoid creating resources map if map is empty
+        if (tmpMap.size() > 0) {
+            IMap<String, Object> jobResourcesMap = getJobResources(jobId).get();
+            // now upload it all
+            try {
+                jobResourcesMap.putAll(tmpMap);
+            } catch (Exception e) {
+                jobResourcesMap.destroy();
+                throw new JetException("Job resource upload failed", e);
+            }
+        }
         return jobId;
     }
 
     private long newJobId() {
-        long jobId;
-        do {
-            jobId = Util.secureRandomNextLong();
-        } while (randomIds.putIfAbsent(jobId, jobId) != null);
-        return jobId;
+       return idGenerator.newId();
     }
 
     /**
@@ -223,8 +223,9 @@ public class JobRepository {
         }
     }
 
-    private void readStreamAndPutCompressedToMap(String resourceName,
-                                                 Map<String, byte[]> map, InputStream in)
+    private void readStreamAndPutCompressedToMap(
+            String resourceName, Map<String, byte[]> map, InputStream in
+    )
             throws IOException {
         // ignore duplicates: the first resource in first jar takes precedence
         if (map.containsKey(resourceName)) {
@@ -237,11 +238,6 @@ public class JobRepository {
         }
 
         map.put(resourceName, baos.toByteArray());
-    }
-
-    private void cleanupJobResourcesAndSnapshots(long jobId, IMap<String, Object> jobResourcesMap) {
-        destroySnapshotDataMaps(jobId);
-        jobResourcesMap.destroy();
     }
 
     /**
@@ -263,7 +259,7 @@ public class JobRepository {
      * newQuorumSize}.
      */
     void updateJobQuorumSizeIfSmaller(long jobId, int newQuorumSize) {
-        jobExecutionRecords.executeOnKey(jobId, Util.<Long, JobExecutionRecord>entryProcessor((key, value) -> {
+        jobExecutionRecords.executeOnKey(jobId, ImdgUtil.<Long, JobExecutionRecord>entryProcessor((key, value) -> {
             if (value == null) {
                 return null;
             }
@@ -275,19 +271,8 @@ public class JobRepository {
     /**
      * Generates a new execution id for the given job id, guaranteed to be unique across the cluster
      */
-    long newExecutionId(long jobId) {
-        long executionId;
-        do {
-            executionId = Util.secureRandomNextLong();
-        } while (randomIds.putIfAbsent(executionId, jobId) != null);
-        return executionId;
-    }
-
-    /**
-     * Returns how many execution ids are present for the given job id
-     */
-    long getExecutionIdCount(long jobId) {
-        return randomIds.values(new FilterExecutionIdByJobIdPredicate(jobId)).size();
+    long newExecutionId() {
+        return idGenerator.newId();
     }
 
     /**
@@ -295,7 +280,13 @@ public class JobRepository {
      * @throws JobNotFoundException if the JobRecord is not found
      * @throws IllegalStateException if the JobResult is already present
      */
-    void completeJob(long jobId, String coordinator, long completionTime, Throwable error) {
+    void completeJob(
+            long jobId,
+            @Nullable List<RawJobMetrics> terminalMetrics,
+            @Nonnull String coordinator,
+            long completionTime,
+            @Nullable Throwable error
+    ) {
         JobRecord jobRecord = getJobRecord(jobId);
         if (jobRecord == null) {
             throw new JobNotFoundException(jobId);
@@ -304,8 +295,14 @@ public class JobRepository {
         JobConfig config = jobRecord.getConfig();
         long creationTime = jobRecord.getCreationTime();
         JobResult jobResult = new JobResult(jobId, config, coordinator, creationTime, completionTime,
-                error != null ? error.toString() : null);
+                toErrorMsg(error));
 
+        if (terminalMetrics != null) {
+            List<RawJobMetrics> prevMetrics = jobMetrics.put(jobId, terminalMetrics);
+            if (prevMetrics != null) {
+                logger.warning("Overwriting job metrics for job " + jobResult);
+            }
+        }
         JobResult prev = jobResults.putIfAbsent(jobId, jobResult);
         if (prev != null) {
             throw new IllegalStateException("Job result already exists in the " + jobResults.getName() + " map:\n" +
@@ -321,65 +318,88 @@ public class JobRepository {
      * so that it will not be used again for a new job submission.
      */
     void deleteJob(long jobId) {
-        if (deletedJobs.contains(jobId)) {
-            return;
-        }
-
-        // Delete the job record
+        // delete the job record and related records
         jobExecutionRecords.remove(jobId);
         jobRecords.remove(jobId);
-        // Delete the execution ids, but keep the job id
-        randomIds.removeAll(new FilterExecutionIdByJobIdPredicate(jobId));
-
-        // Delete job resources
-        cleanupJobResourcesAndSnapshots(jobId, getJobResources(jobId));
-
-        deletedJobs.add(jobId);
     }
 
     /**
-     * Cleans up stale job records, execution ids and job resources.
+     * Cleans up stale maps related to jobs
      */
-    void cleanup(Set<Long> runningJobIds) {
-        // clean up completed jobRecords
-        Set<Long> completedJobIds = jobResults.keySet();
-        completedJobIds.forEach(this::deleteJob);
+    void cleanup(NodeEngine nodeEngine) {
+        long start = System.nanoTime();
+        Collection<DistributedObject> maps =
+                nodeEngine.getProxyService().getDistributedObjects(MapService.SERVICE_NAME);
 
-        Set<Long> validJobIds = new HashSet<>();
-        validJobIds.addAll(completedJobIds);
-        validJobIds.addAll(runningJobIds);
-        validJobIds.addAll(jobRecords.keySet());
+        // we need to take the list of active job records after getting the list of maps --
+        // otherwise the job records could be missing newly submitted jobs
+        Set<Long> activeJobs = jobRecords.keySet();
 
-        // Job ids are never cleaned up.
-        // We also don't clean up job records here because they might be started in parallel
-        // while cleanup is running. If a job id is not running or is completed, it might be
-        // suitable to clean up job resources.
-        randomIds.keySet(new FilterJobIdPredicate())
-                 .stream()
-                 .filter(jobId -> !validJobIds.contains(jobId))
-                 .forEach(jobId -> {
-                     IMap<String, Object> resources = getJobResources(jobId);
-                     EntryView<String, Object> marker = resources.getEntryView(RESOURCE_MARKER);
-                     // If the marker is absent, then job resources may be still uploaded.
-                     // Just put the marker so that the job resources may be cleaned up eventually.
-                     // If the job resources are still being uploaded, then the marker will be overwritten, which is ok.
-                     if (marker == null) {
-                         resources.putIfAbsent(RESOURCE_MARKER, System.currentTimeMillis());
-                     } else if (isMarkerExpired(marker)) {
-                         // The marker has been around for defined expiry time and the job still wasn't started.
-                         // We assume the job submission was interrupted - let's clean up the data.
-                         cleanupJobResourcesAndSnapshots(jobId, resources);
-                     }
-                 });
+        for (DistributedObject map : maps) {
+            if (map.getName().startsWith(SNAPSHOT_DATA_MAP_PREFIX)) {
+                long id = jobIdFromMapName(map.getName(), SNAPSHOT_DATA_MAP_PREFIX);
+                if (!activeJobs.contains(id)) {
+                    logFine(logger, "Deleting snapshot data map '%s' because job already finished", map.getName());
+                    map.destroy();
+                }
+            } else if (map.getName().startsWith(RESOURCES_MAP_NAME_PREFIX)) {
+                long id = jobIdFromMapName(map.getName(), RESOURCES_MAP_NAME_PREFIX);
+                if (activeJobs.contains(id)) {
+                    // job is still active, do nothing
+                    continue;
+                }
+                if (jobResults.containsKey(id)) {
+                    // if job is finished, we can safely delete the map
+                    logFine(logger, "Deleting job resource map '%s' because job is already finished", map.getName());
+                    map.destroy();
+                } else {
+                    // Job might be in the process of uploading resources, check how long the map has been there.
+                    // If we happen to recreate a just-deleted map, it will be destroyed again after
+                    // resourcesExpirationMillis.
+                    IMap resourceMap = (IMap) map;
+                    long creationTime = resourceMap.getLocalMapStats().getCreationTime();
+                    if (isResourceMapExpired(creationTime)) {
+                        logger.fine("Deleting job resource map " + map.getName() + " because the map " +
+                                "was created long ago and job record or result still doesn't exist");
+                        resourceMap.destroy();
+                    }
+                }
+            }
+        }
+        int maxNoResults = Math.max(1, nodeEngine.getProperties().getInteger(JetProperties.JOB_RESULTS_MAX_SIZE));
+        // delete oldest job results
+        if (jobResults.size() > Util.addClamped(maxNoResults, maxNoResults / MAX_NO_RESULTS_OVERHEAD)) {
+            jobResults.values().stream().sorted(comparing(JobResult::getCompletionTime).reversed())
+                      .skip(maxNoResults)
+                      .map(JobResult::getJobId)
+                      .collect(Collectors.toSet())
+                      .forEach(id -> {
+                          jobMetrics.delete(id);
+                          jobResults.delete(id);
+                      });
+        }
+        long elapsed = System.nanoTime() - start;
+        logger.fine("Job cleanup took " + TimeUnit.NANOSECONDS.toMillis(elapsed) + "ms");
     }
 
-    private boolean isMarkerExpired(EntryView<String, Object> record) {
-        return (System.currentTimeMillis() - (Long) record.getValue()) >= resourcesExpirationMillis;
+    private static String toErrorMsg(@Nullable Throwable error) {
+        if (error == null) {
+            return null;
+        }
+        if (error.getClass().equals(JetException.class) && error.getMessage() != null) {
+            return error.getMessage();
+        }
+        return error.toString();
     }
 
-    List<JobRecord> getJobRecords(String name) {
-        return jobRecords.values(new FilterJobRecordByNamePredicate(name)).stream()
-                         .sorted(comparing(JobRecord::getCreationTime).reversed()).collect(toList());
+    private static long jobIdFromMapName(String map, String prefix) {
+        int idx = prefix.length();
+        String jobId = map.substring(idx, idx + JOB_ID_STRING_LENGTH);
+        return idFromString(jobId);
+    }
+
+    private boolean isResourceMapExpired(long creationTime) {
+        return (System.currentTimeMillis() - creationTime) >= resourcesExpirationMillis;
     }
 
     Set<Long> getAllJobIds() {
@@ -401,12 +421,21 @@ public class JobRepository {
        return jobExecutionRecords.get(jobId);
     }
 
-    <T> IMap<String, T> getJobResources(long jobId) {
-        return instance.getMap(RESOURCES_MAP_NAME_PREFIX + idToString(jobId));
+    /**
+     * Gets the job resources map, lazily evaluated to avoid creating the map if it won't be needed
+     */
+    <T> Supplier<IMap<String, T>> getJobResources(long jobId) {
+        return Util.memoizeConcurrent(() -> instance.getMap(RESOURCES_MAP_NAME_PREFIX + idToString(jobId)));
     }
 
+    @Nullable
     public JobResult getJobResult(long jobId) {
         return jobResults.get(jobId);
+    }
+
+    @Nullable
+    List<RawJobMetrics> getJobMetrics(long jobId) {
+        return jobMetrics.get(jobId);
     }
 
     Collection<JobResult> getJobResults() {
@@ -449,15 +478,6 @@ public class JobRepository {
         return JobRepository.EXPORTED_SNAPSHOTS_PREFIX + name;
     }
 
-    /**
-     * Delete all snapshots for a given job.
-     */
-    private void destroySnapshotDataMaps(long jobId) {
-        instance.getMap(snapshotDataMapName(jobId, 0)).destroy();
-        instance.getMap(snapshotDataMapName(jobId, 1)).destroy();
-        logFine(logger, "Destroyed both snapshot maps for job %s", idToString(jobId));
-    }
-
     void clearSnapshotData(long jobId, int dataMapIndex) {
         String mapName = snapshotDataMapName(jobId, dataMapIndex);
         try {
@@ -468,13 +488,12 @@ public class JobRepository {
         }
     }
 
-    void cacheValidationRecord(@Nonnull String snapshotMapName, @Nonnull SnapshotValidationRecord validationRecord) {
-        exportedSnapshotDetailsCache.set(snapshotMapName, validationRecord);
+    void cacheValidationRecord(@Nonnull String snapshotName, @Nonnull SnapshotValidationRecord validationRecord) {
+        exportedSnapshotDetailsCache.set(snapshotName, validationRecord);
     }
 
     public static final class UpdateJobExecutionRecordEntryProcessor implements
-                    EntryProcessor<Long, JobExecutionRecord>,
-                    EntryBackupProcessor<Long, JobExecutionRecord>,
+                    EntryProcessor<Long, JobExecutionRecord, Object>,
                     IdentifiedDataSerializable {
 
         private long jobId;
@@ -511,22 +530,12 @@ public class JobRepository {
         }
 
         @Override
-        public EntryBackupProcessor<Long, JobExecutionRecord> getBackupProcessor() {
-            return this;
-        }
-
-        @Override
-        public void processBackup(Entry<Long, JobExecutionRecord> entry) {
-            process(entry);
-        }
-
-        @Override
         public int getFactoryId() {
             return JetInitDataSerializerHook.FACTORY_ID;
         }
 
         @Override
-        public int getId() {
+        public int getClassId() {
             return JetInitDataSerializerHook.UPDATE_JOB_EXECUTION_RECORD_EP;
         }
 
@@ -542,110 +551,6 @@ public class JobRepository {
             jobId = in.readLong();
             jobExecutionRecord = in.readObject();
             canCreate = in.readBoolean();
-        }
-    }
-
-    public static class FilterExecutionIdByJobIdPredicate implements Predicate<Long, Long>, IdentifiedDataSerializable {
-
-        private long jobId;
-
-        public FilterExecutionIdByJobIdPredicate() {
-        }
-
-        FilterExecutionIdByJobIdPredicate(long jobId) {
-            this.jobId = jobId;
-        }
-
-        @Override
-        public boolean apply(Entry<Long, Long> mapEntry) {
-            return mapEntry.getKey() != jobId && mapEntry.getValue() == jobId;
-        }
-
-        @Override
-        public int getFactoryId() {
-            return JetInitDataSerializerHook.FACTORY_ID;
-        }
-
-        @Override
-        public int getId() {
-            return JetInitDataSerializerHook.FILTER_EXECUTION_ID_BY_JOB_ID_PREDICATE;
-        }
-
-        @Override
-        public void writeData(ObjectDataOutput out) throws IOException {
-            out.writeLong(jobId);
-        }
-
-        @Override
-        public void readData(ObjectDataInput in) throws IOException {
-            jobId = in.readLong();
-        }
-    }
-
-    public static class FilterJobIdPredicate implements Predicate<Long, Long>, IdentifiedDataSerializable {
-
-        public FilterJobIdPredicate() {
-        }
-
-        @Override
-        public boolean apply(Entry<Long, Long> mapEntry) {
-            return mapEntry.getKey().equals(mapEntry.getValue());
-        }
-
-        @Override
-        public int getFactoryId() {
-            return JetInitDataSerializerHook.FACTORY_ID;
-        }
-
-        @Override
-        public int getId() {
-            return JetInitDataSerializerHook.FILTER_JOB_ID;
-        }
-
-        @Override
-        public void writeData(ObjectDataOutput out) throws IOException {
-        }
-
-        @Override
-        public void readData(ObjectDataInput in) throws IOException {
-        }
-    }
-
-    public static class FilterJobRecordByNamePredicate
-            implements Predicate<Long, JobRecord>, IdentifiedDataSerializable {
-
-        private String name;
-
-        public FilterJobRecordByNamePredicate() {
-        }
-
-        FilterJobRecordByNamePredicate(String name) {
-            this.name = name;
-        }
-
-        @Override
-        public boolean apply(Entry<Long, JobRecord> entry) {
-            return name.equals(entry.getValue().getConfig().getName());
-        }
-
-        @Override
-        public int getFactoryId() {
-            return JetInitDataSerializerHook.FACTORY_ID;
-        }
-
-        @Override
-        public int getId() {
-            return JetInitDataSerializerHook.FILTER_JOB_RECORD_BY_NAME;
-        }
-
-        @Override
-        public void writeData(ObjectDataOutput out) throws IOException {
-            out.writeUTF(name);
-        }
-
-        @Override
-        public void readData(ObjectDataInput in) throws IOException {
-            name = in.readUTF();
         }
     }
 
@@ -672,7 +577,7 @@ public class JobRepository {
         }
 
         @Override
-        public int getId() {
+        public int getClassId() {
             return JetInitDataSerializerHook.FILTER_JOB_RESULT_BY_NAME;
         }
 

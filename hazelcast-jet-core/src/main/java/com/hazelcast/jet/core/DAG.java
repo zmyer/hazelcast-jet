@@ -16,11 +16,12 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.internal.json.JsonArray;
 import com.hazelcast.internal.json.JsonObject;
+import com.hazelcast.internal.util.StringUtil;
+import com.hazelcast.jet.config.EdgeConfig;
 import com.hazelcast.jet.core.Edge.RoutingPolicy;
-import com.hazelcast.jet.function.DistributedSupplier;
-import com.hazelcast.jet.impl.SerializationConstants;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
@@ -38,10 +39,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.IntStream;
 
+import static com.hazelcast.internal.util.Preconditions.checkTrue;
+import static com.hazelcast.jet.core.Vertex.LOCAL_PARALLELISM_USE_DEFAULT;
 import static com.hazelcast.jet.impl.TopologicalSorter.topologicalSort;
 import static com.hazelcast.jet.impl.pipeline.transform.AggregateTransform.FIRST_STAGE_VERTEX_NAME_SUFFIX;
 import static com.hazelcast.jet.impl.util.Util.escapeGraphviz;
-import static com.hazelcast.util.Preconditions.checkTrue;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.newSetFromMap;
 import static java.util.stream.Collectors.groupingBy;
@@ -70,6 +72,8 @@ import static java.util.stream.Collectors.joining;
  * </li></ol>
  * Data travels from sources to sinks and is transformed and reshaped
  * as it passes through the processors.
+ *
+ * @since 3.0
  */
 public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
 
@@ -81,14 +85,14 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
     /**
      * Creates a vertex from a {@code Supplier<Processor>} and adds it to this DAG.
      *
-     * @see Vertex#Vertex(String, DistributedSupplier)
+     * @see Vertex#Vertex(String, SupplierEx)
      *
      * @param name the unique name of the vertex
      * @param simpleSupplier the simple, parameterless supplier of {@code Processor} instances
      */
     @Nonnull
     public Vertex newVertex(
-            @Nonnull String name, @Nonnull DistributedSupplier<? extends Processor> simpleSupplier
+            @Nonnull String name, @Nonnull SupplierEx<? extends Processor> simpleSupplier
     ) {
         return addVertex(new Vertex(name, simpleSupplier));
     }
@@ -130,21 +134,19 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
     }
 
     /**
-     * Adds an edge to this DAG. The vertices it connects must already be present
-     * in the DAG. It is an error to add an edge that connects the same two
-     * vertices as another existing edge. It is an error to connect an edge to
-     * a vertex at the same ordinal as another existing edge. However, inbound
-     * and outbound ordinals are independent, so there can be two edges at the
-     * same ordinal, one inbound and one outbound.
+     * Adds an edge to this DAG. The vertices it connects must already be
+     * present in the DAG. It is an error to connect an edge to a vertex at the
+     * same ordinal as another existing edge. However, inbound and outbound
+     * ordinals are independent, so there can be two edges at the same ordinal,
+     * one inbound and one outbound.
+     * <p>
+     * Jet supports multigraphs, that is you can add two edges between the same
+     * tow vertices. However, they have to have different ordinals.
      */
     @Nonnull
     public DAG edge(@Nonnull Edge edge) {
         if (edge.getDestination() == null) {
             throw new IllegalArgumentException("Edge has no destination");
-        }
-        if (edges.contains(edge)) {
-            throw new IllegalArgumentException("This DAG already has an edge between '" + edge.getSourceName()
-                    + "' and '" + edge.getDestName() + '\'');
         }
         if (!containsVertex(edge.getSource())) {
             throw new IllegalArgumentException(
@@ -178,7 +180,8 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
         if (edge.getSource() == edge.getDestination()) {
             throw new IllegalArgumentException("Attempted to add an edge from " + edge.getSourceName() + " to itself");
         }
-        edges.add(edge);
+        boolean success = edges.add(edge);
+        assert success : "Duplicate edge added: " + edge;
         return this;
     }
 
@@ -303,7 +306,7 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
     @Override
     @Nonnull
     public String toString() {
-        return toString(-1);
+        return toString(LOCAL_PARALLELISM_USE_DEFAULT);
     }
 
     /**
@@ -319,8 +322,8 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
         final StringBuilder b = new StringBuilder("dag\n");
         for (Vertex v : this) {
             b.append("    .vertex(\"").append(v.getName()).append("\")");
-            int localParallelism = getLocalParallelism(defaultLocalParallelism, v);
-            if (localParallelism != -1) {
+            int localParallelism = v.determineLocalParallelism(defaultLocalParallelism);
+            if (localParallelism != LOCAL_PARALLELISM_USE_DEFAULT) {
                 b.append(".localParallelism(").append(localParallelism).append(')');
             }
             b.append('\n');
@@ -346,7 +349,7 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
         for (Vertex v : this) {
             JsonObject vertex = new JsonObject();
             vertex.add("name", v.getName());
-            vertex.add("parallelism", getLocalParallelism(defaultLocalParallelism, v));
+            vertex.add("parallelism", v.determineLocalParallelism(defaultLocalParallelism));
             vertices.add(vertex);
         }
         dag.add("vertices", vertices);
@@ -367,54 +370,75 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
         return dag;
     }
 
-    private static int getLocalParallelism(int defaultLocalParallelism, Vertex v) {
-        int localParallelism = v.getLocalParallelism();
-        if (localParallelism == -1) {
-            localParallelism = v.getMetaSupplier().preferredLocalParallelism();
-            if (localParallelism == -1) {
-                localParallelism = defaultLocalParallelism;
-            }
-        }
-        return localParallelism;
-    }
 
-     /**
+    /**
      * Returns a DOT format (graphviz) representation of the DAG.
      */
     @Nonnull
     public String toDotString() {
+        return toDotString(LOCAL_PARALLELISM_USE_DEFAULT);
+    }
+
+    /**
+     * Returns a DOT format (graphviz) representation of the DAG and annotates
+     * the vertices using default parallelism with the supplied value.
+     */
+    @Nonnull
+    public String toDotString(int defaultParallelism) {
         final StringBuilder builder = new StringBuilder(512);
         builder.append("digraph DAG {\n");
         int clusterCount = 0;
-        for (Vertex v : this) {
-            List<Edge> out = getOutboundEdges(v.getName());
-            List<Edge> in = getInboundEdges(v.getName());
 
-            if (out.isEmpty() && in.isEmpty()) {
-                // dangling vertex
-                builder.append("\t")
-                       .append("\"").append(escapeGraphviz(v.getName())).append("\"")
-                       .append(";\n");
-            }
+        for (Vertex v : this) {
+            int localParallelism = v.determineLocalParallelism(defaultParallelism);
+            String parallelism = localParallelism == LOCAL_PARALLELISM_USE_DEFAULT ?
+                defaultParallelism == LOCAL_PARALLELISM_USE_DEFAULT ?
+                    "default"
+                    : String.valueOf(defaultParallelism)
+                : String.valueOf(localParallelism);
+            builder.append("\t\"")
+                   .append(escapeGraphviz(v.getName()))
+                   .append("\" [localParallelism=").append(parallelism).append("]")
+                   .append(";\n");
+        }
+
+        Map<String, int[]> inOutCounts = new HashMap<>();
+        for (Edge edge : edges) {
+            inOutCounts.computeIfAbsent(edge.getSourceName(), v -> new int[2])[0]++;
+            inOutCounts.computeIfAbsent(edge.getDestName(), v -> new int[2])[1]++;
+        }
+
+        for (Vertex v: this) {
+            List<Edge> out = getOutboundEdges(v.getName());
             for (Edge e : out) {
-                List<String> labels = new ArrayList<>();
-                if (e.isDistributed()) {
-                    labels.add("distributed");
+                List<String> attributes = new ArrayList<>();
+                String edgeLabel = getEdgeLabel(e);
+                if (!StringUtil.isNullOrEmpty(edgeLabel)) {
+                    attributes.add("label=\"" + edgeLabel + "\"");
                 }
-                if (e.getRoutingPolicy() != RoutingPolicy.UNICAST) {
-                    labels.add(e.getRoutingPolicy().toString().toLowerCase());
+                if (inOutCounts.get(e.getDestName())[1] > 1) {
+                    attributes.add("headlabel=" + e.getDestOrdinal());
                 }
+                if (inOutCounts.get(e.getSourceName())[0] > 1) {
+                    attributes.add("taillabel=" + e.getSourceOrdinal());
+                }
+                int queueSize = e.getConfig() == null ? EdgeConfig.DEFAULT_QUEUE_SIZE :
+                        e.getConfig().getQueueSize();
+                attributes.add("queueSize=" + queueSize);
+
                 boolean inSubgraph = e.getSourceName().equals(e.getDestName() + FIRST_STAGE_VERTEX_NAME_SUFFIX);
                 if (inSubgraph) {
                     builder.append("\tsubgraph cluster_").append(clusterCount++).append(" {\n")
                            .append("\t");
                 }
+                String source = escapeGraphviz(e.getSourceName());
+                String destination = escapeGraphviz(e.getDestName());
                 builder.append("\t")
-                       .append("\"").append(escapeGraphviz(e.getSourceName())).append("\"")
+                       .append("\"").append(source).append("\"")
                        .append(" -> ")
-                       .append("\"").append(escapeGraphviz(e.getDestName())).append("\"");
-                if (!labels.isEmpty()) {
-                    builder.append(labels.stream().collect(joining("-", " [label=\"", "\"]")));
+                       .append("\"").append(destination).append("\"");
+                if (attributes.size() > 0) {
+                    builder.append(attributes.stream().collect(joining(", ", " [", "]")));
                 }
                 builder.append(";\n");
                 if (inSubgraph) {
@@ -424,6 +448,17 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
         }
         builder.append("}");
         return builder.toString();
+    }
+
+    private String getEdgeLabel(Edge e) {
+        List<String> labels = new ArrayList<>();
+        if (e.isDistributed()) {
+            labels.add("distributed");
+        }
+        if (e.getRoutingPolicy() != RoutingPolicy.UNICAST) {
+            labels.add(e.getRoutingPolicy().toString().toLowerCase());
+        }
+        return String.join("-", labels);
     }
 
     @Override
@@ -465,11 +500,11 @@ public class DAG implements IdentifiedDataSerializable, Iterable<Vertex> {
 
     @Override
     public int getFactoryId() {
-        return SerializationConstants.FACTORY_ID;
+        return JetDataSerializerHook.FACTORY_ID;
     }
 
     @Override
-    public int getId() {
-        return SerializationConstants.DAG;
+    public int getClassId() {
+        return JetDataSerializerHook.DAG;
     }
 }

@@ -16,6 +16,9 @@
 
 package com.hazelcast.jet.impl.processor;
 
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
+import com.hazelcast.function.ToLongFunctionEx;
 import com.hazelcast.jet.accumulator.LongAccumulator;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
@@ -23,12 +26,9 @@ import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.SlidingWindowPolicy;
 import com.hazelcast.jet.core.TimestampKind;
 import com.hazelcast.jet.core.Watermark;
-import com.hazelcast.jet.datamodel.TimestampedEntry;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
-import com.hazelcast.jet.function.DistributedToLongFunction;
-import com.hazelcast.test.HazelcastParametersRunnerFactory;
-import com.hazelcast.test.annotation.ParallelTest;
+import com.hazelcast.jet.datamodel.KeyedWindowResult;
+import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -60,8 +60,8 @@ import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.assertTrue;
 
 @RunWith(Parameterized.class)
-@Category(ParallelTest.class)
-@Parameterized.UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
+@Category(ParallelJVMTest.class)
+@Parameterized.UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
 public class SlidingWindowPTest {
 
     private static final Long KEY = 77L;
@@ -75,7 +75,7 @@ public class SlidingWindowPTest {
     @Parameter(1)
     public boolean singleStageProcessor;
 
-    private DistributedSupplier<Processor> supplier;
+    private SupplierEx<Processor> supplier;
     private SlidingWindowP lastSuppliedProcessor;
 
     @Parameters(name = "hasDeduct={0}, singleStageProcessor={1}")
@@ -90,7 +90,7 @@ public class SlidingWindowPTest {
 
     @Before
     public void before() {
-        SlidingWindowPolicy windowDef = slidingWinPolicy(4, 1);
+        SlidingWindowPolicy winPolicy = slidingWinPolicy(4, 1);
 
         AggregateOperation1<Entry<?, Long>, LongAccumulator, Long> operation = AggregateOperation
                 .withCreate(LongAccumulator::new)
@@ -99,17 +99,18 @@ public class SlidingWindowPTest {
                 .andDeduct(hasDeduct ? LongAccumulator::subtract : null)
                 .andExportFinish(LongAccumulator::get);
 
-        DistributedFunction<?, Long> keyFn = t -> KEY;
-        DistributedToLongFunction<Entry<Long, Long>> timestampFn = Entry::getKey;
-        DistributedSupplier<Processor> procSupplier = singleStageProcessor
+        FunctionEx<?, Long> keyFn = t -> KEY;
+        ToLongFunctionEx<Entry<Long, Long>> timestampFn = Entry::getKey;
+        SupplierEx<Processor> procSupplier = singleStageProcessor
                 ? aggregateToSlidingWindowP(
                         singletonList(keyFn),
                         singletonList(timestampFn),
                         TimestampKind.EVENT,
-                        windowDef,
+                        winPolicy,
+                        0L,
                         operation,
-                        TimestampedEntry::fromWindowResult)
-                : combineToSlidingWindowP(windowDef, operation, TimestampedEntry::fromWindowResult);
+                KeyedWindowResult::new)
+                : combineToSlidingWindowP(winPolicy, operation, KeyedWindowResult::new);
 
         // new supplier to save the last supplied instance
         supplier = () -> lastSuppliedProcessor = (SlidingWindowP) procSupplier.get();
@@ -316,10 +317,10 @@ public class SlidingWindowPTest {
                 // frameTs is higher than any event timestamp in that frame;
                 // therefore we generate an event with frameTs - 1
                 ? entry(frameTs - 1, value)
-                : new TimestampedEntry<>(frameTs, KEY, new LongAccumulator(value));
+                : new KeyedWindowResult<>(frameTs - 4, frameTs, KEY, new LongAccumulator(value));
     }
 
-    private static TimestampedEntry<Long, ?> outboxFrame(long ts, long value) {
-        return new TimestampedEntry<>(ts, KEY, value);
+    private static KeyedWindowResult<Long, ?> outboxFrame(long ts, long value) {
+        return new KeyedWindowResult<>(ts - 4, ts, KEY, value);
     }
 }

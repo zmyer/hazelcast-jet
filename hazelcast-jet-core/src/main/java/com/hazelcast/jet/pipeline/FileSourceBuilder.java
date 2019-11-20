@@ -16,8 +16,8 @@
 
 package com.hazelcast.jet.pipeline;
 
+import com.hazelcast.function.BiFunctionEx;
 import com.hazelcast.jet.core.processor.SourceProcessors;
-import com.hazelcast.jet.function.DistributedBiFunction;
 
 import javax.annotation.Nonnull;
 import java.io.File;
@@ -29,6 +29,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 /**
  * Builder for a file source which reads lines from files in a directory (but not
  * its subdirectories) and emits output object created by {@code mapOutputFn}
+ *
+ * @since 3.0
  */
 public final class FileSourceBuilder {
 
@@ -85,7 +87,7 @@ public final class FileSourceBuilder {
     }
 
     /**
-     * Convenience for {@link FileSourceBuilder#build(DistributedBiFunction)}.
+     * Convenience for {@link FileSourceBuilder#build(BiFunctionEx)}.
      * Source emits lines to downstream without any transformation.
      */
     public BatchSource<String> build() {
@@ -109,13 +111,13 @@ public final class FileSourceBuilder {
      *                    line. Gets the filename and line as parameters
      * @param <T> the type of the items the source emits
      */
-    public <T> BatchSource<T> build(DistributedBiFunction<String, String, ? extends T> mapOutputFn) {
+    public <T> BatchSource<T> build(BiFunctionEx<String, String, ? extends T> mapOutputFn) {
         return batchFromProcessor("filesSource(" + new File(directory, glob) + ')',
                 SourceProcessors.readFilesP(directory, charset, glob, sharedFileSystem, mapOutputFn));
     }
 
     /**
-     * Convenience for {@link FileSourceBuilder#buildWatcher(DistributedBiFunction)}.
+     * Convenience for {@link FileSourceBuilder#buildWatcher(BiFunctionEx)}.
      */
     public StreamSource<String> buildWatcher() {
         return buildWatcher((filename, line) -> line);
@@ -161,11 +163,18 @@ public final class FileSourceBuilder {
      * blocking, missed, or duplicate events as a result. Such problems may be
      * resolved by upgrading the JRE to the latest version.
      *
+     * <h3>Appending lines using an text editor</h3>
+     * If you're testing this source, you might think of using a text editor to
+     * append the lines. However, it might not work as expected because some
+     * editors write to a temp file and then rename it or append extra newline
+     * character at the end which gets overwritten if more text is added in the
+     * editor. Best way to append is to use {@code echo text >> yourfile}.
+     *
      * @param mapOutputFn the function which creates output object from each
      *                    line. Gets the filename and line as parameters
      * @param <T> the type of the items the source emits
      */
-    public <T> StreamSource<T> buildWatcher(DistributedBiFunction<String, String, ? extends T> mapOutputFn) {
+    public <T> StreamSource<T> buildWatcher(BiFunctionEx<String, String, ? extends T> mapOutputFn) {
         return Sources.streamFromProcessor("fileWatcherSource(" + directory + '/' + glob + ')',
                 SourceProcessors.streamFilesP(directory, charset, glob, sharedFileSystem, mapOutputFn));
     }

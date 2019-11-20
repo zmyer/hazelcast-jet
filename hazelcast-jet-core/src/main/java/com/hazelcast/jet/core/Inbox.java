@@ -23,6 +23,8 @@ import java.util.function.Consumer;
 /**
  * A subset of {@code Queue<Object>} API restricted to the consumer side,
  * with additional support for bulk draining operations.
+ *
+ * @since 3.0
  */
 public interface Inbox {
 
@@ -77,4 +79,9 @@ public interface Inbox {
         }
         return consumed;
     }
+
+    /**
+     * Returns the number of objects in the inbox.
+     */
+    int size();
 }

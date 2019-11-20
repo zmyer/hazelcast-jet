@@ -16,9 +16,13 @@
 
 package com.hazelcast.jet.impl.deployment;
 
+import com.hazelcast.internal.nio.IOUtil;
 import com.hazelcast.jet.config.JobConfig;
-import com.hazelcast.nio.IOUtil;
+import com.hazelcast.logging.ILogger;
+import com.hazelcast.map.IMap;
+import com.hazelcast.spi.impl.NodeEngine;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
@@ -27,23 +31,34 @@ import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLStreamHandler;
 import java.util.Enumeration;
-import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.function.Supplier;
 import java.util.zip.InflaterInputStream;
 
+import static com.hazelcast.jet.Util.idToString;
 import static com.hazelcast.jet.impl.util.Util.uncheckCall;
 
 public class JetClassLoader extends ClassLoader {
 
     private static final String JOB_URL_PROTOCOL = "jet-job-resource";
 
-    private final Map<String, byte[]> resources;
-    private JobResourceURLStreamHandler jobResourceURLStreamHandler;
+    private final long jobId;
+    private final String jobName;
+    private final Supplier<IMap<String, byte[]>> resourcesSupplier;
+    private final ILogger logger;
+    private final JobResourceURLStreamHandler jobResourceURLStreamHandler;
 
-    public JetClassLoader(@Nullable ClassLoader parent, Map<String, byte[]> resources) {
+    private volatile boolean isShutdown;
+
+    public JetClassLoader(@Nonnull NodeEngine nodeEngine,
+                          @Nullable ClassLoader parent, @Nullable String jobName,
+                          long jobId, @Nonnull Supplier<IMap<String, byte[]>> resourcesSupplier
+    ) {
         super(parent == null ? JetClassLoader.class.getClassLoader() : parent);
-        this.resources = resources;
-
+        this.jobName = jobName;
+        this.jobId = jobId;
+        this.resourcesSupplier = resourcesSupplier;
+        this.logger = nodeEngine.getLogger(getClass());
         jobResourceURLStreamHandler = new JobResourceURLStreamHandler();
     }
 
@@ -63,16 +78,19 @@ public class JetClassLoader extends ClassLoader {
 
     @Override
     protected URL findResource(String name) {
-        if (isEmpty(name) || !resources.containsKey(name)) {
-            return null;
-        }
+        if (!checkShutdown(name)) {
+            if (isEmpty(name) || !resourcesSupplier.get().containsKey(name)) {
+                return null;
+            }
 
-        try {
-            return new URL(JOB_URL_PROTOCOL, null, -1, name, jobResourceURLStreamHandler);
-        } catch (MalformedURLException e) {
-            // this should never happen with custom URLStreamHandler
-            throw new RuntimeException(e);
+            try {
+                return new URL(JOB_URL_PROTOCOL, null, -1, name, jobResourceURLStreamHandler);
+            } catch (MalformedURLException e) {
+                // this should never happen with custom URLStreamHandler
+                throw new RuntimeException(e);
+            }
         }
+        return null;
     }
 
     @Override
@@ -80,13 +98,40 @@ public class JetClassLoader extends ClassLoader {
         return new SingleURLEnumeration(findResource(name));
     }
 
+    public void shutdown() {
+        isShutdown = true;
+    }
+
+    public boolean isShutdown() {
+        return isShutdown;
+    }
+
     @SuppressWarnings("unchecked")
     private InputStream resourceStream(String name) {
-        byte[] classData = resources.get(name);
-        if (classData == null) {
-            return null;
+        if (!checkShutdown(name)) {
+            byte[] classData = resourcesSupplier.get().get(name);
+            if (classData == null) {
+                return null;
+            }
+            return new InflaterInputStream(new ByteArrayInputStream(classData));
         }
-        return new InflaterInputStream(new ByteArrayInputStream(classData));
+        return null;
+    }
+
+    private boolean checkShutdown(String resource) {
+        if (isShutdown) {
+            // This class loader is used as the thread context CL in several places. It's possible
+            // that another thread inherits this classloader since a Thread inherits the parent's
+            // context CL by default (see for example: https://bugs.java.com/bugdatabase/view_bug.do?bug_id=JDK-8172726)
+            // In these scenarios the thread might essentially hold a reference to an obsolete classloader.
+            // Rather than throwing an unexpected exception we instead print a warning.
+            String jobName = this.jobName == null ? idToString(jobId) : "'" + this.jobName + "'";
+            logger.warning("Classloader for job " + jobName + " tried to load '" + resource
+                    + "' after the job was completed. The classloader used for jobs is disposed after " +
+                    "job is completed");
+            return true;
+        }
+        return false;
     }
 
     private static boolean isEmpty(String className) {
@@ -143,4 +188,11 @@ public class JetClassLoader extends ClassLoader {
         }
     }
 
+    @Override
+    public String toString() {
+        return "JetClassLoader{" +
+                "jobName='" + jobName + '\'' +
+                ", jobId=" + idToString(jobId) +
+                '}';
+    }
 }

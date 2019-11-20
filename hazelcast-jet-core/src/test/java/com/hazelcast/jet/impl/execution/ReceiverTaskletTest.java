@@ -16,10 +16,12 @@
 
 package com.hazelcast.jet.impl.execution;
 
+import com.hazelcast.cluster.Address;
+import com.hazelcast.internal.nio.BufferObjectDataOutput;
 import com.hazelcast.internal.serialization.InternalSerializationService;
 import com.hazelcast.internal.serialization.impl.DefaultSerializationServiceBuilder;
-import com.hazelcast.nio.BufferObjectDataOutput;
-import com.hazelcast.test.HazelcastParallelClassRunner;
+import com.hazelcast.logging.LoggingService;
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -28,8 +30,9 @@ import java.io.IOException;
 
 import static java.util.Arrays.asList;
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Mockito.mock;
 
-@RunWith(HazelcastParallelClassRunner.class)
+@RunWith(HazelcastSerialClassRunner.class)
 public class ReceiverTaskletTest {
 
     private ReceiverTasklet t;
@@ -39,7 +42,7 @@ public class ReceiverTaskletTest {
     @Before
     public void before() {
         collector = new MockOutboundCollector(2);
-        t = new ReceiverTasklet(collector, 3, 100);
+        t = new ReceiverTasklet(collector, 3, 100, mock(LoggingService.class), new Address(), 0, "");
         serService = new DefaultSerializationServiceBuilder().build();
     }
 

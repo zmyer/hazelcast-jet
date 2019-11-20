@@ -20,9 +20,11 @@ import com.hazelcast.jet.core.JetTestSupport;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
-import com.hazelcast.test.HazelcastParametersRunnerFactory;
+import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
@@ -47,7 +49,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 @RunWith(Parameterized.class)
-@Parameterized.UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
+@Category(ParallelJVMTest.class)
+@Parameterized.UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
 public class StreamSocketPTest extends JetTestSupport {
 
     @Parameter
@@ -64,16 +67,17 @@ public class StreamSocketPTest extends JetTestSupport {
     public static Collection<Object[]> parameters() {
         List<String> onaAndTwo = asList("1", "2");
         return asList(
-                new Object[]{"1\n2\n", onaAndTwo},
-                new Object[]{"1\r\n2\r\n", onaAndTwo},
-                new Object[]{"1\n2\r\n", onaAndTwo},
-                new Object[]{"1\r\n2\n", onaAndTwo},
-                new Object[]{"1\r2\n", onaAndTwo}, // mixed line terminators
+            // use %n and %r instead of \n and \r due to https://issues.apache.org/jira/browse/SUREFIRE-1662
+                new Object[]{"1%n2%n", onaAndTwo},
+                new Object[]{"1%r%n2%r%n", onaAndTwo},
+                new Object[]{"1%n2%r%n", onaAndTwo},
+                new Object[]{"1%r%n2%n", onaAndTwo},
+                new Object[]{"1%r2%n", onaAndTwo}, // mixed line terminators
                 new Object[]{"", emptyList()},
-                new Object[]{"\n", singletonList("")},
+                new Object[]{"%n", singletonList("")},
                 new Object[]{"1", emptyList()}, // no line terminator after the only line
-                new Object[]{"1\n2", singletonList("1")}, // no line terminator after the last line
-                new Object[]{"1\n\n2\n", asList("1", "", "2")}
+                new Object[]{"1%n2", singletonList("1")}, // no line terminator after the last line
+                new Object[]{"1%n%n2%n", asList("1", "", "2")}
         );
     }
 
@@ -82,6 +86,7 @@ public class StreamSocketPTest extends JetTestSupport {
         outbox = new TestOutbox(10);
         context = new TestProcessorContext();
         bucket = outbox.queue(0);
+        input = input.replaceAll("%n", "\n").replaceAll("%r", "\r");
     }
 
     @Test

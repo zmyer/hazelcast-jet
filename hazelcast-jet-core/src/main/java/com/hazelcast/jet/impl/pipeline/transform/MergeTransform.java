@@ -21,8 +21,8 @@ import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
 
 import javax.annotation.Nonnull;
 
+import static com.hazelcast.function.FunctionEx.identity;
 import static com.hazelcast.jet.core.processor.Processors.mapP;
-import static com.hazelcast.jet.function.DistributedFunction.identity;
 import static java.util.Arrays.asList;
 
 public class MergeTransform<T> extends AbstractTransform {
@@ -33,7 +33,7 @@ public class MergeTransform<T> extends AbstractTransform {
 
     @Override
     public void addToDag(Planner p) {
-        PlannerVertex pv = p.addVertex(this, p.uniqueVertexName(name()), localParallelism(), mapP(identity()));
+        PlannerVertex pv = p.addVertex(this, name(), localParallelism(), mapP(identity()));
         p.addEdges(this, pv.v);
     }
 }

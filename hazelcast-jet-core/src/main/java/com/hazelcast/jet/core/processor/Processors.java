@@ -16,6 +16,13 @@
 
 package com.hazelcast.jet.core.processor;
 
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.BiPredicateEx;
+import com.hazelcast.function.ConsumerEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.PredicateEx;
+import com.hazelcast.function.SupplierEx;
+import com.hazelcast.function.ToLongFunctionEx;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.Util;
@@ -30,35 +37,29 @@ import com.hazelcast.jet.core.ResettableSingletonTraverser;
 import com.hazelcast.jet.core.SlidingWindowPolicy;
 import com.hazelcast.jet.core.TimestampKind;
 import com.hazelcast.jet.core.Watermark;
-import com.hazelcast.jet.datamodel.TimestampedEntry;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedBiPredicate;
-import com.hazelcast.jet.function.DistributedConsumer;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedPredicate;
-import com.hazelcast.jet.function.DistributedSupplier;
-import com.hazelcast.jet.function.DistributedToLongFunction;
-import com.hazelcast.jet.function.DistributedTriFunction;
-import com.hazelcast.jet.function.KeyedWindowResultFunction;
-import com.hazelcast.jet.impl.processor.AsyncTransformUsingContextOrderedP;
-import com.hazelcast.jet.impl.processor.AsyncTransformUsingContextUnorderedP;
+import com.hazelcast.jet.core.function.KeyedWindowResultFunction;
+import com.hazelcast.jet.datamodel.KeyedWindowResult;
+import com.hazelcast.jet.function.TriFunction;
+import com.hazelcast.jet.impl.processor.AsyncTransformUsingServiceOrderedP;
+import com.hazelcast.jet.impl.processor.AsyncTransformUsingServiceUnorderedP;
 import com.hazelcast.jet.impl.processor.GroupP;
 import com.hazelcast.jet.impl.processor.InsertWatermarksP;
-import com.hazelcast.jet.impl.processor.RollingAggregateP;
 import com.hazelcast.jet.impl.processor.SessionWindowP;
 import com.hazelcast.jet.impl.processor.SlidingWindowP;
 import com.hazelcast.jet.impl.processor.TransformP;
-import com.hazelcast.jet.impl.processor.TransformUsingContextP;
-import com.hazelcast.jet.pipeline.ContextFactory;
+import com.hazelcast.jet.impl.processor.TransformStatefulP;
+import com.hazelcast.jet.impl.processor.TransformUsingServiceP;
+import com.hazelcast.jet.pipeline.ServiceFactory;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map.Entry;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
+import static com.hazelcast.function.FunctionEx.identity;
 import static com.hazelcast.jet.core.TimestampKind.EVENT;
-import static com.hazelcast.jet.function.DistributedFunction.identity;
-import static com.hazelcast.jet.function.DistributedFunctions.constantKey;
 import static java.util.Collections.nCopies;
 import static java.util.Collections.singletonList;
 import static java.util.stream.Collectors.toList;
@@ -204,6 +205,8 @@ import static java.util.stream.Collectors.toList;
  * <p>
  * Tumbling window is a special case of sliding window with sliding step =
  * window size.
+ *
+ * @since 3.0
  */
 public final class Processors {
 
@@ -228,10 +231,12 @@ public final class Processors {
      * @param aggrOp the aggregate operation to perform
      */
     @Nonnull
-    public static <A, R> DistributedSupplier<Processor> aggregateP(
+    public static <A, R> SupplierEx<Processor> aggregateP(
             @Nonnull AggregateOperation<A, R> aggrOp
     ) {
-        return () -> new GroupP<>(nCopies(aggrOp.arity(), constantKey()), aggrOp, (k, r) -> r);
+        // We should use the same constant key as the input edges do, but since
+        // the processor doesn't save the state, there's no need to.
+        return () -> new GroupP<>(nCopies(aggrOp.arity(), t -> "ALL"), aggrOp, (k, r) -> r);
     }
 
     /**
@@ -252,9 +257,11 @@ public final class Processors {
      * @param aggrOp the aggregate operation to perform
      */
     @Nonnull
-    public static <A, R> DistributedSupplier<Processor> accumulateP(@Nonnull AggregateOperation<A, R> aggrOp) {
+    public static <A, R> SupplierEx<Processor> accumulateP(@Nonnull AggregateOperation<A, R> aggrOp) {
         return () -> new GroupP<>(
-                nCopies(aggrOp.arity(), constantKey()),
+                // We should use the same constant key as the input edges do, but since
+                // the processor doesn't save the state, there's no need to.
+                nCopies(aggrOp.arity(), t -> "ALL"),
                 aggrOp.withIdentityFinish(),
                 (k, r) -> r);
     }
@@ -277,11 +284,13 @@ public final class Processors {
      * @param aggrOp the aggregate operation to perform
      */
     @Nonnull
-    public static <A, R> DistributedSupplier<Processor> combineP(
+    public static <A, R> SupplierEx<Processor> combineP(
             @Nonnull AggregateOperation<A, R> aggrOp
     ) {
         return () -> new GroupP<>(
-                constantKey(),
+                // We should use the same constant key as the input edges do, but since
+                // the processor doesn't save the state, there's no need to.
+                t -> "ALL",
                 aggrOp.withCombiningAccumulateFn(identity()),
                 (k, r) -> r);
     }
@@ -311,10 +320,10 @@ public final class Processors {
      * @param <OUT> type of the item to emit
      */
     @Nonnull
-    public static <K, A, R, OUT> DistributedSupplier<Processor> aggregateByKeyP(
-            @Nonnull List<DistributedFunction<?, ? extends K>> keyFns,
+    public static <K, A, R, OUT> SupplierEx<Processor> aggregateByKeyP(
+            @Nonnull List<FunctionEx<?, ? extends K>> keyFns,
             @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull DistributedBiFunction<? super K, ? super R, OUT> mapToOutputFn
+            @Nonnull BiFunctionEx<? super K, ? super R, OUT> mapToOutputFn
     ) {
         return () -> new GroupP<>(keyFns, aggrOp, mapToOutputFn);
     }
@@ -341,8 +350,8 @@ public final class Processors {
      * @param <A> type of accumulator returned from {@code aggrOp.createAccumulatorFn()}
      */
     @Nonnull
-    public static <K, A> DistributedSupplier<Processor> accumulateByKeyP(
-            @Nonnull List<DistributedFunction<?, ? extends K>> getKeyFns,
+    public static <K, A> SupplierEx<Processor> accumulateByKeyP(
+            @Nonnull List<FunctionEx<?, ? extends K>> getKeyFns,
             @Nonnull AggregateOperation<A, ?> aggrOp
     ) {
         return () -> new GroupP<>(getKeyFns, aggrOp.withIdentityFinish(), Util::entry);
@@ -372,9 +381,9 @@ public final class Processors {
      * @param <OUT> type of the item to emit
      */
     @Nonnull
-    public static <K, A, R, OUT> DistributedSupplier<Processor> combineByKeyP(
+    public static <K, A, R, OUT> SupplierEx<Processor> combineByKeyP(
             @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull DistributedBiFunction<? super K, ? super R, OUT> mapToOutputFn
+            @Nonnull BiFunctionEx<? super K, ? super R, OUT> mapToOutputFn
     ) {
         return () -> new GroupP<>(
                 Entry::getKey,
@@ -403,8 +412,7 @@ public final class Processors {
      * result by combining the partial results of the frames belonging to it
      * and finally applying the {@code finish} aggregation primitive. After this
      * it deletes from storage all the frames that trail behind the emitted
-     * windows. The type of emitted items is {@link TimestampedEntry
-     * TimestampedEntry&lt;K, A>} so there is one item per key per window position.
+     * windows. In the output there is one item per key per window position.
      * <p>
      * <i>Behavior on job restart</i><br>
      * This processor saves its state to snapshot. After restart, it can
@@ -417,15 +425,17 @@ public final class Processors {
      * done in previous execution.
      */
     @Nonnull
-    public static <K, A, R, OUT> DistributedSupplier<Processor> aggregateToSlidingWindowP(
-            @Nonnull List<DistributedFunction<?, ? extends K>> keyFns,
-            @Nonnull List<DistributedToLongFunction<?>> timestampFns,
+    public static <K, A, R, OUT> SupplierEx<Processor> aggregateToSlidingWindowP(
+            @Nonnull List<FunctionEx<?, ? extends K>> keyFns,
+            @Nonnull List<ToLongFunctionEx<?>> timestampFns,
             @Nonnull TimestampKind timestampKind,
             @Nonnull SlidingWindowPolicy winPolicy,
-            @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn
+            long earlyResultsPeriod,
+            @Nonnull AggregateOperation<A, ? extends R> aggrOp,
+            @Nonnull KeyedWindowResultFunction<? super K, ? super R, ? extends OUT> mapToOutputFn
     ) {
-        return aggregateByKeyAndWindowP(keyFns, timestampFns, timestampKind, winPolicy, aggrOp, mapToOutputFn, true);
+        return aggregateByKeyAndWindowP(
+                keyFns, timestampFns, timestampKind, winPolicy, earlyResultsPeriod, aggrOp, mapToOutputFn, true);
     }
 
     /**
@@ -450,9 +460,8 @@ public final class Processors {
      * <p>
      * When the processor receives a watermark with a given {@code wmVal}, it
      * emits the current accumulated state of all frames with {@code
-     * timestamp <= wmVal} and deletes these frames from its storage.
-     * The type of emitted items is {@link TimestampedEntry
-     * TimestampedEntry&lt;K, A>} so there is one item per key per frame.
+     * timestamp <= wmVal} and deletes these frames from its storage. In the
+     * output there is one item per key per frame.
      * <p>
      * When a state snapshot is requested, the state is flushed to second-stage
      * processor and nothing is saved to snapshot.
@@ -462,9 +471,9 @@ public final class Processors {
      *            createAccumulatorFn()}
      */
     @Nonnull
-    public static <K, A> DistributedSupplier<Processor> accumulateByFrameP(
-            @Nonnull List<DistributedFunction<?, ? extends K>> keyFns,
-            @Nonnull List<DistributedToLongFunction<?>> timestampFns,
+    public static <K, A> SupplierEx<Processor> accumulateByFrameP(
+            @Nonnull List<FunctionEx<?, ? extends K>> keyFns,
+            @Nonnull List<ToLongFunctionEx<?>> timestampFns,
             @Nonnull TimestampKind timestampKind,
             @Nonnull SlidingWindowPolicy winPolicy,
             @Nonnull AggregateOperation<A, ?> aggrOp
@@ -474,8 +483,9 @@ public final class Processors {
                 timestampFns,
                 timestampKind,
                 winPolicy.toTumblingByFrame(),
+                0L,
                 aggrOp.withIdentityFinish(),
-                TimestampedEntry::fromWindowResult,
+                KeyedWindowResult::new,
                 false
         );
     }
@@ -515,19 +525,20 @@ public final class Processors {
      * @param <OUT> type of the item to emit
      */
     @Nonnull
-    public static <K, A, R, OUT> DistributedSupplier<Processor> combineToSlidingWindowP(
+    public static <K, A, R, OUT> SupplierEx<Processor> combineToSlidingWindowP(
             @Nonnull SlidingWindowPolicy winPolicy,
-            @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn
+            @Nonnull AggregateOperation<A, ? extends R> aggrOp,
+            @Nonnull KeyedWindowResultFunction<? super K, ? super R, ? extends OUT> mapToOutputFn
     ) {
-        DistributedFunction<TimestampedEntry<K, A>, K> keyFn = TimestampedEntry::getKey;
-        DistributedToLongFunction<TimestampedEntry<K, A>> timestampFn = TimestampedEntry::getTimestamp;
+        FunctionEx<KeyedWindowResult<K, A>, K> keyFn = KeyedWindowResult::key;
+        ToLongFunctionEx<KeyedWindowResult<K, A>> timestampFn = KeyedWindowResult::end;
         return aggregateByKeyAndWindowP(
                 singletonList(keyFn),
                 singletonList(timestampFn),
                 TimestampKind.FRAME,
                 winPolicy,
-                aggrOp.withCombiningAccumulateFn(TimestampedEntry<Object, A>::getValue),
+                0L,
+                aggrOp.withCombiningAccumulateFn(KeyedWindowResult<Object, A>::result),
                 mapToOutputFn,
                 true
         );
@@ -543,6 +554,9 @@ public final class Processors {
      * @param timestampKind the kind of timestamp extracted by {@code timestampFns}: either the
      *                      event timestamp or the frame timestamp
      * @param winPolicy definition of the window to compute
+     * @param earlyResultsPeriod the period (milliseconds) at which to emit the preliminary results of
+     *                           windows before the watermark has advanced past them. Zero means "don't
+     *                           emit early results"
      * @param aggrOp aggregate operation to perform on each group in a window
      * @param isLastStage if this is the last stage of multi-stage setup
      *
@@ -551,13 +565,14 @@ public final class Processors {
      * @param <R> type of the aggregated result
      */
     @Nonnull
-    private static <K, A, R, OUT> DistributedSupplier<Processor> aggregateByKeyAndWindowP(
-            @Nonnull List<DistributedFunction<?, ? extends K>> keyFns,
-            @Nonnull List<DistributedToLongFunction<?>> timestampFns,
+    private static <K, A, R, OUT> SupplierEx<Processor> aggregateByKeyAndWindowP(
+            @Nonnull List<FunctionEx<?, ? extends K>> keyFns,
+            @Nonnull List<ToLongFunctionEx<?>> timestampFns,
             @Nonnull TimestampKind timestampKind,
             @Nonnull SlidingWindowPolicy winPolicy,
-            @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn,
+            long earlyResultsPeriod,
+            @Nonnull AggregateOperation<A, ? extends R> aggrOp,
+            @Nonnull KeyedWindowResultFunction<? super K, ? super R, ? extends OUT> mapToOutputFn,
             boolean isLastStage
     ) {
         return () -> new SlidingWindowP<>(
@@ -566,18 +581,19 @@ public final class Processors {
                             .map(f -> toFrameTimestampFn(f, timestampKind, winPolicy))
                             .collect(toList()),
                 winPolicy,
+                earlyResultsPeriod,
                 aggrOp,
                 mapToOutputFn,
                 isLastStage);
     }
 
-    private static DistributedToLongFunction<Object> toFrameTimestampFn(
-            @Nonnull DistributedToLongFunction<?> timestampFnX,
+    private static ToLongFunctionEx<Object> toFrameTimestampFn(
+            @Nonnull ToLongFunctionEx<?> timestampFnX,
             @Nonnull TimestampKind timestampKind,
             @Nonnull SlidingWindowPolicy winPolicy
     ) {
         @SuppressWarnings("unchecked")
-        DistributedToLongFunction<Object> timestampFn = (DistributedToLongFunction<Object>) timestampFnX;
+        ToLongFunctionEx<Object> timestampFn = (ToLongFunctionEx<Object>) timestampFnX;
         return timestampKind == EVENT
                 ? item -> winPolicy.higherFrameTs(timestampFn.applyAsLong(item))
                 : item -> winPolicy.higherFrameTs(timestampFn.applyAsLong(item) - 1);
@@ -623,14 +639,16 @@ public final class Processors {
      * @param <R> type of the session window's result value
      */
     @Nonnull
-    public static <K, A, R, OUT> DistributedSupplier<Processor> aggregateToSessionWindowP(
+    public static <K, A, R, OUT> SupplierEx<Processor> aggregateToSessionWindowP(
             long sessionTimeout,
-            @Nonnull List<DistributedToLongFunction<?>> timestampFns,
-            @Nonnull List<DistributedFunction<?, ? extends K>> keyFns,
-            @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn
+            long earlyResultsPeriod,
+            @Nonnull List<ToLongFunctionEx<?>> timestampFns,
+            @Nonnull List<FunctionEx<?, ? extends K>> keyFns,
+            @Nonnull AggregateOperation<A, ? extends R> aggrOp,
+            @Nonnull KeyedWindowResultFunction<? super K, ? super R, ? extends OUT> mapToOutputFn
     ) {
-        return () -> new SessionWindowP<>(sessionTimeout, timestampFns, keyFns, aggrOp, mapToOutputFn);
+        return () -> new SessionWindowP<>(
+                sessionTimeout, earlyResultsPeriod, timestampFns, keyFns, aggrOp, mapToOutputFn);
     }
 
     /**
@@ -656,7 +674,7 @@ public final class Processors {
      * @param <T> the type of the stream item
      */
     @Nonnull
-    public static <T> DistributedSupplier<Processor> insertWatermarksP(
+    public static <T> SupplierEx<Processor> insertWatermarksP(
             @Nonnull EventTimePolicy<? super T> eventTimePolicy
     ) {
         return () -> new InsertWatermarksP<>(eventTimePolicy);
@@ -675,9 +693,7 @@ public final class Processors {
      * @param <R> type of emitted item
      */
     @Nonnull
-    public static <T, R> DistributedSupplier<Processor> mapP(
-            @Nonnull DistributedFunction<T, R> mapFn
-    ) {
+    public static <T, R> SupplierEx<Processor> mapP(@Nonnull FunctionEx<? super T, ? extends R> mapFn) {
         return () -> {
             final ResettableSingletonTraverser<R> trav = new ResettableSingletonTraverser<>();
             return new TransformP<T, R>(item -> {
@@ -697,14 +713,8 @@ public final class Processors {
      * @param <T> type of received item
      */
     @Nonnull
-    public static <T> DistributedSupplier<Processor> filterP(@Nonnull DistributedPredicate<T> filterFn) {
-        return () -> {
-            final ResettableSingletonTraverser<T> trav = new ResettableSingletonTraverser<>();
-            return new TransformP<T, T>(item -> {
-                trav.accept(filterFn.test(item) ? item : null);
-                return trav;
-            });
-        };
+    public static <T> SupplierEx<Processor> filterP(@Nonnull PredicateEx<? super T> filterFn) {
+        return mapP((T t) -> filterFn.test(t) ? t : null);
     }
 
     /**
@@ -715,53 +725,160 @@ public final class Processors {
      * <p>
      * This processor is stateless.
      *
-     * @param flatMapFn a stateless function that maps the received item to a traverser over output items
+     * @param flatMapFn a stateless function that maps the received item
+     *                 to a traverser over output items. It must not return
+     *                 null traverser, but can return an {@linkplain
+     *                 Traversers#empty() empty traverser}.
      * @param <T> received item type
      * @param <R> emitted item type
      */
     @Nonnull
-    public static <T, R> DistributedSupplier<Processor> flatMapP(
-            @Nonnull DistributedFunction<T, ? extends Traverser<? extends R>> flatMapFn
+    public static <T, R> SupplierEx<Processor> flatMapP(
+            @Nonnull FunctionEx<? super T, ? extends Traverser<? extends R>> flatMapFn
     ) {
         return () -> new TransformP<>(flatMapFn);
     }
 
     /**
+     * Returns a supplier of processors for a vertex that performs a stateful
+     * mapping of its input. {@code createFn} returns the object that holds the
+     * state. The processor passes this object along with each input item to
+     * {@code mapFn}, which can update the object's state. For each grouping
+     * key there's a separate state object. The state object will be included
+     * in the state snapshot, so it survives job restarts. For this reason the
+     * object must be serializable. If the mapping function maps an item to
+     * {@code null}, it will have the effect of filtering out that item.
+     * <p>
+     * If the given {@code ttl} is greater than zero, the processor will
+     * consider the state object stale if its time-to-live has expired. The
+     * time-to-live refers to the event time as kept by the watermark: each
+     * time it processes an event, the processor compares the state object's
+     * timestamp with the current watermark. If it is less than {@code
+     * wm - ttl}, it discards the state object. Otherwise it updates the
+     * timestamp with the current watermark.
+     *
+     * @param ttl               state object's time to live
+     * @param keyFn             function to extract the key from an input item
+     * @param createFn          supplier of the state object
+     * @param statefulMapFn the stateful mapping function
+     * @param <T>               type of the input item
+     * @param <K>               type of the key
+     * @param <S>               type of the state object
+     * @param <R>               type of the mapping function's result
+     */
+    @Nonnull
+    public static <T, K, S, R> SupplierEx<Processor> mapStatefulP(
+            long ttl,
+            @Nonnull FunctionEx<? super T, ? extends K> keyFn,
+            @Nonnull ToLongFunctionEx<? super T> timestampFn,
+            @Nonnull Supplier<? extends S> createFn,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends R> statefulMapFn,
+            @Nullable TriFunction<? super S, ? super K, ? super Long, ? extends R> onEvictFn
+    ) {
+        return () -> {
+            final ResettableSingletonTraverser<R> mainTrav = new ResettableSingletonTraverser<>();
+            final ResettableSingletonTraverser<R> evictTrav = new ResettableSingletonTraverser<>();
+            // SpotBugs bug: https://github.com/spotbugs/spotbugs/issues/844
+            @SuppressWarnings("UnnecessaryLocalVariable")
+            TriFunction<? super S, ? super K, ? super Long, ? extends R> onEvictFnCopy = onEvictFn;
+            return new TransformStatefulP<T, K, S, R>(
+                    ttl,
+                    keyFn,
+                    timestampFn,
+                    createFn,
+                    (state, key, item) -> {
+                        mainTrav.accept(statefulMapFn.apply(state, key, item));
+                        return mainTrav;
+                    },
+                    onEvictFnCopy != null ? (s, k, wm) -> {
+                        evictTrav.accept(onEvictFnCopy.apply(s, k, wm));
+                        return evictTrav;
+                    } : null
+            );
+        };
+    }
+
+    /**
+     * Returns a supplier of processors for a vertex that performs a stateful
+     * flat-mapping of its input. {@code createFn} returns the object that
+     * holds the state. The processor passes this object along with each input
+     * item to {@code mapFn}, which can update the object's state. For each
+     * grouping key there's a separate state object. The state object will be
+     * included in the state snapshot, so it survives job restarts. For this
+     * reason the object must be serializable.
+     * <p>
+     * If the given {@code ttl} is greater than zero, the processor will
+     * consider the state object stale if its time-to-live has expired. The
+     * time-to-live refers to the event time as kept by the watermark: each
+     * time it processes an event, the processor compares the state object's
+     * timestamp with the current watermark. If it is less than {@code
+     * wm - ttl}, it discards the state object. Otherwise it updates the
+     * timestamp with the current watermark.
+     *
+     * @param ttl               state object's time to live
+     * @param keyFn             function to extract the key from an input item
+     * @param createFn          supplier of the state object
+     * @param statefulFlatMapFn the stateful mapping function
+     * @param <T>               type of the input item
+     * @param <K>               type of the key
+     * @param <S>               type of the state object
+     * @param <R>               type of the mapping function's result
+     */
+    @Nonnull
+    public static <T, K, S, R> SupplierEx<Processor> flatMapStatefulP(
+            long ttl,
+            @Nonnull FunctionEx<? super T, ? extends K> keyFn,
+            @Nonnull ToLongFunctionEx<? super T> timestampFn,
+            @Nonnull Supplier<? extends S> createFn,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends Traverser<R>> statefulFlatMapFn,
+            @Nullable TriFunction<? super S, ? super K, ? super Long, ? extends Traverser<R>> onEvictFn
+    ) {
+        return () -> new TransformStatefulP<>(
+                ttl,
+                keyFn,
+                timestampFn,
+                createFn,
+                statefulFlatMapFn,
+                onEvictFn
+        );
+    }
+
+    /**
      * Returns a supplier of processors for a vertex which, for each received
      * item, emits the result of applying the given mapping function to it. The
-     * mapping function receives another parameter, the context object which
-     * Jet will create using the supplied {@code contextFactory}.
+     * mapping function receives another parameter, the service object which
+     * Jet will create using the supplied {@code serviceFactory}.
      * <p>
      * If the mapping result is {@code null}, the vertex emits nothing.
      * Therefore it can be used to implement filtering semantics as well.
      * <p>
-     * Unlike {@link #rollingAggregateP} (with the "{@code Keyed}" part),
-     * this method creates one context object per processor (or per member, if
-     * {@linkplain ContextFactory#shareLocally() shared}).
+     * Unlike {@link #mapStatefulP} (with the "{@code Keyed}" part),
+     * this method creates one service object per processor (or per member, if
+     * {@linkplain ServiceFactory#withLocalSharing() shared}).
      * <p>
-     * While it's allowed to store some local state in the context object, it
+     * While it's allowed to store some local state in the service object, it
      * won't be saved to the snapshot and will misbehave in a fault-tolerant
      * stream processing job.
      *
-     * @param contextFactory the context factory
+     * @param serviceFactory the service factory
      * @param mapFn a stateless mapping function
-     * @param <C> type of context object
+     * @param <S> type of service object
      * @param <T> type of received item
      * @param <R> type of emitted item
      */
     @Nonnull
-    public static <C, T, R> ProcessorSupplier mapUsingContextP(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends R> mapFn
+    public static <S, T, R> ProcessorSupplier mapUsingServiceP(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
     ) {
-        return TransformUsingContextP.<C, T, R>supplier(contextFactory, (singletonTraverser, context, item) -> {
+        return TransformUsingServiceP.<S, T, R>supplier(serviceFactory, (singletonTraverser, context, item) -> {
             singletonTraverser.accept(mapFn.apply(context, item));
             return singletonTraverser;
         });
     }
 
     /**
-     * Asynchronous version of {@link #mapUsingContextP}: the {@code
+     * Asynchronous version of {@link #mapUsingServiceP}: the {@code
      * mapAsyncFn} returns a {@code CompletableFuture<R>} instead of just
      * {@code R}.
      * <p>
@@ -773,50 +890,50 @@ public final class Processors {
      * a partitioned edge, you should use the same key. If it's a round-robin
      * edge, you can use any key, for example {@code Object::hashCode}.
      *
-     * @param contextFactory the context factory
+     * @param serviceFactory the service factory
      * @param extractKeyFn a function to extract snapshot keys
      * @param mapAsyncFn a stateless mapping function
-     * @param <C> type of context object
+     * @param <S> type of service object
      * @param <T> type of received item
      */
     @Nonnull
-    public static <C, T, K, R> ProcessorSupplier mapUsingContextAsyncP(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedFunction<T, K> extractKeyFn,
-            @Nonnull DistributedBiFunction<? super C, ? super T, CompletableFuture<R>> mapAsyncFn
+    public static <S, T, K, R> ProcessorSupplier mapUsingServiceAsyncP(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull FunctionEx<T, K> extractKeyFn,
+            @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<R>> mapAsyncFn
     ) {
-        return flatMapUsingContextAsyncP(contextFactory, extractKeyFn,
-                (c, t) -> mapAsyncFn.apply(c, t).thenApply(Traversers::singleton));
+        return flatMapUsingServiceAsyncP(serviceFactory, extractKeyFn,
+                (s, t) -> mapAsyncFn.apply(s, t).thenApply(Traversers::singleton));
     }
 
     /**
      * Returns a supplier of processors for a vertex that emits the same items
      * it receives, but only those that pass the given predicate. The predicate
-     * function receives another parameter, the context object which Jet will
-     * create using the supplied {@code contextFactory}.
+     * function receives another parameter, the service object which Jet will
+     * create using the supplied {@code serviceFactory}.
      * <p>
-     * While it's allowed to store some local state in the context object, it
+     * While it's allowed to store some local state in the service object, it
      * won't be saved to the snapshot and will misbehave in a fault-tolerant
      * stream processing job.
      *
-     * @param contextFactory the context factory
+     * @param serviceFactory the service factory
      * @param filterFn a stateless predicate to test each received item against
-     * @param <C> type of context object
+     * @param <S> type of service object
      * @param <T> type of received item
      */
     @Nonnull
-    public static <C, T> ProcessorSupplier filterUsingContextP(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
+    public static <S, T> ProcessorSupplier filterUsingServiceP(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiPredicateEx<? super S, ? super T> filterFn
     ) {
-        return TransformUsingContextP.<C, T, T>supplier(contextFactory, (singletonTraverser, context, item) -> {
+        return TransformUsingServiceP.<S, T, T>supplier(serviceFactory, (singletonTraverser, context, item) -> {
             singletonTraverser.accept(filterFn.test(context, item) ? item : null);
             return singletonTraverser;
         });
     }
 
     /**
-     * Asynchronous version of {@link #filterUsingContextP}: the {@code
+     * Asynchronous version of {@link #mapUsingServiceP}: the {@code
      * filterAsyncFn} returns a {@code CompletableFuture<Boolean>} instead of
      * just a {@code boolean}.
      * <p>
@@ -828,20 +945,20 @@ public final class Processors {
      * a partitioned edge, you should use the same key. If it's a round-robin
      * edge, you can use any key, for example {@code Object::hashCode}.
      *
-     * @param contextFactory the context factory
+     * @param serviceFactory the service factory
      * @param extractKeyFn a function to extract snapshot keys
      * @param filterAsyncFn a stateless predicate to test each received item against
-     * @param <C> type of context object
+     * @param <S> type of service object
      * @param <T> type of received item
      */
     @Nonnull
-    public static <C, T, K> ProcessorSupplier filterUsingContextAsyncP(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedFunction<T, K> extractKeyFn,
-            @Nonnull DistributedBiFunction<? super C, ? super T, CompletableFuture<Boolean>> filterAsyncFn
+    public static <S, T, K> ProcessorSupplier filterUsingServiceAsyncP(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull FunctionEx<T, K> extractKeyFn,
+            @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<Boolean>> filterAsyncFn
     ) {
-        return flatMapUsingContextAsyncP(contextFactory, extractKeyFn,
-                (c, t) -> filterAsyncFn.apply(c, t).thenApply(passed -> passed ? Traversers.singleton(t) : null));
+        return flatMapUsingServiceAsyncP(serviceFactory, extractKeyFn,
+                (s, t) -> filterAsyncFn.apply(s, t).thenApply(passed -> passed ? Traversers.singleton(t) : null));
     }
 
     /**
@@ -849,31 +966,31 @@ public final class Processors {
      * item-to-traverser mapping function to each received item and emits all
      * the items from the resulting traverser. The traverser must be
      * <em>null-terminated</em>. The mapping function receives another parameter,
-     * the context object which Jet will create using the supplied {@code
-     * contextFactory}.
+     * the service object which Jet will create using the supplied {@code
+     * serviceFactory}.
      * <p>
-     * While it's allowed to store some local state in the context object, it
+     * While it's allowed to store some local state in the service object, it
      * won't be saved to the snapshot and will misbehave in a fault-tolerant
      * stream processing job.
      *
-     * @param contextFactory the context factory
+     * @param serviceFactory the service factory
      * @param flatMapFn a stateless function that maps the received item to a traverser over
      *                  the output items
-     * @param <C> type of context object
+     * @param <S> type of service object
      * @param <T> received item type
      * @param <R> emitted item type
      */
     @Nonnull
-    public static <C, T, R> ProcessorSupplier flatMapUsingContextP(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<? extends R>> flatMapFn
+    public static <S, T, R> ProcessorSupplier flatMapUsingServiceP(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<? extends R>> flatMapFn
     ) {
-        return TransformUsingContextP.<C, T, R>supplier(contextFactory,
+        return TransformUsingServiceP.<S, T, R>supplier(serviceFactory,
                 (singletonTraverser, context, item) -> flatMapFn.apply(context, item));
     }
 
     /**
-     * Asynchronous version of {@link #flatMapUsingContextP}: the {@code
+     * Asynchronous version of {@link #flatMapUsingServiceP}: the {@code
      * flatMapAsyncFn} returns a {@code CompletableFuture<Traverser<R>>}
      * instead of just a {@code Traverser<R>}.
      * <p>
@@ -887,53 +1004,22 @@ public final class Processors {
      * a partitioned edge, you should use the same key. If it's a round-robin
      * edge, you can use any key, for example {@code Object::hashCode}.
      *
-     * @param contextFactory the context factory
+     * @param serviceFactory the service factory
      * @param extractKeyFn a function to extract snapshot keys
      * @param flatMapAsyncFn  a stateless function that maps the received item
      *      to a future returning a traverser over the output items
-     * @param <C> type of context object
+     * @param <S> type of service object
      * @param <T> type of received item
      */
     @Nonnull
-    public static <C, T, K, R> ProcessorSupplier flatMapUsingContextAsyncP(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedFunction<? super T, ? extends K> extractKeyFn,
-            @Nonnull DistributedBiFunction<? super C, ? super T, CompletableFuture<Traverser<R>>> flatMapAsyncFn
+    public static <S, T, K, R> ProcessorSupplier flatMapUsingServiceAsyncP(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull FunctionEx<? super T, ? extends K> extractKeyFn,
+            @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<Traverser<R>>> flatMapAsyncFn
     ) {
-        return contextFactory.isOrderedAsyncResponses()
-                ? AsyncTransformUsingContextOrderedP.supplier(contextFactory, flatMapAsyncFn)
-                : AsyncTransformUsingContextUnorderedP.supplier(contextFactory, flatMapAsyncFn, extractKeyFn);
-    }
-
-    /**
-     * Returns a supplier of processors for a vertex that performs a rolling
-     * aggregation. Every time it receives an item, it passes is to the
-     * accumulator and then calls the `export` primitive to emit the current
-     * state of aggregation.
-     * <p>
-     * If the result after applying `mapToOutputFn` is {@code null}, the vertex
-     * emits nothing. Therefore it can be used to implement filtering semantics
-     * as well.
-     * <p>
-     * This vertex saves the state to snapshot so the state of the accumulators
-     * will survive a job restart.
-     *
-     * @param <T> type of the input item
-     * @param <K> type of the key
-     * @param <A> type of the accumulator
-     * @param <R> type of the output item
-     * @param keyFn function that computes the grouping key
-     * @param aggrOp the aggregate operation to perform
-     * @param mapToOutputFn function that takes the input item, the key and the aggregation result
-     *                      and returns the output item
-     */
-    @Nonnull
-    public static <T, K, A, R, OUT> DistributedSupplier<Processor> rollingAggregateP(
-            @Nonnull DistributedFunction<? super T, ? extends K> keyFn,
-            @Nonnull AggregateOperation1<? super T, A, ? extends R> aggrOp,
-            @Nonnull DistributedTriFunction<? super T, ? super K, ? super R, ? extends OUT> mapToOutputFn
-    ) {
-        return () -> new RollingAggregateP<T, K, A, R, OUT>(keyFn, aggrOp, mapToOutputFn);
+        return serviceFactory.hasOrderedAsyncResponses()
+                ? AsyncTransformUsingServiceOrderedP.supplier(serviceFactory, flatMapAsyncFn)
+                : AsyncTransformUsingServiceUnorderedP.supplier(serviceFactory, flatMapAsyncFn, extractKeyFn);
     }
 
     /**
@@ -942,7 +1028,7 @@ public final class Processors {
      * and completes immediately. It also swallows any restored snapshot data.
      */
     @Nonnull
-    public static DistributedSupplier<Processor> noopP() {
+    public static SupplierEx<Processor> noopP() {
         return NoopP::new;
     }
 
@@ -957,7 +1043,7 @@ public final class Processors {
 
         @Override
         public void process(int ordinal, @Nonnull Inbox inbox) {
-            inbox.drain(DistributedConsumer.noop());
+            inbox.drain(ConsumerEx.noop());
         }
 
         @Override
@@ -967,7 +1053,7 @@ public final class Processors {
 
         @Override
         public void restoreFromSnapshot(@Nonnull Inbox inbox) {
-            inbox.drain(DistributedConsumer.noop());
+            inbox.drain(ConsumerEx.noop());
         }
     }
 }

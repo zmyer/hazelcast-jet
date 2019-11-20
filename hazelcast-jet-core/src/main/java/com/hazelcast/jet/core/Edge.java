@@ -16,27 +16,27 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.config.EdgeConfig;
 import com.hazelcast.jet.config.JetConfig;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.impl.MasterContext;
-import com.hazelcast.jet.impl.SerializationConstants;
+import com.hazelcast.jet.impl.MasterJobContext;
 import com.hazelcast.jet.impl.execution.init.CustomClassLoadedObject;
+import com.hazelcast.jet.impl.util.ConstantFunctionEx;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.HazelcastSerializationException;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
-import com.hazelcast.util.UuidUtil;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.Map;
+import java.util.Objects;
 
+import static com.hazelcast.function.Functions.wholeItem;
 import static com.hazelcast.jet.core.Partitioner.defaultPartitioner;
-import static com.hazelcast.jet.function.DistributedFunctions.wholeItem;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 
 /**
@@ -58,6 +58,8 @@ import static com.hazelcast.jet.impl.util.Util.checkSerializable;
  * <p>
  * A newly instantiated Edge is non-distributed with a {@link
  * RoutingPolicy#UNICAST UNICAST} routing policy.
+ *
+ * @since 3.0
  */
 public class Edge implements IdentifiedDataSerializable {
 
@@ -238,9 +240,9 @@ public class Edge implements IdentifiedDataSerializable {
      */
     @Nonnull
     public Edge priority(int priority) {
-        if (priority == MasterContext.SNAPSHOT_RESTORE_EDGE_PRIORITY) {
+        if (priority == MasterJobContext.SNAPSHOT_RESTORE_EDGE_PRIORITY) {
             throw new IllegalArgumentException("priority must not be Integer.MIN_VALUE ("
-                    + MasterContext.SNAPSHOT_RESTORE_EDGE_PRIORITY + ')');
+                    + MasterJobContext.SNAPSHOT_RESTORE_EDGE_PRIORITY + ')');
         }
         this.priority = priority;
         return this;
@@ -261,7 +263,11 @@ public class Edge implements IdentifiedDataSerializable {
      * the {@code extractKeyFn} function.
      */
     @Nonnull
-    public <T> Edge partitioned(@Nonnull DistributedFunction<T, ?> extractKeyFn) {
+    public <T> Edge partitioned(@Nonnull FunctionEx<T, ?> extractKeyFn) {
+        // optimization for ConstantFunctionEx
+        if (extractKeyFn instanceof ConstantFunctionEx) {
+            return allToOne(extractKeyFn.apply(null));
+        }
         return partitioned(extractKeyFn, defaultPartitioner());
     }
 
@@ -272,7 +278,7 @@ public class Edge implements IdentifiedDataSerializable {
      */
     @Nonnull
     public <T, K> Edge partitioned(
-            @Nonnull DistributedFunction<T, K> extractKeyFn,
+            @Nonnull FunctionEx<T, K> extractKeyFn,
             @Nonnull Partitioner<? super K> partitioner
     ) {
         checkSerializable(extractKeyFn, "extractKeyFn");
@@ -284,13 +290,17 @@ public class Edge implements IdentifiedDataSerializable {
 
     /**
      * Activates a special-cased {@link RoutingPolicy#PARTITIONED PARTITIONED}
-     * routing policy where all items will be assigned the same, randomly
-     * chosen partition ID. Therefore all items will be directed to the same
-     * processor.
+     * routing policy where all items will be routed to the same partition ID,
+     * determined from the given {@code key}. It means that all items will be
+     * directed to the same processor and other processors will be idle.
+     * <p>
+     * It is equivalent to using {@code partitioned(t -> key)}, but it a
+     * has small optimization that the partition ID is not recalculated
+     * for each stream item.
      */
     @Nonnull
-    public Edge allToOne() {
-        return partitioned(wholeItem(), new Single());
+    public Edge allToOne(Object key) {
+        return partitioned(wholeItem(), new Single(key));
     }
 
     /**
@@ -431,12 +441,14 @@ public class Edge implements IdentifiedDataSerializable {
         return this == obj
                 || obj instanceof Edge
                     && this.sourceName.equals((that = (Edge) obj).sourceName)
-                    && this.destName.equals(that.destName);
+                    && this.destName.equals(that.destName)
+                    && this.sourceOrdinal == that.sourceOrdinal
+                    && this.destOrdinal == that.destOrdinal;
     }
 
     @Override
     public int hashCode() {
-        return 37 * sourceName.hashCode() + destName.hashCode();
+        return Objects.hash(sourceName, destName, sourceOrdinal, destOrdinal);
     }
 
     void restoreSourceAndDest(Map<String, Vertex> nameToVertex) {
@@ -481,12 +493,12 @@ public class Edge implements IdentifiedDataSerializable {
 
     @Override
     public int getFactoryId() {
-        return SerializationConstants.FACTORY_ID;
+        return JetDataSerializerHook.FACTORY_ID;
     }
 
     @Override
-    public int getId() {
-        return SerializationConstants.EDGE;
+    public int getClassId() {
+        return JetDataSerializerHook.EDGE;
     }
 
     // END Implementation of IdentifiedDataSerializable
@@ -534,20 +546,20 @@ public class Edge implements IdentifiedDataSerializable {
 
         private static final long serialVersionUID = 1L;
 
-        private final String key;
+        private final Object key;
         private int partition;
 
-        Single() {
-            key = UuidUtil.newUnsecureUuidString();
+        Single(Object key) {
+            this.key = key;
         }
 
         @Override
-        public void init(DefaultPartitionStrategy strategy) {
+        public void init(@Nonnull DefaultPartitionStrategy strategy) {
             partition = strategy.getPartition(key);
         }
 
         @Override
-        public int getPartition(Object item, int partitionCount) {
+        public int getPartition(@Nonnull Object item, int partitionCount) {
             return partition;
         }
     }
@@ -556,11 +568,11 @@ public class Edge implements IdentifiedDataSerializable {
 
         private static final long serialVersionUID = 1L;
 
-        private final DistributedFunction<T, K> keyExtractor;
+        private final FunctionEx<T, K> keyExtractor;
         private final Partitioner<? super K> partitioner;
         private final String edgeDebugName;
 
-        KeyPartitioner(@Nonnull DistributedFunction<T, K> keyExtractor, @Nonnull Partitioner<? super K> partitioner,
+        KeyPartitioner(@Nonnull FunctionEx<T, K> keyExtractor, @Nonnull Partitioner<? super K> partitioner,
                        String edgeDebugName) {
             this.keyExtractor = keyExtractor;
             this.partitioner = partitioner;

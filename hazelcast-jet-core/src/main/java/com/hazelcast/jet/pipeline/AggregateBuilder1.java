@@ -31,10 +31,12 @@ import javax.annotation.Nonnull;
  * Refer to the documentation of that method for more details.
  * <p>
  * <strong>Note:</strong> this is not a builder of {@code
- * AggregateOperation}. If that' s what you are looking for, go {@link
+ * AggregateOperation}. If that's what you are looking for, go {@link
  * AggregateOperation#withCreate here}.
  *
  * @param <T0> type of items in stage-0 (the one you obtained this builder from)
+ *
+ * @since 3.0
  */
 public class AggregateBuilder1<T0> {
     private final AggBuilder aggBuilder;
@@ -80,6 +82,6 @@ public class AggregateBuilder1<T0> {
     @SuppressWarnings("unchecked")
     public <R> BatchStage<R> build(@Nonnull AggregateOperation<?, R> aggrOp) {
         CreateOutStageFn<R, BatchStage<R>> createOutStageFn = BatchStageImpl::new;
-        return aggBuilder.build(aggrOp, createOutStageFn, null);
+        return aggBuilder.build(aggrOp, createOutStageFn);
     }
 }

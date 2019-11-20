@@ -18,6 +18,7 @@ package com.hazelcast.jet.core;
 
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.HazelcastInstanceNotActiveException;
+import com.hazelcast.core.MemberLeftException;
 import com.hazelcast.internal.cluster.MemberInfo;
 import com.hazelcast.internal.cluster.impl.ClusterDataSerializerHook;
 import com.hazelcast.internal.partition.impl.PartitionDataSerializerHook;
@@ -35,7 +36,7 @@ import com.hazelcast.jet.impl.MasterContext;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.jet.impl.operation.InitExecutionOperation;
 import com.hazelcast.spi.exception.TargetNotMemberException;
-import com.hazelcast.test.HazelcastParametersRunnerFactory;
+import com.hazelcast.test.HazelcastSerialParametersRunnerFactory;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
@@ -76,7 +77,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 @RunWith(Parameterized.class)
-@Parameterized.UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
+@Parameterized.UseParametersRunnerFactory(HazelcastSerialParametersRunnerFactory.class)
 public class TopologyChangeTest extends JetTestSupport {
 
     private static final int NODE_COUNT = 3;
@@ -94,7 +95,7 @@ public class TopologyChangeTest extends JetTestSupport {
     private JetInstance[] instances;
     private JetConfig config;
 
-    @Parameterized.Parameters
+    @Parameterized.Parameters(name = "liteMemberFlags({index}")
     public static Collection<boolean[]> parameters() {
         return Arrays.asList(new boolean[][]{
                 {false, false, false},
@@ -224,6 +225,15 @@ public class TopologyChangeTest extends JetTestSupport {
         NoOutputSourceP.proceedLatch.countDown();
 
         assertJobStatusEventually(job, snapshotted ? SUSPENDED : FAILED, 10);
+        if (!snapshotted) {
+            try {
+                job.join();
+                fail("join didn't fail");
+            } catch (Exception e) {
+                assertContains(e.getMessage(), TopologyChangedException.class.getName());
+                assertContains(e.getMessage(), "[127.0.0.1]:5703=" + MemberLeftException.class.getName());
+            }
+        }
     }
 
     @Test

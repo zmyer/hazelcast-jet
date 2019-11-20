@@ -15,7 +15,7 @@
   ~ limitations under the License.
   -->
 
-<hazelcast-jet xsi:schemaLocation="http://www.hazelcast.com/schema/jet-config hazelcast-jet-config-0.8.xsd"
+<hazelcast-jet xsi:schemaLocation="http://www.hazelcast.com/schema/jet-config hazelcast-jet-config-4.0.xsd"
                xmlns="http://www.hazelcast.com/schema/jet-config"
                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
     <instance>
@@ -28,11 +28,19 @@
         <!-- the delay after which auto-scaled jobs will restart if a new member is added to the
              cluster. The default is 10 seconds. Has no effect on jobs with auto scaling disabled -->
         <scale-up-delay-millis>10000</scale-up-delay-millis>
+        <!-- Sets whether lossless job restart is enabled for the node. With
+             lossless restart you can restart the whole cluster without losing the
+             jobs and their state. The feature is implemented on top of the Hot
+             Restart feature of Hazelcast IMDG which persists the data to disk. -->
+        <lossless-restart-enabled>false</lossless-restart-enabled>
     </instance>
 
     <!-- custom properties which can be read in the user code -->
     <properties>
-       <property name="custom.property">custom property</property>
+        <property name="jet.idle.cooperative.min.microseconds">50</property>
+        <property name="jet.idle.cooperative.max.microseconds">500</property>
+        <property name="jet.idle.noncooperative.min.microseconds">50</property>
+        <property name="jet.idle.noncooperative.max.microseconds">1000</property>
     </properties>
 
     <edge-defaults>
@@ -46,18 +54,4 @@
        <receive-window-multiplier>3</receive-window-multiplier>
     </edge-defaults>
 
-    <!-- whether metrics collection is enabled -->
-    <metrics enabled="true">
-
-        <!-- the number of seconds the metrics will be retained on the instance -->
-        <retention-seconds>120</retention-seconds>
-
-        <!-- the metrics collection interval in seconds -->
-        <collection-interval-seconds>5</collection-interval-seconds>
-        
-        <!-- whether metrics should be collected for data structures. Metrics
-            collection can have some overhead if there is a large number of data
-            structures -->
-        <metrics-for-data-structures>false</metrics-for-data-structures>
-    </metrics>
 </hazelcast-jet>

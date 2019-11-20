@@ -16,11 +16,11 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.function.SupplierEx;
 
 import javax.annotation.Nonnull;
 
-import static com.hazelcast.util.Preconditions.checkNotNegative;
+import static com.hazelcast.internal.util.Preconditions.checkNotNegative;
 import static java.lang.Math.max;
 
 /**
@@ -36,6 +36,8 @@ import static java.lang.Math.max;
  *
  * @see EventTimePolicy
  * @see EventTimeMapper
+ *
+ * @since 3.0
  */
 public interface WatermarkPolicy {
 
@@ -63,15 +65,19 @@ public interface WatermarkPolicy {
 
     /**
      * Maintains a watermark that lags behind the top observed timestamp by the
-     * given amount. In the case of a stream lull the watermark does not
-     * advance towards the top observed timestamp and remains behind it
-     * indefinitely.
+     * given amount.
+     * <p>
+     * <strong>Note:</strong> if Jet stops receiving events at some point (e.g.,
+     * at the end of a business day), the watermark will stop advancing and
+     * stay behind the most recent events. Jet will not output the results of
+     * aggregating these events until it starts receiving events again (e.g.,
+     * at the start of the next business day).
      *
      * @param lag the desired difference between the top observed timestamp
      *            and the watermark
      */
     @Nonnull
-    static DistributedSupplier<WatermarkPolicy> limitingLag(long lag) {
+    static SupplierEx<WatermarkPolicy> limitingLag(long lag) {
         checkNotNegative(lag, "lag must not be negative");
 
         return () -> new WatermarkPolicy() {

@@ -16,38 +16,38 @@
 
 package com.hazelcast.jet.impl.pipeline.transform;
 
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.core.Vertex;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.impl.pipeline.Planner;
 import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
 
 import javax.annotation.Nonnull;
 import java.util.List;
 
+import static com.hazelcast.function.Functions.entryKey;
 import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.Partitioner.HASH_CODE;
 import static com.hazelcast.jet.core.processor.Processors.accumulateByKeyP;
 import static com.hazelcast.jet.core.processor.Processors.aggregateByKeyP;
 import static com.hazelcast.jet.core.processor.Processors.combineByKeyP;
-import static com.hazelcast.jet.function.DistributedFunctions.entryKey;
 import static com.hazelcast.jet.impl.pipeline.transform.AbstractTransform.Optimization.MEMORY;
 import static com.hazelcast.jet.impl.pipeline.transform.AggregateTransform.FIRST_STAGE_VERTEX_NAME_SUFFIX;
 
 public class GroupTransform<K, A, R, OUT> extends AbstractTransform {
     @Nonnull
-    private final List<DistributedFunction<?, ? extends K>> groupKeyFns;
+    private final List<FunctionEx<?, ? extends K>> groupKeyFns;
     @Nonnull
     private final AggregateOperation<A, R> aggrOp;
     @Nonnull
-    private final DistributedBiFunction<? super K, ? super R, OUT> mapToOutputFn;
+    private final BiFunctionEx<? super K, ? super R, OUT> mapToOutputFn;
 
     public GroupTransform(
             @Nonnull List<Transform> upstream,
-            @Nonnull List<DistributedFunction<?, ? extends K>> groupKeyFns,
+            @Nonnull List<FunctionEx<?, ? extends K>> groupKeyFns,
             @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull DistributedBiFunction<? super K, ? super R, OUT> mapToOutputFn
+            @Nonnull BiFunctionEx<? super K, ? super R, OUT> mapToOutputFn
     ) {
         super(createName(upstream), upstream);
         this.groupKeyFns = groupKeyFns;
@@ -84,7 +84,7 @@ public class GroupTransform<K, A, R, OUT> extends AbstractTransform {
     //                        | aggregateByKeyP |
     //                         -----------------
     private void addToDagSingleStage(Planner p) {
-        PlannerVertex pv = p.addVertex(this, p.uniqueVertexName(name()), localParallelism(),
+        PlannerVertex pv = p.addVertex(this, name(), localParallelism(),
                 aggregateByKeyP(groupKeyFns, aggrOp, mapToOutputFn));
         p.addEdges(this, pv.v, (e, ord) -> e.distributed().partitioned(groupKeyFns.get(ord)));
     }
@@ -107,11 +107,10 @@ public class GroupTransform<K, A, R, OUT> extends AbstractTransform {
     //                        | combineByKeyP |
     //                         ---------------
     private void addToDagTwoStage(Planner p) {
-        List<DistributedFunction<?, ? extends K>> groupKeyFns = this.groupKeyFns;
-        String vertexName = p.uniqueVertexName(this.name());
-        Vertex v1 = p.dag.newVertex(vertexName + FIRST_STAGE_VERTEX_NAME_SUFFIX, accumulateByKeyP(groupKeyFns, aggrOp))
+        List<FunctionEx<?, ? extends K>> groupKeyFns = this.groupKeyFns;
+        Vertex v1 = p.dag.newVertex(name() + FIRST_STAGE_VERTEX_NAME_SUFFIX, accumulateByKeyP(groupKeyFns, aggrOp))
                 .localParallelism(localParallelism());
-        PlannerVertex pv2 = p.addVertex(this, vertexName, localParallelism(),
+        PlannerVertex pv2 = p.addVertex(this, name(), localParallelism(),
                 combineByKeyP(aggrOp, mapToOutputFn));
         p.addEdges(this, v1, (e, ord) -> e.partitioned(groupKeyFns.get(ord), HASH_CODE));
         p.dag.edge(between(v1, pv2.v).distributed().partitioned(entryKey()));

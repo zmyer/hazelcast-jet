@@ -18,18 +18,20 @@ package com.hazelcast.jet.pipeline;
 
 import com.hazelcast.cache.ICache;
 import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.collection.IList;
 import com.hazelcast.config.Config;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.core.IList;
-import com.hazelcast.core.IMap;
-import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.TestInClusterSupport;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.nio.Address;
+import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.pipeline.test.TestSources;
+import com.hazelcast.map.IMap;
 import org.junit.Before;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.cache.Cache;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -37,15 +39,20 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.CompletionException;
+import java.util.function.Function;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
-import static com.hazelcast.query.TruePredicate.truePredicate;
+import static com.hazelcast.jet.impl.util.ExceptionUtil.peel;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
 
-@SuppressWarnings("WeakerAccess")
 public abstract class PipelineTestSupport extends TestInClusterSupport {
 
-    protected int itemCount = 1_000;
+    protected int itemCount = 1024;
     protected final String srcName = journaledMapName();
     protected final String sinkName = randomName();
 
@@ -71,19 +78,31 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         sinkList = jet().getList(sinkName);
     }
 
-    protected JetInstance jet() {
-        return testMode.getJet();
+    protected Job execute() {
+        return execute(new JobConfig());
     }
 
-    protected void execute() {
-        jet().newJob(p).join();
+    protected Job execute(JobConfig config) {
+        return execute(p, config);
+    }
+
+    protected Job executeAndPeel() throws Throwable {
+        try {
+            return execute();
+        } catch (CompletionException e) {
+            throw peel(e);
+        }
     }
 
     protected Job start() {
         return jet().newJob(p);
     }
 
-    static String journaledMapName() {
+    protected BatchStage<Integer> batchStageFromList(List<Integer> input) {
+        return p.readFrom(TestSources.items(input));
+    }
+
+    protected static String journaledMapName() {
         return randomMapName(JOURNALED_MAP_PREFIX);
     }
 
@@ -91,39 +110,77 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         srcList.addAll(data);
     }
 
-    void putToBatchSrcMap(Collection<Integer> data) {
+    protected void putToBatchSrcMap(Collection<Integer> data) {
         putToMap(srcMap, data);
     }
 
-    void putToBatchSrcCache(Collection<Integer> data) {
+    protected void putToBatchSrcCache(Collection<Integer> data) {
         putToCache(srcCache, data);
     }
 
-    static void putToMap(Map<String, Integer> dest, Collection<Integer> data) {
+    protected static void putToMap(Map<String, Integer> dest, Collection<Integer> data) {
         int[] key = {0};
         data.forEach(i -> dest.put(String.valueOf(key[0]++), i));
     }
 
-    static void putToCache(Cache<String, Integer> dest, Collection<Integer> data) {
+    protected static void putToCache(Cache<String, Integer> dest, Collection<Integer> data) {
         int[] key = {0};
         data.forEach(i -> dest.put(String.valueOf(key[0]++), i));
     }
 
-    <T> Sink<T> sinkList() {
+    protected <T> Sink<T> sinkList() {
         return Sinks.list(sinkName);
     }
 
+    protected <T> Stream<T> sinkStreamOf(Class<T> type) {
+        return sinkList.stream().map(type::cast);
+    }
+
     @SuppressWarnings("unchecked")
-    <T> Map<T, Integer> sinkToBag() {
+    protected <K, V> Stream<Entry<K, V>> sinkStreamOfEntry() {
+        return sinkList.stream().map(Entry.class::cast);
+    }
+
+    @SuppressWarnings("unchecked")
+    protected <T> Map<T, Integer> sinkToBag() {
         return toBag((List<T>) this.sinkList);
     }
 
-    static BatchSource<Integer> mapValuesSource(String srcName) {
-        return Sources.map(srcName, truePredicate(),
-                (DistributedFunction<Entry<String, Integer>, Integer>) Entry::getValue);
+    /**
+     * Uses {@code formatFn} to stringify each item of the given stream, sorts
+     * the strings, then outputs them line by line.
+     * <p>
+     * If you supply the optional {@code distinctKeyFn}, it will use it to
+     * eliminate the items with the same key, keeping the last one in the
+     * stream. Keeping the last duplicate item is the way to de-duplicate a
+     * stream of early window results.
+     */
+    protected static <T, K> String streamToString(
+            @Nonnull Stream<? extends T> stream,
+            @Nonnull Function<? super T, ? extends String> formatFn,
+            @Nullable Function<? super T, ? extends K> distinctKeyFn
+    ) {
+        if (distinctKeyFn != null) {
+            stream = stream.collect(toMap(distinctKeyFn, identity(), (t0, t1) -> t1))
+                           .values().stream();
+        }
+        return stream.map(formatFn)
+                     .sorted()
+                     .collect(joining("\n"));
     }
 
-    static <T> Map<T, Integer> toBag(Collection<T> coll) {
+    /**
+     * Uses {@code formatFn} to stringify each item of the given stream, sorts
+     * the strings, then outputs them line by line.
+     */
+    protected static <T> String streamToString(
+            @Nonnull Stream<? extends T> stream,
+            @Nonnull Function<? super T, ? extends String> formatFn
+    ) {
+        return streamToString(stream, formatFn, null);
+    }
+
+    protected static <T> Map<T, Integer> toBag(Collection<T> coll) {
         Map<T, Integer> bag = new HashMap<>();
         for (T t : coll) {
             bag.merge(t, 1, (count, x) -> count + 1);
@@ -135,7 +192,15 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         return IntStream.range(0, itemCount).boxed().collect(toList());
     }
 
-    static List<HazelcastInstance> createRemoteCluster(Config config, int size) {
+    protected static long roundDown(long value, long unit) {
+        return value - value % unit;
+    }
+
+    protected static long roundUp(long value, long unit) {
+        return roundDown(value + unit - 1, unit);
+    }
+
+    protected static List<HazelcastInstance> createRemoteCluster(Config config, int size) {
         ArrayList<HazelcastInstance> instances = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             instances.add(Hazelcast.newHazelcastInstance(config));
@@ -143,12 +208,11 @@ public abstract class PipelineTestSupport extends TestInClusterSupport {
         return instances;
     }
 
-    static ClientConfig getClientConfigForRemoteCluster(HazelcastInstance instance) {
+    protected static ClientConfig getClientConfigForRemoteCluster(HazelcastInstance instance) {
         ClientConfig clientConfig = new ClientConfig();
         Address address = instance.getCluster().getLocalMember().getAddress();
         clientConfig.getNetworkConfig().addAddress(address.getHost() + ':' + address.getPort());
-        clientConfig.getGroupConfig().setName(instance.getConfig().getGroupConfig().getName());
+        clientConfig.setClusterName(instance.getConfig().getClusterName());
         return clientConfig;
     }
-
 }

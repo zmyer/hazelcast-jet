@@ -16,8 +16,8 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.core.processor.Processors;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.hamcrest.Matchers;
 import org.junit.Rule;
@@ -34,8 +34,8 @@ import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.Edge.from;
 import static com.hazelcast.jet.core.processor.Processors.noopP;
 import static java.util.Arrays.asList;
-import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.core.StringContains.containsString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
@@ -43,7 +43,7 @@ import static org.junit.Assert.assertTrue;
 @RunWith(HazelcastParallelClassRunner.class)
 public class DAGTest {
 
-    private static final DistributedSupplier<Processor> PROCESSOR_SUPPLIER = noopP();
+    private static final SupplierEx<Processor> PROCESSOR_SUPPLIER = noopP();
 
     @Rule
     public final ExpectedException exceptionRule = ExpectedException.none();
@@ -328,15 +328,12 @@ public class DAGTest {
     }
 
     @Test
-    public void when_multigraph_then_invalid() {
+    public void when_multigraph_then_valid() {
         // Given
         DAG dag = new DAG();
         Vertex a = dag.newVertex("a", PROCESSOR_SUPPLIER);
         Vertex b = dag.newVertex("b", PROCESSOR_SUPPLIER);
         dag.edge(from(a, 0).to(b, 0));
-
-        // Then
-        exceptionRule.expect(IllegalArgumentException.class);
 
         // When
         dag.edge(from(a, 1).to(b, 1));

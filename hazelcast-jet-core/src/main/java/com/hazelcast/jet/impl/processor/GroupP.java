@@ -16,21 +16,22 @@
 
 package com.hazelcast.jet.impl.processor;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.core.AbstractProcessor;
-import com.hazelcast.jet.function.DistributedFunction;
 
 import javax.annotation.Nonnull;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
-import static com.hazelcast.jet.Traversers.traverseStream;
-import static com.hazelcast.util.Preconditions.checkTrue;
+import static com.hazelcast.internal.util.Preconditions.checkTrue;
 import static java.util.Collections.singletonList;
 
 /**
@@ -40,14 +41,15 @@ import static java.util.Collections.singletonList;
  * accumulation functions as there are inbound edges.
  */
 public class GroupP<K, A, R, OUT> extends AbstractProcessor {
-    @Nonnull private final List<DistributedFunction<?, ? extends K>> groupKeyFns;
+    @Nonnull private final List<FunctionEx<?, ? extends K>> groupKeyFns;
     @Nonnull private final AggregateOperation<A, R> aggrOp;
 
     private final Map<K, A> keyToAcc = new HashMap<>();
-    private final Traverser<OUT> resultTraverser;
+    private Traverser<OUT> resultTraverser;
+    private final BiFunction<? super K, ? super R, OUT> mapToOutputFn;
 
     public GroupP(
-            @Nonnull List<DistributedFunction<?, ? extends K>> groupKeyFns,
+            @Nonnull List<FunctionEx<?, ? extends K>> groupKeyFns,
             @Nonnull AggregateOperation<A, R> aggrOp,
             @Nonnull BiFunction<? super K, ? super R, OUT> mapToOutputFn
     ) {
@@ -55,13 +57,11 @@ public class GroupP<K, A, R, OUT> extends AbstractProcessor {
                 "provided for " + aggrOp.arity() + "-arity aggregate operation");
         this.groupKeyFns = groupKeyFns;
         this.aggrOp = aggrOp;
-        this.resultTraverser = traverseStream(keyToAcc
-                .entrySet().stream()
-                .map(e -> mapToOutputFn.apply(e.getKey(), aggrOp.finishFn().apply(e.getValue()))));
+        this.mapToOutputFn = mapToOutputFn;
     }
 
     public <T> GroupP(
-            @Nonnull DistributedFunction<? super T, ? extends K> groupKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends K> groupKeyFn,
             @Nonnull AggregateOperation1<? super T, A, R> aggrOp,
             @Nonnull BiFunction<? super K, ? super R, OUT> mapToOutputFn
     ) {
@@ -80,6 +80,27 @@ public class GroupP<K, A, R, OUT> extends AbstractProcessor {
 
     @Override
     public boolean complete() {
+        if (resultTraverser == null) {
+            resultTraverser = new ResultTraverser()
+                    // reuse null filtering done by map()
+                    .map(e -> mapToOutputFn.apply(e.getKey(), aggrOp.finishFn().apply(e.getValue())));
+        }
         return emitFromTraverser(resultTraverser);
+    }
+
+    private class ResultTraverser implements Traverser<Entry<K, A>> {
+        private final Iterator<Entry<K, A>> iter = keyToAcc.entrySet().iterator();
+
+        @Override
+        public Entry<K, A> next() {
+            if (!iter.hasNext()) {
+                return null;
+            }
+            try {
+                return iter.next();
+            } finally {
+                iter.remove();
+            }
+        }
     }
 }

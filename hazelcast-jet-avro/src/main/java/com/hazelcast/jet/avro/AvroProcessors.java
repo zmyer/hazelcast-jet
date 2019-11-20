@@ -16,9 +16,9 @@
 
 package com.hazelcast.jet.avro;
 
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.impl.connector.ReadFilesP;
 import com.hazelcast.jet.impl.connector.WriteBufferedP;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
@@ -39,6 +39,8 @@ import static com.hazelcast.jet.impl.util.Util.uncheckRun;
 /**
  * Static utility class with factories of Apache Avro source and sink
  * processors.
+ *
+ * @since 3.0
  */
 public final class AvroProcessors {
 
@@ -53,8 +55,8 @@ public final class AvroProcessors {
             @Nonnull String directory,
             @Nonnull String glob,
             boolean sharedFileSystem,
-            @Nonnull DistributedSupplier<? extends DatumReader<D>> datumReaderSupplier,
-            @Nonnull DistributedBiFunction<String, ? super D, T> mapOutputFn
+            @Nonnull SupplierEx<? extends DatumReader<D>> datumReaderSupplier,
+            @Nonnull BiFunctionEx<String, ? super D, T> mapOutputFn
     ) {
         return ReadFilesP.metaSupplier(directory, glob, sharedFileSystem,
                 path -> {
@@ -71,8 +73,8 @@ public final class AvroProcessors {
     @Nonnull
     public static <D> ProcessorMetaSupplier writeFilesP(
             @Nonnull String directoryName,
-            @Nonnull DistributedSupplier<Schema> schemaSupplier,
-            @Nonnull DistributedSupplier<DatumWriter<D>> datumWriterSupplier
+            @Nonnull SupplierEx<Schema> schemaSupplier,
+            @Nonnull SupplierEx<DatumWriter<D>> datumWriterSupplier
     ) {
         return ProcessorMetaSupplier.of(
                 WriteBufferedP.<DataFileWriter<D>, D>supplier(
@@ -90,8 +92,8 @@ public final class AvroProcessors {
                     + "because we'll fail later when trying to create the file.")
     private static <D> DataFileWriter<D> createWriter(
             Path directory, int globalIndex,
-            DistributedSupplier<Schema> schemaSupplier,
-            DistributedSupplier<DatumWriter<D>> datumWriterSupplier
+            SupplierEx<Schema> schemaSupplier,
+            SupplierEx<DatumWriter<D>> datumWriterSupplier
     ) throws IOException {
         directory.toFile().mkdirs();
 
@@ -101,5 +103,4 @@ public final class AvroProcessors {
         writer.create(schemaSupplier.get(), file.toFile());
         return writer;
     }
-
 }

@@ -16,29 +16,32 @@
 
 package com.hazelcast.jet.pipeline;
 
-import com.hazelcast.core.IMap;
-import com.hazelcast.core.ReplicatedMap;
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.BiPredicateEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.PredicateEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.aggregate.AggregateOperation2;
 import com.hazelcast.jet.aggregate.AggregateOperation3;
+import com.hazelcast.jet.aggregate.AggregateOperations;
 import com.hazelcast.jet.core.Processor;
+import com.hazelcast.jet.core.ProcessorMetaSupplier;
+import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.datamodel.Tuple2;
 import com.hazelcast.jet.datamodel.Tuple3;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedBiPredicate;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedPredicate;
-import com.hazelcast.jet.function.DistributedSupplier;
-import com.hazelcast.jet.function.DistributedTriFunction;
+import com.hazelcast.jet.function.TriFunction;
+import com.hazelcast.map.IMap;
+import com.hazelcast.replicatedmap.ReplicatedMap;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.concurrent.CompletableFuture;
 
+import static com.hazelcast.function.Functions.wholeItem;
 import static com.hazelcast.jet.aggregate.AggregateOperations.aggregateOperation2;
 import static com.hazelcast.jet.aggregate.AggregateOperations.aggregateOperation3;
-import static com.hazelcast.jet.function.DistributedFunctions.wholeItem;
 
 /**
  * A stage in a distributed computation {@link Pipeline pipeline} that will
@@ -46,6 +49,8 @@ import static com.hazelcast.jet.function.DistributedFunctions.wholeItem;
  * upstream stages (if any) and passes its output to its downstream stages.
  *
  * @param <T> the type of items coming out of this stage
+ *
+ * @since 3.0
  */
 public interface BatchStage<T> extends GeneralStage<T> {
 
@@ -53,88 +58,110 @@ public interface BatchStage<T> extends GeneralStage<T> {
      * {@inheritDoc}
      */
     @Nonnull
-    <K> BatchStageWithKey<T, K> groupingKey(@Nonnull DistributedFunction<? super T, ? extends K> keyFn);
+    <K> BatchStageWithKey<T, K> groupingKey(@Nonnull FunctionEx<? super T, ? extends K> keyFn);
 
     @Nonnull @Override
-    <R> BatchStage<R> map(@Nonnull DistributedFunction<? super T, ? extends R> mapFn);
+    <R> BatchStage<R> map(@Nonnull FunctionEx<? super T, ? extends R> mapFn);
 
     @Nonnull @Override
-    BatchStage<T> filter(@Nonnull DistributedPredicate<T> filterFn);
+    BatchStage<T> filter(@Nonnull PredicateEx<T> filterFn);
 
     @Nonnull @Override
-    <R> BatchStage<R> flatMap(@Nonnull DistributedFunction<? super T, ? extends Traverser<? extends R>> flatMapFn);
+    <R> BatchStage<R> flatMap(@Nonnull FunctionEx<? super T, ? extends Traverser<R>> flatMapFn);
 
     @Nonnull @Override
-    <C, R> BatchStage<R> mapUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends R> mapFn
+    <S, R> BatchStage<R> mapStateful(
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
     );
 
     @Nonnull @Override
-    <C, R> BatchStage<R> mapUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
+    <S> BatchStage<T> filterStateful(
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull BiPredicateEx<? super S, ? super T> filterFn);
+
+    @Nonnull @Override
+    <S, R> BatchStage<R> flatMapStateful(
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<R>> flatMapFn);
+
+    @Nonnull @Override
+    default <A, R> BatchStage<R> rollingAggregate(@Nonnull AggregateOperation1<? super T, A, ? extends R> aggrOp) {
+        return (BatchStage<R>) GeneralStage.super.<A, R>rollingAggregate(aggrOp);
+    }
+
+    @Nonnull @Override
+    <S, R> BatchStage<R> mapUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
     );
 
     @Nonnull @Override
-    <C> BatchStage<T> filterUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
+    <S, R> BatchStage<R> mapUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
     );
 
     @Nonnull @Override
-    <C> BatchStage<T> filterUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
+    <S> BatchStage<T> filterUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiPredicateEx<? super S, ? super T> filterFn
     );
 
     @Nonnull @Override
-    <C, R> BatchStage<R> flatMapUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<R>> flatMapFn
+    <S> BatchStage<T> filterUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
     );
 
     @Nonnull @Override
-    <C, R> BatchStage<R> flatMapUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Traverser<R>>>
+    <S, R> BatchStage<R> flatMapUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<R>> flatMapFn
+    );
+
+    @Nonnull @Override
+    <S, R> BatchStage<R> flatMapUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Traverser<R>>>
                     flatMapAsyncFn
     );
 
-    @Override @Nonnull
+    @Nonnull @Override
     default <K, V, R> BatchStage<R> mapUsingReplicatedMap(
             @Nonnull String mapName,
-            @Nonnull DistributedBiFunction<? super ReplicatedMap<K, V>, ? super T, ? extends R> mapFn
+            @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
+            @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
     ) {
-        return (BatchStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(mapName, mapFn);
-    }
-
-    @Override @Nonnull
-    default <K, V, R> BatchStage<R> mapUsingReplicatedMap(
-            @Nonnull ReplicatedMap<K, V> replicatedMap,
-            @Nonnull DistributedBiFunction<? super ReplicatedMap<K, V>, ? super T, ? extends R> mapFn
-    ) {
-        return (BatchStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(replicatedMap, mapFn);
-    }
-
-    @Override @Nonnull
-    default <K, V, R> BatchStage<R> mapUsingIMapAsync(
-            @Nonnull String mapName,
-            @Nonnull DistributedBiFunction<? super IMap<K, V>, ? super T, ? extends CompletableFuture<R>> mapFn
-    ) {
-        return (BatchStage<R>) GeneralStage.super.<K, V, R>mapUsingIMapAsync(mapName, mapFn);
-    }
-
-    @Override @Nonnull
-    default <K, V, R> BatchStage<R> mapUsingIMapAsync(
-            @Nonnull IMap<K, V> iMap,
-            @Nonnull DistributedBiFunction<? super IMap<K, V>, ? super T, ? extends CompletableFuture<R>> mapFn
-    ) {
-        return (BatchStage<R>) GeneralStage.super.<K, V, R>mapUsingIMapAsync(iMap, mapFn);
+        return (BatchStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(mapName, lookupKeyFn, mapFn);
     }
 
     @Nonnull @Override
-    <R> BatchStage<R> rollingAggregate(@Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp);
+    default <K, V, R> BatchStage<R> mapUsingReplicatedMap(
+            @Nonnull ReplicatedMap<K, V> replicatedMap,
+            @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
+            @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
+    ) {
+        return (BatchStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(replicatedMap, lookupKeyFn, mapFn);
+    }
+
+    @Nonnull @Override
+    default <K, V, R> BatchStage<R> mapUsingIMap(
+            @Nonnull String mapName,
+            @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
+            @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
+    ) {
+        return (BatchStage<R>) GeneralStage.super.<K, V, R>mapUsingIMap(mapName, lookupKeyFn, mapFn);
+    }
+
+    @Nonnull @Override
+    default <K, V, R> BatchStage<R> mapUsingIMap(
+            @Nonnull IMap<K, V> iMap,
+            @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
+            @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
+    ) {
+        return (BatchStage<R>) GeneralStage.super.<K, V, R>mapUsingIMap(iMap, lookupKeyFn, mapFn);
+    }
 
     /**
      * Attaches a stage that emits just the items that are distinct according
@@ -163,7 +190,7 @@ public interface BatchStage<T> extends GeneralStage<T> {
     <K, T1_IN, T1, R> BatchStage<R> hashJoin(
             @Nonnull BatchStage<T1_IN> stage1,
             @Nonnull JoinClause<K, ? super T, ? super T1_IN, ? extends T1> joinClause1,
-            @Nonnull DistributedBiFunction<T, T1, R> mapToOutputFn
+            @Nonnull BiFunctionEx<T, T1, R> mapToOutputFn
     );
 
     @Nonnull @Override
@@ -172,7 +199,7 @@ public interface BatchStage<T> extends GeneralStage<T> {
             @Nonnull JoinClause<K1, ? super T, ? super T1_IN, ? extends T1> joinClause1,
             @Nonnull BatchStage<T2_IN> stage2,
             @Nonnull JoinClause<K2, ? super T, ? super T2_IN, ? extends T2> joinClause2,
-            @Nonnull DistributedTriFunction<T, T1, T2, R> mapToOutputFn
+            @Nonnull TriFunction<T, T1, T2, R> mapToOutputFn
     );
 
     @Nonnull @Override
@@ -183,8 +210,13 @@ public interface BatchStage<T> extends GeneralStage<T> {
     /**
      * Attaches a stage that performs the given aggregate operation over all
      * the items it receives. The aggregating stage emits a single item.
+     * <p>
+     * Sample usage:
+     * <pre>{@code
+     * stage.aggregate(AggregateOperations.counting())
+     * }</pre>
      *
-     * @see com.hazelcast.jet.aggregate.AggregateOperations AggregateOperations
+     * @see AggregateOperations AggregateOperations
      * @param aggrOp the aggregate operation to perform
      * @param <R> the type of the result
      */
@@ -208,8 +240,17 @@ public interface BatchStage<T> extends GeneralStage<T> {
      * accumulator.
      * <p>
      * The returned stage emits a single item.
+     * <p>
+     * Sample usage:
+     * <pre>{@code
+     * BatchStage<Tuple2<Long, Long>> counts = pageVisits.aggregate2(addToCarts,
+     *         AggregateOperations.aggregateOperation2(
+     *                 AggregateOperations.counting(),
+     *                 AggregateOperations.counting())
+     *         );
+     * }</pre>
      *
-     * @see com.hazelcast.jet.aggregate.AggregateOperations AggregateOperations
+     * @see AggregateOperations AggregateOperations
      * @param aggrOp the aggregate operation to perform
      * @param <T1> type of items in {@code stage1}
      * @param <R> type of the result
@@ -221,37 +262,18 @@ public interface BatchStage<T> extends GeneralStage<T> {
 
     /**
      * Attaches a stage that co-aggregates the data from this and the supplied
-     * stage by performing a separate aggregate operation on each and then
-     * passing both results to {@code mapToOutputFn}, which transforms them
-     * into the final output.
-     * <p>
-     * The returned stage emits a single item.
-     *
-     * @param aggrOp0 aggregate operation to perform on this stage
-     * @param stage1 the other stage
-     * @param aggrOp1 aggregate operation to perform on the other stage
-     * @param mapToOutputFn function to apply to the aggregated results
-     * @param <T1> type of the items in the other stage
-     * @param <R0> type of the aggregated result for this stage
-     * @param <R1> type of the aggregated result for the other stage
-     * @param <OUT> the output item type
-     */
-    @Nonnull
-    default <T1, R0, R1, OUT> BatchStage<OUT> aggregate2(
-            @Nonnull AggregateOperation1<? super T, ?, ? extends R0> aggrOp0,
-            @Nonnull BatchStage<T1> stage1,
-            @Nonnull AggregateOperation1<? super T1, ?, ? extends R1> aggrOp1,
-            @Nonnull DistributedBiFunction<? super R0, ? super R1, ? extends OUT> mapToOutputFn
-    ) {
-        return aggregate2(stage1, aggregateOperation2(aggrOp0, aggrOp1, mapToOutputFn));
-    }
-
-    /**
-     * Attaches a stage that co-aggregates the data from this and the supplied
      * stage by performing a separate aggregate operation on each and emitting
      * a {@link Tuple2} with their results.
      * <p>
      * The returned stage emits a single item.
+     * <p>
+     * Sample usage:
+     * <pre>{@code
+     * BatchStage<Tuple2<Long, Long>> counts = pageVisits.aggregate2(
+     *         AggregateOperations.counting(),
+     *         addToCarts, AggregateOperations.counting()
+     * );
+     * }</pre>
      *
      * @param aggrOp0 aggregate operation to perform on this stage
      * @param stage1 the other stage
@@ -266,7 +288,7 @@ public interface BatchStage<T> extends GeneralStage<T> {
             @Nonnull BatchStage<T1> stage1,
             @Nonnull AggregateOperation1<? super T1, ?, ? extends R1> aggrOp1
     ) {
-        return aggregate2(stage1, aggregateOperation2(aggrOp0, aggrOp1, Tuple2::tuple2));
+        return aggregate2(stage1, aggregateOperation2(aggrOp0, aggrOp1));
     }
 
     /**
@@ -284,9 +306,20 @@ public interface BatchStage<T> extends GeneralStage<T> {
      * aggregate operation that combines the input streams into the same
      * accumulator.
      * <p>
-     * The aggregating stage emits a single item.
+     * The returned stage emits a single item.
+     * <p>
+     * Sample usage:
+     * <pre>{@code
+     * BatchStage<Tuple3<Long, Long, Long>> counts = pageVisits.aggregate3(
+     *         addToCarts,
+     *         payments,
+     *         AggregateOperations.aggregateOperation3(
+     *                 AggregateOperations.counting(),
+     *                 AggregateOperations.counting(),
+     *                 AggregateOperations.counting()));
+     * }</pre>
      *
-     * @see com.hazelcast.jet.aggregate.AggregateOperations AggregateOperations
+     * @see AggregateOperations AggregateOperations
      * @param aggrOp the aggregate operation to perform
      * @param <T1> type of items in {@code stage1}
      * @param <T2> type of items in {@code stage2}
@@ -298,38 +331,6 @@ public interface BatchStage<T> extends GeneralStage<T> {
             @Nonnull BatchStage<T2> stage2,
             @Nonnull AggregateOperation3<? super T, ? super T1, ? super T2, ?, ? extends R> aggrOp);
 
-    /**
-     * Attaches a stage that co-aggregates the data from this and the two
-     * supplied stages by performing a separate aggregate operation on each and
-     * then passing all three results to {@code mapToOutputFn}, which
-     * transforms them into the final output.
-     * <p>
-     * The returned stage emits a single item.
-     *
-     * @param aggrOp0 aggregate operation to perform on this stage
-     * @param stage1 the first additional stage
-     * @param aggrOp1 aggregate operation to perform on {@code stage1}
-     * @param stage2 the second additional stage
-     * @param aggrOp2 aggregate operation to perform on {@code stage2}
-     * @param mapToOutputFn function to apply to the aggregated results
-     * @param <T1> type of the items in {@code stage1}
-     * @param <T2> type of the items in {@code stage2}
-     * @param <R0> type of the aggregated result for this stage
-     * @param <R1> type of the aggregated result for {@code stage1}
-     * @param <R2> type of the aggregated result for {@code stage2}
-     * @param <OUT> the output item type
-     */
-    @Nonnull
-    default <T1, T2, R0, R1, R2, OUT> BatchStage<OUT> aggregate3(
-            @Nonnull AggregateOperation1<? super T, ?, ? extends R0> aggrOp0,
-            @Nonnull BatchStage<T1> stage1,
-            @Nonnull AggregateOperation1<? super T1, ?, ? extends R1> aggrOp1,
-            @Nonnull BatchStage<T2> stage2,
-            @Nonnull AggregateOperation1<? super T2, ?, ? extends R2> aggrOp2,
-            @Nonnull DistributedTriFunction<? super R0, ? super R1, ? super R2, ? extends OUT> mapToOutputFn
-    ) {
-        return aggregate3(stage1, stage2, aggregateOperation3(aggrOp0, aggrOp1, aggrOp2, mapToOutputFn));
-    }
 
     /**
      * Attaches a stage that co-aggregates the data from this and the two
@@ -337,6 +338,15 @@ public interface BatchStage<T> extends GeneralStage<T> {
      * emitting a {@link Tuple3} with their results.
      * <p>
      * The returned stage emits a single item.
+     * <p>
+     * Sample usage:
+     * <pre>{@code
+     * BatchStage<Tuple3<Long, Long, Long>> counts = pageVisits.aggregate3(
+     *         AggregateOperations.counting(),
+     *         addToCarts, AggregateOperations.counting(),
+     *         payments, AggregateOperations.counting()
+     * );
+     * }</pre>
      *
      * @param aggrOp0 aggregate operation to perform on this stage
      * @param stage1 the first additional stage
@@ -375,9 +385,9 @@ public interface BatchStage<T> extends GeneralStage<T> {
      * This example counts the items in stage-0, sums those in stage-1 and takes
      * the average of those in stage-2:
      * <pre>{@code
-     * BatchStage<Long> stage0 = p.drawFrom(source0);
-     * BatchStage<Long> stage1 = p.drawFrom(source1);
-     * BatchStage<Long> stage2 = p.drawFrom(source2);
+     * BatchStage<Long> stage0 = p.readFrom(source0);
+     * BatchStage<Long> stage1 = p.readFrom(source1);
+     * BatchStage<Long> stage2 = p.readFrom(source2);
      *
      * AggregateBuilder<Long> b = stage0.aggregateBuilder(
      *         AggregateOperations.counting());
@@ -427,9 +437,9 @@ public interface BatchStage<T> extends GeneralStage<T> {
      * strings across all of them:
      * <pre>{@code
      * Pipeline p = Pipeline.create();
-     * BatchStage<String> stage0 = p.drawFrom(source0);
-     * BatchStage<String> stage1 = p.drawFrom(source1);
-     * BatchStage<String> stage2 = p.drawFrom(source2);
+     * BatchStage<String> stage0 = p.readFrom(source0);
+     * BatchStage<String> stage1 = p.readFrom(source1);
+     * BatchStage<String> stage2 = p.readFrom(source2);
      * AggregateBuilder1<String> b = stage0.aggregateBuilder();
      * Tag<String> tag0 = b.tag0();
      * Tag<String> tag1 = b.add(stage1);
@@ -455,18 +465,73 @@ public interface BatchStage<T> extends GeneralStage<T> {
 
     @Nonnull @Override
     BatchStage<T> peek(
-            @Nonnull DistributedPredicate<? super T> shouldLogFn,
-            @Nonnull DistributedFunction<? super T, ? extends CharSequence> toStringFn
+            @Nonnull PredicateEx<? super T> shouldLogFn,
+            @Nonnull FunctionEx<? super T, ? extends CharSequence> toStringFn
     );
 
     @Nonnull @Override
-    default BatchStage<T> peek(@Nonnull DistributedFunction<? super T, ? extends CharSequence> toStringFn) {
+    default BatchStage<T> peek(@Nonnull FunctionEx<? super T, ? extends CharSequence> toStringFn) {
         return (BatchStage<T>) GeneralStage.super.peek(toStringFn);
     }
 
     @Nonnull @Override
-    <R> BatchStage<R> customTransform(
-            @Nonnull String stageName, @Nonnull DistributedSupplier<Processor> procSupplier);
+    default <R> BatchStage<R> customTransform(@Nonnull String stageName,
+                                              @Nonnull SupplierEx<Processor> procSupplier) {
+        return customTransform(stageName, ProcessorMetaSupplier.of(procSupplier));
+    }
+
+    @Nonnull @Override
+    default <R> BatchStage<R> customTransform(@Nonnull String stageName, @Nonnull ProcessorSupplier procSupplier) {
+        return customTransform(stageName, ProcessorMetaSupplier.of(procSupplier));
+    }
+
+    @Nonnull @Override
+    <R> BatchStage<R> customTransform(@Nonnull String stageName, @Nonnull ProcessorMetaSupplier procSupplier);
+
+    /**
+     * Transforms {@code this} stage using the provided {@code transformFn} and
+     * returns the transformed stage. It allows you to extract common pipeline
+     * transformations into a method and then call that method without
+     * interrupting the chained pipeline expression.
+     * <p>
+     * For example, say you have this code:
+     *
+     * <pre>{@code
+     * BatchStage<String> input = pipeline.readFrom(textSource);
+     * BatchStage<String> cleanedUp = input
+     *         .map(String::toLowerCase)
+     *         .filter(s -> s.startsWith("success"));
+     * }</pre>
+     *
+     * You can capture the {@code map} and {@code filter} steps into a common
+     * "cleanup" transformation:
+     *
+     * <pre>{@code
+     * BatchStage<String> cleanUp(BatchStage<String> input) {
+     *      return input.map(String::toLowerCase)
+     *                  .filter(s -> s.startsWith("success"));
+     * }
+     * }</pre>
+     *
+     * Now you can insert this transformation as just another step in your
+     * pipeline:
+     *
+     * <pre>{@code
+     * BatchStage<String> tokens = pipeline
+     *     .readFrom(textSource)
+     *     .apply(this::cleanUp)
+     *     .flatMap(line -> traverseArray(line.split("\\W+")));
+     * }</pre>
+     *
+     * @param transformFn function to transform this stage into another stage
+     * @param <R> type of the returned stage
+     *
+     * @since 3.1
+     */
+    @Nonnull
+    default <R> BatchStage<R> apply(@Nonnull FunctionEx<? super BatchStage<T>, ? extends BatchStage<R>> transformFn) {
+        return transformFn.apply(this);
+    }
 
     @Nonnull @Override
     BatchStage<T> setLocalParallelism(int localParallelism);

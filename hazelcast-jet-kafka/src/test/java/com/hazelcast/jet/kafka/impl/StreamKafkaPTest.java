@@ -16,22 +16,24 @@
 
 package com.hazelcast.jet.kafka.impl;
 
-import com.hazelcast.core.IList;
+import com.hazelcast.collection.IList;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.ToLongFunctionEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.BroadcastKey;
+import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.test.TestInbox;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedToLongFunction;
 import com.hazelcast.jet.impl.JobExecutionRecord;
 import com.hazelcast.jet.impl.JobRepository;
+import com.hazelcast.jet.kafka.KafkaProcessors;
 import com.hazelcast.jet.kafka.KafkaSources;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
@@ -57,10 +59,12 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.Future;
 
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
+import static com.hazelcast.jet.core.JobStatus.RUNNING;
 import static com.hazelcast.jet.core.WatermarkPolicy.limitingLag;
 import static com.hazelcast.jet.impl.execution.WatermarkCoalescer.IDLE_MESSAGE;
 import static java.util.Arrays.asList;
@@ -90,7 +94,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
     @Before
     public void before() throws Exception {
         String brokerConnectionString = createKafkaCluster();
-        properties = getProperties(brokerConnectionString, IntegerDeserializer.class, StringDeserializer.class);
+        properties = getProperties(brokerConnectionString);
 
         topic1Name = randomString();
         topic2Name = randomString();
@@ -105,9 +109,9 @@ public class StreamKafkaPTest extends KafkaTestSupport {
         Arrays.setAll(instances, i -> createJetMember());
 
         Pipeline p = Pipeline.create();
-        p.drawFrom(KafkaSources.<Integer, String, String>kafka(properties, rec -> rec.value() + "-x", topic1Name))
+        p.readFrom(KafkaSources.<Integer, String, String>kafka(properties, rec -> rec.value() + "-x", topic1Name))
          .withoutTimestamps()
-         .drainTo(Sinks.list("sink"));
+         .writeTo(Sinks.list("sink"));
 
         instances[0].newJob(p);
         sleepAtLeastSeconds(3);
@@ -118,7 +122,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
         assertTrueEventually(() -> {
             assertEquals(messageCount, list.size());
             for (int i = 0; i < messageCount; i++) {
-                String value = Integer.toString(i) + "-x";
+                String value = i + "-x";
                 assertTrue("missing entry: " + value, list.contains(value));
             }
         }, 5);
@@ -140,9 +144,9 @@ public class StreamKafkaPTest extends KafkaTestSupport {
         Arrays.setAll(instances, i -> createJetMember());
 
         Pipeline p = Pipeline.create();
-        p.drawFrom(KafkaSources.kafka(properties, topic1Name, topic2Name))
+        p.readFrom(KafkaSources.kafka(properties, topic1Name, topic2Name))
          .withoutTimestamps()
-         .drainTo(Sinks.list("sink"));
+         .writeTo(Sinks.list("sink"));
 
         JobConfig config = new JobConfig();
         config.setProcessingGuarantee(guarantee);
@@ -308,11 +312,11 @@ public class StreamKafkaPTest extends KafkaTestSupport {
 
     private <T> StreamKafkaP<Integer, String, T> createProcessor(
             int numTopics,
-            @Nonnull DistributedFunction<ConsumerRecord<Integer, String>, T> projectionFn,
+            @Nonnull FunctionEx<ConsumerRecord<Integer, String>, T> projectionFn,
             long idleTimeoutMillis
     ) {
         assert numTopics == 1 || numTopics == 2;
-        DistributedToLongFunction<T> timestampFn = e ->
+        ToLongFunctionEx<T> timestampFn = e ->
                 e instanceof Entry ?
                         (int) ((Entry) e).getKey()
                         :
@@ -348,7 +352,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
             somethingInPartition1 |= recordMetadata.partition() == 1;
         }
         assertTrue("nothing was produced to partition-1", somethingInPartition1);
-        Set receivedEvents = new HashSet();
+        Set<Object> receivedEvents = new HashSet<>();
         for (int i = 1; i < 11; i++) {
             try {
                 receivedEvents.add(consumeEventually(processor, outbox));
@@ -412,6 +416,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
         assertNull(outbox.queue(0).poll());
     }
 
+    @SuppressWarnings("unchecked")
     private <T> T consumeEventually(Processor processor, TestOutbox outbox) {
         assertTrueEventually(() -> {
             assertFalse(processor.complete());
@@ -426,6 +431,7 @@ public class StreamKafkaPTest extends KafkaTestSupport {
         assertTrue("unexpected items in outbox: " + outbox.queue(0), outbox.queue(0).isEmpty());
     }
 
+    @SuppressWarnings("unchecked")
     private Set<Entry<TopicPartition, String>> unwrapBroadcastKey(Collection c) {
         // BroadcastKey("x") != BroadcastKey("x") ==> we need to extract the key
         Set<Entry<TopicPartition, String>> res = new HashSet<>();
@@ -443,17 +449,42 @@ public class StreamKafkaPTest extends KafkaTestSupport {
         return snapshot;
     }
 
-    private Properties getProperties(String brokerConnectionString, Class keyDeserializer, Class valueDeserializer) {
+    private Properties getProperties(String brokerConnectionString) {
         Properties properties = new Properties();
         properties.setProperty("group.id", randomString());
         properties.setProperty("bootstrap.servers", brokerConnectionString);
-        properties.setProperty("key.deserializer", keyDeserializer.getCanonicalName());
-        properties.setProperty("value.deserializer", valueDeserializer.getCanonicalName());
+        properties.setProperty("key.deserializer", IntegerDeserializer.class.getCanonicalName());
+        properties.setProperty("value.deserializer", StringDeserializer.class.getCanonicalName());
         properties.setProperty("auto.offset.reset", "earliest");
         return properties;
     }
 
     private static Map.Entry<Integer, String> createEntry(int i) {
         return new SimpleImmutableEntry<>(i, Integer.toString(i));
+    }
+
+    @Test
+    public void when_cancelledAfterBrokerDown_then_cancelsPromptly() {
+        createTopic("topic", 1);
+        DAG dag = new DAG();
+        dag.newVertex("src",
+                KafkaProcessors.streamKafkaP(properties, FunctionEx.identity(), EventTimePolicy.noEventTime(), "topic"))
+           .localParallelism(1);
+
+        Job job = createJetMember().newJob(dag);
+        assertJobStatusEventually(job, RUNNING);
+        sleepSeconds(1);
+        shutdownKafkaCluster();
+        sleepSeconds(3);
+        long start = System.nanoTime();
+        job.cancel();
+        try {
+            job.join();
+        } catch (CancellationException ignored) { }
+        // There was an issue claimed that when the broker was down, job did not cancel.
+        // Let's assert the cancellation didn't take too long.
+        long durationSeconds = NANOSECONDS.toSeconds(System.nanoTime() - start);
+        assertTrue("durationSeconds=" + durationSeconds, durationSeconds < 10);
+        logger.info("Job cancelled in " + durationSeconds + " seconds");
     }
 }

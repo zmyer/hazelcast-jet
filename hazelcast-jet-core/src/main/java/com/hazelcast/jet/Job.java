@@ -16,10 +16,12 @@
 
 package com.hazelcast.jet;
 
+import com.hazelcast.config.MetricsConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.JobStatus;
+import com.hazelcast.jet.core.metrics.JobMetrics;
 import com.hazelcast.jet.pipeline.Pipeline;
 
 import javax.annotation.Nonnull;
@@ -28,8 +30,10 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * A Jet computation job created from a {@link DAG} or {@link Pipeline}.
- * Once submitted, Jet starts executing the job automatically.
+ * A Jet computation job created by submitting a {@link DAG} or {@link
+ * Pipeline}. Once submitted, Jet starts executing the job automatically.
+ *
+ * @since 3.0
  */
 public interface Job {
 
@@ -41,7 +45,7 @@ public interface Job {
     long getId();
 
     /**
-     * Returns the string representation of this job's ID
+     * Returns the string representation of this job's ID.
      */
     @Nonnull
     default String getIdString() {
@@ -79,6 +83,35 @@ public interface Job {
      */
     @Nonnull
     JobStatus getStatus();
+
+    /**
+     * Returns a snapshot of the current values of all job-specific metrics.
+     * <p>
+     * While the job is running the metric values are updated periodically
+     * (see {@link MetricsConfig#setCollectionIntervalSeconds metrics
+     * collection interval}), assuming
+     * that both {@link MetricsConfig#setEnabled global metrics collection}
+     * and {@link JobConfig#isMetricsEnabled() per job metrics collection}
+     * are enabled. Otherwise empty metrics will be returned.
+     * <p>
+     * Keep in mind that the collections may occur at different times on
+     * each member, metrics from various members aren't from the same instant.
+     * <p>
+     * When a job is restarted (or resumed after being previously suspended)
+     * the metrics are reset too, their values will reflect only updates
+     * from the latest execution of the job.
+     * <p>
+     * Once a job stops executing (successfully, after a failure, cancellation,
+     * or temporarily while suspended) the metrics will have their most
+     * recent values (i.e. the last metric values from the moment before the
+     * job completed), assuming that
+     * {@link JobConfig#setStoreMetricsAfterJobCompletion(boolean) metrics
+     * storage} was enabled. Otherwise empty metrics will be returned.
+     *
+     * @since 3.2
+     */
+    @Nonnull
+    JobMetrics getMetrics();
 
     /**
      * Gets the future associated with the job. The returned future is
@@ -205,6 +238,8 @@ public interface Job {
      *
      * @param name name of the snapshot. If name is already used, it will be
      *            overwritten
+     * @throws JetException if the job is in an incorrect state: completed,
+     *            cancelled or is in the process of restarting or suspending.
      */
     JobStateSnapshot cancelAndExportSnapshot(String name);
 
@@ -237,12 +272,13 @@ public interface Job {
      * <p>
      * You can access the exported state map using {@link
      * JetInstance#getJobStateSnapshot(String)}.
+     * <p>
+     * The method call will block until it has fully exported the snapshot.
      *
      * @param name name of the snapshot. If name is already used, it will be
      *            overwritten
      * @throws JetException if the job is in an incorrect state: completed,
-     *            cancelled, or also in the process of restarting or
-     *            suspending.
+     *            cancelled or is in the process of restarting or suspending.
      */
     JobStateSnapshot exportSnapshot(String name);
 }

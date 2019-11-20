@@ -16,12 +16,12 @@
 
 package com.hazelcast.jet.pipeline;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.aggregate.CoAggregateOperationBuilder;
 import com.hazelcast.jet.datamodel.ItemsByTag;
 import com.hazelcast.jet.datamodel.Tag;
-import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.impl.pipeline.AggBuilder;
 import com.hazelcast.jet.impl.pipeline.AggBuilder.CreateOutStageFn;
 import com.hazelcast.jet.impl.pipeline.BatchStageImpl;
@@ -37,10 +37,12 @@ import static com.hazelcast.jet.aggregate.AggregateOperations.coAggregateOperati
  * and refer to that method's Javadoc for further details.
  * <p>
  * <strong>Note:</strong> this is not a builder of {@code
- * AggregateOperation}. If that' s what you are looking for, go {@link
+ * AggregateOperation}. If that's what you are looking for, go {@link
  * AggregateOperation#withCreate here}.
  *
  * @param <R0> type of the aggregation result for stream-0
+ *
+ * @since 3.0
  */
 public class AggregateBuilder<R0> {
     private final AggBuilder aggBuilder;
@@ -93,11 +95,11 @@ public class AggregateBuilder<R0> {
      */
     @Nonnull
     public <R> BatchStage<R> build(
-            @Nonnull DistributedFunction<? super ItemsByTag, ? extends R> finishFn
+            @Nonnull FunctionEx<? super ItemsByTag, ? extends R> finishFn
     ) {
         AggregateOperation<Object[], R> aggrOp = aggrOpBuilder.build(finishFn);
         CreateOutStageFn<R, BatchStage<R>> createOutStageFn = BatchStageImpl::new;
-        return aggBuilder.build(aggrOp, createOutStageFn, null);
+        return aggBuilder.build(aggrOp, createOutStageFn);
     }
 
     /**
@@ -113,6 +115,6 @@ public class AggregateBuilder<R0> {
     public BatchStage<ItemsByTag> build() {
         AggregateOperation<Object[], ItemsByTag> aggrOp = aggrOpBuilder.build();
         CreateOutStageFn<ItemsByTag, BatchStage<ItemsByTag>> createOutStageFn = BatchStageImpl::new;
-        return aggBuilder.build(aggrOp, createOutStageFn, null);
+        return aggBuilder.build(aggrOp, createOutStageFn);
     }
 }

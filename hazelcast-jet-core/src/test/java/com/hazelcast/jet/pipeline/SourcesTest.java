@@ -16,14 +16,16 @@
 
 package com.hazelcast.jet.pipeline;
 
+import com.hazelcast.cache.ICache;
 import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.config.CacheSimpleConfig;
 import com.hazelcast.config.Config;
-import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.jet.IMapJet;
+import com.hazelcast.instance.impl.HazelcastInstanceFactory;
 import com.hazelcast.jet.Job;
+import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.JobStatus;
+import com.hazelcast.map.IMap;
 import com.hazelcast.projection.Projections;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -34,19 +36,25 @@ import java.io.File;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map.Entry;
 
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.core.processor.SourceProcessors.readMapP;
 import static com.hazelcast.jet.impl.util.Util.uncheckRun;
+import static com.hazelcast.jet.pipeline.JournalInitialPosition.START_FROM_CURRENT;
 import static com.hazelcast.projection.Projections.singleAttribute;
-import static com.hazelcast.query.TruePredicate.truePredicate;
+import static com.hazelcast.query.impl.predicates.TruePredicate.truePredicate;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Collections.singletonList;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.IntStream.range;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 
 public class SourcesTest extends PipelineTestSupport {
     private static HazelcastInstance remoteHz;
@@ -55,15 +63,15 @@ public class SourcesTest extends PipelineTestSupport {
     @BeforeClass
     public static void setUp() {
         Config config = new Config();
-        config.getGroupConfig().setName(randomName());
+        config.setClusterName(randomName());
         config.addCacheConfig(new CacheSimpleConfig().setName("*"));
         remoteHz = createRemoteCluster(config, 2).get(0);
         clientConfig = getClientConfigForRemoteCluster(remoteHz);
     }
 
     @AfterClass
-    public static void after() {
-        Hazelcast.shutdownAll();
+    public static void afterClass() {
+        HazelcastInstanceFactory.terminateAll();
     }
 
     @Test
@@ -82,7 +90,7 @@ public class SourcesTest extends PipelineTestSupport {
                 readMapP(srcName, truePredicate(), Entry::getValue));
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(toBag(input), sinkToBag());
     }
@@ -97,7 +105,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Entry<String, Integer>> source = Sources.map(srcName);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
@@ -115,7 +123,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Entry<String, Integer>> source = Sources.map(srcMap);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
@@ -133,7 +141,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Object> source = Sources.map(srcName, truePredicate(), singleAttribute("value"));
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(toBag(input), sinkToBag());
     }
@@ -148,7 +156,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Integer> source = Sources.map(srcMap, truePredicate(), Projections.singleAttribute("value"));
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(toBag(input), sinkToBag());
     }
@@ -166,7 +174,7 @@ public class SourcesTest extends PipelineTestSupport {
                 Entry<String, Integer>::getValue);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(toBag(input), sinkToBag());
     }
@@ -184,7 +192,7 @@ public class SourcesTest extends PipelineTestSupport {
                 Entry::getValue);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(toBag(input), sinkToBag());
     }
@@ -193,14 +201,14 @@ public class SourcesTest extends PipelineTestSupport {
     public void map_withProjectionToNull_then_nullsSkipped() {
         // given
         String mapName = randomName();
-        IMapJet<Integer, Entry<Integer, String>> sourceMap = jet().getMap(mapName);
+        IMap<Integer, Entry<Integer, String>> sourceMap = jet().getMap(mapName);
         range(0, itemCount).forEach(i -> sourceMap.put(i, entry(i, i % 2 == 0 ? null : String.valueOf(i))));
 
         // when
         BatchSource<String> source = Sources.map(mapName, truePredicate(), singleAttribute("value"));
 
         // then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         jet().newJob(p);
         assertTrueEventually(() -> assertEquals(
                 range(0, itemCount)
@@ -225,7 +233,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Entry<Object, Object>> source = Sources.remoteMap(srcName, clientConfig);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
@@ -244,7 +252,7 @@ public class SourcesTest extends PipelineTestSupport {
                 srcName, clientConfig, truePredicate(), singleAttribute("value"));
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(toBag(input), sinkToBag());
     }
@@ -260,9 +268,36 @@ public class SourcesTest extends PipelineTestSupport {
                 srcName, clientConfig, truePredicate(), Entry<String, Integer>::getValue);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(toBag(input), sinkToBag());
+    }
+
+    @Test
+    public void remoteMapWithUnknownValueClass_whenQueryingIsNotNecessary() throws Exception {
+        // Given
+        URL jarResource = Thread.currentThread().getContextClassLoader()
+                                .getResource("deployment/sample-pojo-1.0-car.jar");
+        assertNotNull("jar not found", jarResource);
+        ClassLoader cl = new URLClassLoader(new URL[]{jarResource});
+        Class<?> personClz = cl.loadClass("com.sample.pojo.car.Car");
+        Object person = personClz.getConstructor(String.class, String.class)
+                                 .newInstance("make", "model");
+        IMap<String, Object> map = remoteHz.getMap(srcName);
+        // the class of the value is unknown to the remote IMDG member, it will be only known to Jet
+        map.put("key", person);
+
+        // When
+        BatchSource<Entry<String, Object>> source = Sources.remoteMap(srcName, clientConfig);
+
+        // Then
+        p.readFrom(source).map(en -> en.getValue().toString()).writeTo(sink);
+        JobConfig jobConfig = new JobConfig();
+        jobConfig.addJar(jarResource);
+        jet().newJob(p, jobConfig).join();
+        List<Object> expected = singletonList(person.toString());
+        List<Object> actual = new ArrayList<>(sinkList);
+        assertEquals(expected, actual);
     }
 
     @Test
@@ -275,7 +310,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Entry<String, Integer>> source = Sources.cache(srcName);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
@@ -293,12 +328,39 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Entry<Object, Object>> source = Sources.remoteCache(srcName, clientConfig);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         List<Entry<String, Integer>> expected = input.stream()
                                                      .map(i -> entry(String.valueOf(i), i))
                                                      .collect(toList());
         assertEquals(toBag(expected), sinkToBag());
+    }
+
+    @Test
+    public void remoteCacheWithUnknownValueClass() throws Exception {
+        // Given
+        URL jarResource = Thread.currentThread().getContextClassLoader()
+                                .getResource("deployment/sample-pojo-1.0-car.jar");
+        assertNotNull("jar not found", jarResource);
+        ClassLoader cl = new URLClassLoader(new URL[]{jarResource});
+        Class<?> personClz = cl.loadClass("com.sample.pojo.car.Car");
+        Object person = personClz.getConstructor(String.class, String.class)
+                                 .newInstance("make", "model");
+        ICache<String, Object> cache = remoteHz.getCacheManager().getCache(srcName);
+        // the class of the value is unknown to the remote IMDG member, it will be only known to Jet
+        cache.put("key", person);
+
+        // When
+        BatchSource<Entry<String, Object>> source = Sources.remoteCache(srcName, clientConfig);
+
+        // Then
+        p.readFrom(source).map(en -> en.getValue().toString()).writeTo(sink);
+        JobConfig jobConfig = new JobConfig();
+        jobConfig.addJar(jarResource);
+        jet().newJob(p, jobConfig).join();
+        List<Object> expected = singletonList(person.toString());
+        List<Object> actual = new ArrayList<>(sinkList);
+        assertEquals(expected, actual);
     }
 
     @Test
@@ -311,7 +373,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Integer> source = Sources.list(srcName);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(input, sinkList);
     }
@@ -326,7 +388,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Object> source = Sources.list(srcList);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(input, sinkList);
     }
@@ -341,7 +403,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<Object> source = Sources.remoteList(srcName, clientConfig);
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         assertEquals(input, sinkList);
     }
@@ -373,7 +435,7 @@ public class SourcesTest extends PipelineTestSupport {
             StreamSource<String> source = Sources.socket("localhost", 8176, UTF_8);
 
             // Then
-            p.drawFrom(source).withoutTimestamps().drainTo(sink);
+            p.readFrom(source).withoutTimestamps().writeTo(sink);
             execute();
             assertEquals(6, sinkList.size());
         }
@@ -392,7 +454,7 @@ public class SourcesTest extends PipelineTestSupport {
         BatchSource<String> source = Sources.files(directory.getPath());
 
         // Then
-        p.drawFrom(source).drainTo(sink);
+        p.readFrom(source).writeTo(sink);
         execute();
         int nodeCount = jet().getCluster().getMembers().size();
         assertEquals(4 * nodeCount, sinkList.size());
@@ -412,7 +474,7 @@ public class SourcesTest extends PipelineTestSupport {
         StreamSource<String> source = Sources.fileWatcher(directory.getPath());
 
         // Then
-        p.drawFrom(source).withoutTimestamps().drainTo(sink);
+        p.readFrom(source).withoutTimestamps().writeTo(sink);
         Job job = jet().newJob(p);
         // wait for the processor to initialize
         assertJobStatusEventually(job, JobStatus.RUNNING);
@@ -422,5 +484,25 @@ public class SourcesTest extends PipelineTestSupport {
         // now, only new line should be picked up
         int nodeCount = jet().getCluster().getMembers().size();
         assertTrueEventually(() -> assertEquals(nodeCount, sinkList.size()));
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void when_batchSourceUsedTwice_then_throwException() {
+        // Given
+        BatchSource<Entry<Object, Object>> source = Sources.map(srcName);
+        p.readFrom(source);
+
+        // When-Then
+        p.readFrom(source);
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void when_streamSourceUsedTwice_then_throwException() {
+        // Given
+        StreamSource<Entry<Object, Object>> source = Sources.mapJournal(srcName, START_FROM_CURRENT);
+        p.readFrom(source);
+
+        // When-Then
+        p.readFrom(source);
     }
 }

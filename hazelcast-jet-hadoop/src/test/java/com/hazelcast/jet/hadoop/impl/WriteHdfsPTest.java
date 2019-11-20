@@ -16,22 +16,15 @@
 
 package com.hazelcast.jet.hadoop.impl;
 
-import com.hazelcast.core.IList;
+import com.hazelcast.collection.IList;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.hadoop.HdfsSinks;
 import com.hazelcast.jet.hadoop.HdfsSources;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.jet.pipeline.Sources;
-import com.hazelcast.test.HazelcastParametersRunnerFactory;
-import com.hazelcast.test.annotation.ParallelTest;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Map;
-import java.util.concurrent.Future;
-import java.util.stream.IntStream;
+import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.mapred.FileInputFormat;
@@ -44,17 +37,26 @@ import org.apache.hadoop.mapred.SequenceFileInputFormat;
 import org.apache.hadoop.mapred.SequenceFileOutputFormat;
 import org.apache.hadoop.mapred.TextInputFormat;
 import org.apache.hadoop.mapred.TextOutputFormat;
+import org.apache.hadoop.mapred.lib.LazyOutputFormat;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Map;
+import java.util.concurrent.Future;
+import java.util.stream.IntStream;
+
 import static java.util.stream.Collectors.toMap;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(Parameterized.class)
-@Parameterized.UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
-@Category(ParallelTest.class)
+@Parameterized.UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
+@Category(ParallelJVMTest.class)
 public class WriteHdfsPTest extends HdfsTestSupport {
 
     @Parameterized.Parameter(0)
@@ -67,13 +69,14 @@ public class WriteHdfsPTest extends HdfsTestSupport {
     public static Collection<Object[]> parameters() {
         return Arrays.asList(
                 new Object[]{TextOutputFormat.class, TextInputFormat.class},
+                new Object[]{LazyOutputFormat.class, TextInputFormat.class},
                 new Object[]{SequenceFileOutputFormat.class, SequenceFileInputFormat.class}
         );
     }
 
     @Test
     public void testWriteFile() throws Exception {
-        int messageCount = 20;
+        int messageCount = 320;
         String mapName = randomMapName();
         JetInstance instance = createJetMember();
         createJetMember();
@@ -90,12 +93,18 @@ public class WriteHdfsPTest extends HdfsTestSupport {
         conf.setOutputKeyClass(IntWritable.class);
         conf.setOutputValueClass(IntWritable.class);
 
+        if (outputFormatClass.equals(LazyOutputFormat.class)) {
+            LazyOutputFormat.setOutputFormatClass(conf, TextOutputFormat.class);
+        }
+
         FileOutputFormat.setOutputPath(conf, path);
 
 
         Pipeline p = Pipeline.create();
-        p.drawFrom(Sources.map(mapName))
-         .drainTo(HdfsSinks.hdfs(conf));
+        p.readFrom(Sources.map(mapName))
+         .writeTo(HdfsSinks.hdfs(conf))
+         // we use higher value to increase the race chance for LazyOutputFormat
+         .setLocalParallelism(8);
 
         Future<Void> future = instance.newJob(p).getFuture();
         assertCompletesEventually(future);
@@ -106,8 +115,8 @@ public class WriteHdfsPTest extends HdfsTestSupport {
         FileInputFormat.addInputPath(readJobConf, path);
 
         p = Pipeline.create();
-        p.drawFrom(HdfsSources.hdfs(readJobConf))
-         .drainTo(Sinks.list("results"));
+        p.readFrom(HdfsSources.hdfs(readJobConf))
+         .writeTo(Sinks.list("results"));
 
         future = instance.newJob(p).getFuture();
         assertCompletesEventually(future);

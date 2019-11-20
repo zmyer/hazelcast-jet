@@ -16,19 +16,26 @@
 
 package com.hazelcast.jet.impl.pipeline;
 
-import com.hazelcast.jet.JetException;
-import com.hazelcast.jet.function.DistributedToLongFunction;
+import com.hazelcast.function.ToLongFunctionEx;
+import com.hazelcast.jet.core.function.ObjLongBiFunction;
+import com.hazelcast.jet.impl.JetEvent;
 import com.hazelcast.jet.impl.pipeline.transform.StreamSourceTransform;
 import com.hazelcast.jet.pipeline.StreamSourceStage;
 import com.hazelcast.jet.pipeline.StreamStage;
 
 import javax.annotation.Nonnull;
 
+import static com.hazelcast.internal.util.Preconditions.checkTrue;
+import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
+import static com.hazelcast.jet.core.WatermarkPolicy.limitingLag;
+import static com.hazelcast.jet.impl.JetEvent.jetEvent;
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ADAPT_TO_JET_EVENT;
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.DO_NOT_ADAPT;
+import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 
 public class StreamSourceStageImpl<T> implements StreamSourceStage<T> {
 
+    private static final ObjLongBiFunction WRAP_TO_JET_EVENT = (item, ts) -> jetEvent(ts, item);
     private final StreamSourceTransform<T> transform;
     private final PipelineImpl pipeline;
 
@@ -39,30 +46,42 @@ public class StreamSourceStageImpl<T> implements StreamSourceStage<T> {
 
     @Override
     public StreamStage<T> withNativeTimestamps(long allowedLag) {
-        if (!transform.supportsNativeTimestamps()) {
-            throw new JetException("The source doesn't support native timestamps");
-        }
-        StreamStageImpl<T> result = createStreamStage();
-        result.addTimestampsInt(null, allowedLag, true);
-        return result;
+        checkTrue(transform.supportsNativeTimestamps(), "The source doesn't support native timestamps");
+        transform.setEventTimePolicy(eventTimePolicy(
+                null,
+                wrapToJetEvent(),
+                limitingLag(allowedLag),
+                0,
+                0,
+                transform.partitionIdleTimeout()
+        ));
+        return new StreamStageImpl<>(transform, ADAPT_TO_JET_EVENT, pipeline);
     }
 
     @Override
-    public StreamStage<T> withTimestamps(@Nonnull DistributedToLongFunction<? super T> timestampFn, long allowedLag) {
-        StreamStageImpl<T> result = createStreamStage();
-        result.addTimestampsInt(timestampFn, allowedLag, true);
-        return result;
+    public StreamStage<T> withTimestamps(@Nonnull ToLongFunctionEx<? super T> timestampFn, long allowedLag) {
+        checkSerializable(timestampFn, "timestampFn");
+        transform.setEventTimePolicy(eventTimePolicy(
+                timestampFn,
+                wrapToJetEvent(),
+                limitingLag(allowedLag),
+                0,
+                0,
+                transform.partitionIdleTimeout()
+        ));
+        return new StreamStageImpl<>(transform, ADAPT_TO_JET_EVENT, pipeline);
     }
 
     @Override
     public StreamStage<T> withoutTimestamps() {
-        return createStreamStage();
-    }
-
-    private StreamStageImpl<T> createStreamStage() {
         return new StreamStageImpl<>(
                 transform,
                 transform.emitsJetEvents() ? ADAPT_TO_JET_EVENT : DO_NOT_ADAPT,
                 pipeline);
+    }
+
+    @SuppressWarnings("unchecked")
+    private ObjLongBiFunction<T, JetEvent<T>> wrapToJetEvent() {
+        return WRAP_TO_JET_EVENT;
     }
 }

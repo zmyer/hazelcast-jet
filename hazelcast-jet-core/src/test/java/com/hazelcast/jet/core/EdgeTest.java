@@ -17,20 +17,20 @@
 package com.hazelcast.jet.core;
 
 import com.hazelcast.jet.core.Edge.RoutingPolicy;
-import com.hazelcast.test.HazelcastParallelClassRunner;
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import static com.hazelcast.function.Functions.wholeItem;
 import static com.hazelcast.jet.core.processor.Processors.noopP;
-import static com.hazelcast.jet.function.DistributedFunctions.wholeItem;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
-@RunWith(HazelcastParallelClassRunner.class)
+@RunWith(HazelcastSerialClassRunner.class)
 public class EdgeTest {
     private static final String A = "a";
     private static final String B = "b";
@@ -155,7 +155,7 @@ public class EdgeTest {
         final int mockPartitionCount = 100;
 
         // When
-        e.allToOne();
+        e.allToOne("key");
         final Partitioner partitioner = e.getPartitioner();
         assertNotNull(partitioner);
 

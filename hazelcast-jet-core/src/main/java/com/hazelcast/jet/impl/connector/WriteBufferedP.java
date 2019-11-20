@@ -16,38 +16,42 @@
 
 package com.hazelcast.jet.impl.connector;
 
+import com.hazelcast.function.BiConsumerEx;
+import com.hazelcast.function.ConsumerEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.core.Inbox;
 import com.hazelcast.jet.core.Outbox;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.SinkProcessors;
-import com.hazelcast.jet.function.DistributedBiConsumer;
-import com.hazelcast.jet.function.DistributedConsumer;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
 
 import javax.annotation.Nonnull;
+import java.util.function.Consumer;
+
+import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 
 public final class WriteBufferedP<B, T> implements Processor {
 
-    private final DistributedFunction<? super Context, B> createFn;
-    private final DistributedBiConsumer<? super B, ? super T> onReceiveFn;
-    private final DistributedConsumer<? super B> flushFn;
-    private final DistributedConsumer<? super B> destroyFn;
+    private final FunctionEx<? super Context, B> createFn;
+    private final ConsumerEx<? super B> flushFn;
+    private final ConsumerEx<? super B> destroyFn;
 
     private B buffer;
+    private final Consumer<Object> inboxConsumer;
 
     WriteBufferedP(
-            @Nonnull DistributedFunction<? super Context, B> createFn,
-            @Nonnull DistributedBiConsumer<? super B, ? super T> onReceiveFn,
-            @Nonnull DistributedConsumer<? super B> flushFn,
-            @Nonnull DistributedConsumer<? super B> destroyFn
+            @Nonnull FunctionEx<? super Context, B> createFn,
+            @Nonnull BiConsumerEx<? super B, ? super T> onReceiveFn,
+            @Nonnull ConsumerEx<? super B> flushFn,
+            @Nonnull ConsumerEx<? super B> destroyFn
     ) {
         this.createFn = createFn;
-        this.onReceiveFn = onReceiveFn;
         this.flushFn = flushFn;
         this.destroyFn = destroyFn;
+
+        inboxConsumer = item -> onReceiveFn.accept(buffer, (T) item);
     }
 
     @Override
@@ -60,18 +64,13 @@ public final class WriteBufferedP<B, T> implements Processor {
 
     @Override
     public void process(int ordinal, @Nonnull Inbox inbox) {
-        inbox.drain(item -> onReceiveFn.accept(buffer, (T) item));
+        inbox.drain(inboxConsumer);
         flushFn.accept(buffer);
     }
 
     @Override
     public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
         // we're a sink, no need to forward the watermarks
-        return true;
-    }
-
-    @Override
-    public boolean complete() {
         return true;
     }
 
@@ -91,12 +90,17 @@ public final class WriteBufferedP<B, T> implements Processor {
      * This is private API. Call {@link SinkProcessors#writeBufferedP} instead.
      */
     @Nonnull
-    public static <B, T> DistributedSupplier<Processor> supplier(
-            @Nonnull DistributedFunction<? super Context, ? extends B> createFn,
-            @Nonnull DistributedBiConsumer<? super B, ? super T> onReceiveFn,
-            @Nonnull DistributedConsumer<? super B> flushFn,
-            @Nonnull DistributedConsumer<? super B> destroyFn
+    public static <B, T> SupplierEx<Processor> supplier(
+            @Nonnull FunctionEx<? super Context, ? extends B> createFn,
+            @Nonnull BiConsumerEx<? super B, ? super T> onReceiveFn,
+            @Nonnull ConsumerEx<? super B> flushFn,
+            @Nonnull ConsumerEx<? super B> destroyFn
     ) {
+        checkSerializable(createFn, "createFn");
+        checkSerializable(onReceiveFn, "onReceiveFn");
+        checkSerializable(flushFn, "flushFn");
+        checkSerializable(destroyFn, "destroyFn");
+
         return () -> new WriteBufferedP<>(createFn, onReceiveFn, flushFn, destroyFn);
     }
 }

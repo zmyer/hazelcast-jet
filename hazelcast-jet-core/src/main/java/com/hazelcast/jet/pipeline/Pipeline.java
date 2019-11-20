@@ -30,7 +30,7 @@ import javax.annotation.Nonnull;
  * <p>
  * The {@code Pipeline} object is a container of all the stages defined on
  * a pipeline: the source stages obtained directly from it by calling {@link
- * #drawFrom(BatchSource)} as well as all the stages attached (directly or
+ * #readFrom(BatchSource)} as well as all the stages attached (directly or
  * indirectly) to them.
  * <p>
  * Note that there is no simple one-to-one correspondence between pipeline
@@ -39,55 +39,53 @@ import javax.annotation.Nonnull;
  * vertices) and some stages may be merged with others into a single vertex
  * (e.g., a cascade of map/filter/flatMap stages can be fused into one
  * vertex).
+ *
+ * @since 3.0
  */
 public interface Pipeline {
+
+    /**
+     * Creates a new, empty pipeline.
+     *
+     * @since 3.0
+     */
+    @Nonnull
+    static Pipeline create() {
+        return new PipelineImpl();
+    }
 
     /**
      * Returns a pipeline stage that represents a bounded (batch) data source. It
      * has no upstream stages and emits the data (typically coming from an outside
      * source) to its downstream stages.
      *
-     * @param source the definition of the source from which the stage draws data
+     * @param source the definition of the source from which the stage reads data
      * @param <T> the type of source data items
      */
     @Nonnull
-    <T> BatchStage<T> drawFrom(@Nonnull BatchSource<? extends T> source);
+    <T> BatchStage<T> readFrom(@Nonnull BatchSource<? extends T> source);
 
     /**
      * Returns a pipeline stage that represents an unbounded data source (i.e., an
      * event stream). It has no upstream stages and emits the data (typically coming
      * from an outside source) to its downstream stages.
      *
-     * @param source the definition of the source from which the stage draws data
+     * @param source the definition of the source from which the stage reads data
      * @param <T> the type of source data items
      */
     @Nonnull
-    <T> StreamSourceStage<T> drawFrom(@Nonnull StreamSource<? extends T> source);
-
-    /**
-     * Attaches the supplied sink to two pipeline stages. Returns the
-     * {@code SinkStage} representing the sink. You need this method when you
-     * want to drain more than one stage to the same sink. In the typical case
-     * you'll use {@link GeneralStage#drainTo(Sink)} instead.
-     *
-     * @param <T> the type of data being drained to the sink
-     */
-    <T> SinkStage drainTo(
-            @Nonnull Sink<? super T> sink,
-            @Nonnull GeneralStage<? extends T> stage0,
-            @Nonnull GeneralStage<? extends T> stage1
-    );
+    <T> StreamSourceStage<T> readFrom(@Nonnull StreamSource<? extends T> source);
 
     /**
      * Attaches the supplied sink to two or more pipeline stages. Returns the
      * {@code SinkStage} representing the sink. You need this method when you
      * want to drain more than one stage to the same sink. In the typical case
-     * you'll use {@link GeneralStage#drainTo(Sink)} instead.
+     * you'll use {@link GeneralStage#writeTo(Sink)} instead.
      *
      * @param <T> the type of data being drained to the sink
      */
     @Nonnull
-    <T> SinkStage drainTo(
+    <T> SinkStage writeTo(
             @Nonnull Sink<? super T> sink,
             @Nonnull GeneralStage<? extends T> stage0,
             @Nonnull GeneralStage<? extends T> stage1,
@@ -100,14 +98,6 @@ public interface Pipeline {
      */
     @Nonnull
     DAG toDag();
-
-    /**
-     * Creates a new, empty pipeline.
-     */
-    @Nonnull
-    static Pipeline create() {
-        return new PipelineImpl();
-    }
 
     /**
      * Returns a DOT format (graphviz) representation of the Pipeline.

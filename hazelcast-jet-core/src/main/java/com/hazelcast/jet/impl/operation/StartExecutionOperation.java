@@ -16,18 +16,18 @@
 
 package com.hazelcast.jet.impl.operation;
 
-import com.hazelcast.jet.impl.JetService;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 
 import java.io.IOException;
-
-import static com.hazelcast.jet.impl.util.ExceptionUtil.withTryCatch;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Operation sent from master to members to start execution of a job. It is
  * sent after {@link InitExecutionOperation} was successful on all members.
+ * The operation doesn't complete immediately, it completes when the execution
+ * completes on the member.
  */
 public class StartExecutionOperation extends AsyncJobOperation {
 
@@ -42,14 +42,12 @@ public class StartExecutionOperation extends AsyncJobOperation {
     }
 
     @Override
-    protected void doRun() {
-        JetService service = getService();
-        service.getJobExecutionService().beginExecution(getCallerAddress(), jobId(), executionId)
-                .whenComplete(withTryCatch(getLogger(), (i, e) -> doSendResponse(e)));
+    protected CompletableFuture<Void> doRun() {
+        return getJetService().getJobExecutionService().beginExecution(getCallerAddress(), jobId(), executionId);
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return JetInitDataSerializerHook.START_EXECUTION_OP;
     }
 

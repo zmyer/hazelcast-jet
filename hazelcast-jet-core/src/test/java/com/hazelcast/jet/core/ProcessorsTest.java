@@ -16,19 +16,21 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.Util;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.core.test.TestSupport;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.pipeline.ContextFactory;
+import com.hazelcast.jet.pipeline.ServiceFactory;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static com.hazelcast.jet.Traversers.traverseItems;
@@ -38,15 +40,18 @@ import static com.hazelcast.jet.core.processor.Processors.aggregateByKeyP;
 import static com.hazelcast.jet.core.processor.Processors.combineByKeyP;
 import static com.hazelcast.jet.core.processor.Processors.combineP;
 import static com.hazelcast.jet.core.processor.Processors.filterP;
-import static com.hazelcast.jet.core.processor.Processors.filterUsingContextP;
+import static com.hazelcast.jet.core.processor.Processors.filterUsingServiceAsyncP;
+import static com.hazelcast.jet.core.processor.Processors.filterUsingServiceP;
 import static com.hazelcast.jet.core.processor.Processors.flatMapP;
-import static com.hazelcast.jet.core.processor.Processors.flatMapUsingContextP;
+import static com.hazelcast.jet.core.processor.Processors.flatMapUsingServiceP;
 import static com.hazelcast.jet.core.processor.Processors.mapP;
-import static com.hazelcast.jet.core.processor.Processors.mapUsingContextP;
+import static com.hazelcast.jet.core.processor.Processors.mapUsingServiceAsyncP;
 import static com.hazelcast.jet.core.processor.Processors.noopP;
+import static com.hazelcast.test.HazelcastTestSupport.sleepMillis;
 import static java.util.Arrays.asList;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
+import static java.util.concurrent.CompletableFuture.supplyAsync;
 import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.assertEquals;
 
@@ -62,15 +67,33 @@ public class ProcessorsTest {
     }
 
     @Test
-    public void mapUsingContext() {
+    public void mapUsingService() {
         TestSupport
-                .verifyProcessor(mapUsingContextP(
-                        ContextFactory.withCreateFn(context -> new int[1])
+                .verifyProcessor(Processors.mapUsingServiceP(
+                        ServiceFactory.withCreateFn(context -> new int[1])
                                       .withDestroyFn(context -> assertEquals(6, context[0])),
                         (int[] context, Integer item) -> context[0] += item))
                 .disableSnapshots()
                 .input(asList(1, 2, 3))
                 .expectOutput(asList(1, 3, 6));
+    }
+
+    @Test
+    public void mapUsingServiceAsync() {
+        TestSupport
+                .verifyProcessor(mapUsingServiceAsyncP(
+                        ServiceFactory.withCreateFn(context -> new AtomicInteger())
+                                      .withDestroyFn(context -> assertEquals(6, context.get())),
+                        t -> "k",
+                        (AtomicInteger context, Integer item) -> supplyAsync(() -> {
+                            sleepMillis(100);
+                            context.addAndGet(item);
+                            return item;
+                        })))
+                .disableSnapshots()
+                .disableProgressAssertion()
+                .input(asList(1, 2, 3))
+                .expectOutput(asList(1, 2, 3));
     }
 
     @Test
@@ -82,10 +105,10 @@ public class ProcessorsTest {
     }
 
     @Test
-    public void filteringWithMapUsingContext() {
+    public void filteringWithMapUsingService() {
         TestSupport
-                .verifyProcessor(mapUsingContextP(
-                        ContextFactory.withCreateFn(context -> new int[1])
+                .verifyProcessor(Processors.mapUsingServiceP(
+                        ServiceFactory.withCreateFn(context -> new int[1])
                                       .withDestroyFn(context -> assertEquals(3, context[0])),
                         (int[] context, Integer item) -> {
                             try {
@@ -100,6 +123,21 @@ public class ProcessorsTest {
     }
 
     @Test
+    public void filteringWithMapUsingServiceAsync() {
+        TestSupport
+                .verifyProcessor(mapUsingServiceAsyncP(
+                        ServiceFactory.withCreateFn(context -> new int[] {2})
+                                      .withDestroyFn(context -> assertEquals(2, context[0])),
+                        t -> "k",
+                        (int[] context, Integer item) ->
+                                supplyAsync(() -> item % context[0] != 0 ? item : null)))
+                .disableSnapshots()
+                .disableProgressAssertion()
+                .input(asList(1, 2, 3))
+                .expectOutput(asList(1, 3));
+    }
+
+    @Test
     public void filter() {
         TestSupport
                 .verifyProcessor(filterP(o -> o.equals(1)))
@@ -108,10 +146,10 @@ public class ProcessorsTest {
     }
 
     @Test
-    public void filterUsingContext() {
+    public void filterUsingService() {
         TestSupport
-                .verifyProcessor(filterUsingContextP(
-                        ContextFactory.withCreateFn(context -> new int[1])
+                .verifyProcessor(filterUsingServiceP(
+                        ServiceFactory.withCreateFn(context -> new int[1])
                                       .withDestroyFn(context -> assertEquals(2, context[0])),
                         (int[] context, Integer item) -> {
                             try {
@@ -127,6 +165,23 @@ public class ProcessorsTest {
     }
 
     @Test
+    public void filterUsingServiceAsync() {
+        TestSupport
+                .verifyProcessor(filterUsingServiceAsyncP(
+                        ServiceFactory.withCreateFn(context -> new AtomicInteger())
+                                      .withDestroyFn(context -> assertEquals(4, context.get())),
+                        t -> "k",
+                        (AtomicInteger context, Integer item) -> CompletableFuture.supplyAsync(() -> {
+                            context.incrementAndGet();
+                            return item > 1;
+                        })))
+                .input(asList(1, 2, 1, 2))
+                .disableSnapshots()
+                .disableProgressAssertion()
+                .expectOutput(asList(2, 2));
+    }
+
+    @Test
     public void flatMap() {
         TestSupport
                 .verifyProcessor(flatMapP(o -> traverseIterable(asList(o + "a", o + "b"))))
@@ -135,12 +190,12 @@ public class ProcessorsTest {
     }
 
     @Test
-    public void flatMapUsingContext() {
+    public void flatMapUsingService() {
         int[] context = {0};
 
         TestSupport
-                .verifyProcessor(flatMapUsingContextP(
-                        ContextFactory.withCreateFn(procContext -> context)
+                .verifyProcessor(flatMapUsingServiceP(
+                        ServiceFactory.withCreateFn(procContext -> context)
                                       .withDestroyFn(c -> c[0] = 0),
                         (int[] c, Integer item) -> traverseItems(item, c[0] += item)))
                 .disableSnapshots()
@@ -152,7 +207,7 @@ public class ProcessorsTest {
 
     @Test
     public void aggregateByKey() {
-        DistributedFunction<Object, String> keyFn = Object::toString;
+        FunctionEx<Object, String> keyFn = Object::toString;
         TestSupport
                 .verifyProcessor(aggregateByKeyP(singletonList(keyFn), aggregateToListAndString(), Util::entry))
                 .disableSnapshots()
@@ -166,7 +221,7 @@ public class ProcessorsTest {
 
     @Test
     public void accumulateByKey() {
-        DistributedFunction<Object, String> keyFn = Object::toString;
+        FunctionEx<Object, String> keyFn = Object::toString;
         TestSupport
                 .verifyProcessor(Processors.accumulateByKeyP(singletonList(keyFn), aggregateToListAndString()))
                 .disableSnapshots()

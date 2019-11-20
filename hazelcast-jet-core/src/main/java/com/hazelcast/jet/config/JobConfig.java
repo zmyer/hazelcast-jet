@@ -16,27 +16,34 @@
 
 package com.hazelcast.jet.config;
 
+import com.hazelcast.config.MetricsConfig;
+import com.hazelcast.internal.util.Preconditions;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
-import com.hazelcast.util.Preconditions;
+import com.hazelcast.nio.ObjectDataInput;
+import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.File;
-import java.io.Serializable;
+import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
+import static com.hazelcast.internal.util.Preconditions.checkNotNull;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
-import static com.hazelcast.util.Preconditions.checkNotNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * Contains the configuration specific to one Hazelcast Jet job.
+ *
+ * @since 3.0
  */
-public class JobConfig implements Serializable {
+public class JobConfig implements IdentifiedDataSerializable {
 
     private static final long SNAPSHOT_INTERVAL_MILLIS_DEFAULT = SECONDS.toMillis(10);
 
@@ -45,7 +52,10 @@ public class JobConfig implements Serializable {
     private long snapshotIntervalMillis = SNAPSHOT_INTERVAL_MILLIS_DEFAULT;
     private boolean autoScaling = true;
     private boolean splitBrainProtectionEnabled;
-    private final List<ResourceConfig> resourceConfigs = new ArrayList<>();
+    private boolean enableMetrics = true;
+    private boolean storeMetricsAfterJobCompletion;
+
+    private List<ResourceConfig> resourceConfigs = new ArrayList<>();
     private JobClassLoaderFactory classLoaderFactory;
     private String initialSnapshotName;
 
@@ -69,6 +79,8 @@ public class JobConfig implements Serializable {
      * The default value is {@code null}.
      *
      * @return {@code this} instance for fluent API
+     *
+     * @since 3.0
      */
     @Nonnull
     public JobConfig setName(@Nullable String name) {
@@ -406,10 +418,140 @@ public class JobConfig implements Serializable {
      * @param initialSnapshotName the snapshot name given to {@link
      *      Job#exportSnapshot(String)}
      * @return {@code this} instance for fluent API
+     *
+     * @since 3.0
      */
     @Nonnull
     public JobConfig setInitialSnapshotName(@Nullable String initialSnapshotName) {
         this.initialSnapshotName = initialSnapshotName;
         return this;
+    }
+
+    /**
+     * Sets whether metrics collection should be enabled for the job. Needs
+     * {@link MetricsConfig#isEnabled()} to be on in order to function.
+     * <p>
+     * Metrics for running jobs can be queried using {@link Job#getMetrics()}
+     * It's enabled by default.
+     *
+     * @since 3.2
+     */
+    @Nonnull
+    public JobConfig setMetricsEnabled(boolean enabled) {
+        this.enableMetrics = enabled;
+        return this;
+    }
+
+    /**
+     * Returns if metrics collection is enabled for the job.
+     *
+     * @since 3.2
+     */
+    public boolean isMetricsEnabled() {
+        return enableMetrics;
+    }
+
+    /**
+     * Returns whether metrics should be stored in the cluster after the job
+     * completes. Needs both {@link MetricsConfig#isEnabled()} and
+     * {@link #isMetricsEnabled()} to be on in order to function.
+     * <p>
+     * If enabled, metrics can be retrieved by calling
+     * {@link Job#getMetrics()}.
+     * <p>
+     * It's disabled by default.
+     *
+     * @since 3.2
+     */
+    public boolean isStoreMetricsAfterJobCompletion() {
+        return storeMetricsAfterJobCompletion;
+    }
+
+    /**
+     * Sets whether metrics should be stored in the cluster after the job
+     * completes. If enabled, metrics can be retrieved for the configured
+     * job even if it's no longer running (has completed successfully, has
+     * failed, has been cancelled or suspended) by calling {@link Job#getMetrics()}.
+     * <p>
+     * If disabled, once the configured job stops running {@link Job#getMetrics()}
+     * will always return empty metrics for it, regardless of the settings
+     * for {@link MetricsConfig#setEnabled global metrics collection}
+     * or {@link JobConfig#isMetricsEnabled() per job metrics collection}.
+     * <p>
+     * It's disabled by default.
+     *
+     * @since 3.2
+     */
+    public JobConfig setStoreMetricsAfterJobCompletion(boolean storeMetricsAfterJobCompletion) {
+        this.storeMetricsAfterJobCompletion = storeMetricsAfterJobCompletion;
+        return this;
+    }
+
+    @Override
+    public int getFactoryId() {
+        return JetConfigDataSerializerHook.FACTORY_ID;
+    }
+
+    @Override
+    public int getClassId() {
+        return JetConfigDataSerializerHook.JOB_CONFIG;
+    }
+
+    @Override
+    public void writeData(ObjectDataOutput out) throws IOException {
+        out.writeUTF(name);
+        out.writeObject(processingGuarantee);
+        out.writeLong(snapshotIntervalMillis);
+        out.writeBoolean(autoScaling);
+        out.writeBoolean(splitBrainProtectionEnabled);
+        out.writeObject(resourceConfigs);
+        out.writeObject(classLoaderFactory);
+        out.writeUTF(initialSnapshotName);
+        out.writeBoolean(enableMetrics);
+        out.writeBoolean(storeMetricsAfterJobCompletion);
+    }
+
+    @Override
+    public void readData(ObjectDataInput in) throws IOException {
+        name = in.readUTF();
+        processingGuarantee = in.readObject();
+        snapshotIntervalMillis = in.readLong();
+        autoScaling = in.readBoolean();
+        splitBrainProtectionEnabled = in.readBoolean();
+        resourceConfigs = in.readObject();
+        classLoaderFactory = in.readObject();
+        initialSnapshotName = in.readUTF();
+        enableMetrics = in.readBoolean();
+        storeMetricsAfterJobCompletion = in.readBoolean();
+    }
+
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+            return false;
+        }
+        JobConfig jobConfig = (JobConfig) o;
+        return snapshotIntervalMillis == jobConfig.snapshotIntervalMillis &&
+            autoScaling == jobConfig.autoScaling &&
+            splitBrainProtectionEnabled == jobConfig.splitBrainProtectionEnabled &&
+            enableMetrics == jobConfig.enableMetrics &&
+            storeMetricsAfterJobCompletion == jobConfig.storeMetricsAfterJobCompletion &&
+            Objects.equals(name, jobConfig.name) &&
+            processingGuarantee == jobConfig.processingGuarantee &&
+            Objects.equals(resourceConfigs, jobConfig.resourceConfigs) &&
+            Objects.equals(classLoaderFactory, jobConfig.classLoaderFactory) &&
+            Objects.equals(initialSnapshotName, jobConfig.initialSnapshotName);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, processingGuarantee, snapshotIntervalMillis, autoScaling,
+                splitBrainProtectionEnabled, enableMetrics, storeMetricsAfterJobCompletion, resourceConfigs,
+                classLoaderFactory, initialSnapshotName
+        );
     }
 }

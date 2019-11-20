@@ -16,7 +16,7 @@
 
 package com.hazelcast.jet.avro;
 
-import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.pipeline.Sink;
 import com.hazelcast.jet.pipeline.Sinks;
 import org.apache.avro.Schema;
@@ -32,6 +32,8 @@ import javax.annotation.Nonnull;
 
 /**
  * Contains factory methods for Apache Avro sinks.
+ *
+ * @since 3.0
  */
 public final class AvroSinks {
 
@@ -63,8 +65,8 @@ public final class AvroSinks {
     @Nonnull
     public static <R> Sink<R> files(
             @Nonnull String directoryName,
-            @Nonnull DistributedSupplier<Schema> schemaSupplier,
-            @Nonnull DistributedSupplier<DatumWriter<R>> datumWriterSupplier
+            @Nonnull SupplierEx<Schema> schemaSupplier,
+            @Nonnull SupplierEx<DatumWriter<R>> datumWriterSupplier
     ) {
 
         return Sinks.fromProcessor("avroFilesSink(" + directoryName + ')',
@@ -72,14 +74,14 @@ public final class AvroSinks {
     }
 
     /**
-     * Convenience for {@link #files(String, DistributedSupplier,
-     * DistributedSupplier)} which uses either {@link SpecificDatumWriter} or
+     * Convenience for {@link #files(String, SupplierEx,
+     * SupplierEx)} which uses either {@link SpecificDatumWriter} or
      * {@link ReflectDatumWriter} depending on the supplied {@code recordClass}.
      */
     @Nonnull
     public static <R> Sink<R> files(
             @Nonnull String directoryName,
-            @Nonnull DistributedSupplier<Schema> schemaSupplier,
+            @Nonnull SupplierEx<Schema> schemaSupplier,
             @Nonnull Class<R> recordClass
     ) {
         return files(directoryName, schemaSupplier, () -> SpecificRecord.class.isAssignableFrom(recordClass) ?
@@ -87,16 +89,14 @@ public final class AvroSinks {
     }
 
     /**
-     * Convenience for {@link #files(String, DistributedSupplier,
-     * DistributedSupplier)} which uses {@link GenericDatumWriter}.
+     * Convenience for {@link #files(String, SupplierEx,
+     * SupplierEx)} which uses {@link GenericDatumWriter}.
      */
     @Nonnull
     public static Sink<IndexedRecord> files(
             @Nonnull String directoryName,
-            @Nonnull DistributedSupplier<Schema> schemaSupplier
+            @Nonnull SupplierEx<Schema> schemaSupplier
     ) {
         return files(directoryName, schemaSupplier, GenericDatumWriter::new);
     }
-
-
 }

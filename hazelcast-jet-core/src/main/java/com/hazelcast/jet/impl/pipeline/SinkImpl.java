@@ -16,26 +16,47 @@
 
 package com.hazelcast.jet.impl.pipeline;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.pipeline.Sink;
 
 import javax.annotation.Nonnull;
-import java.util.concurrent.atomic.AtomicBoolean;
+import javax.annotation.Nullable;
 
 public class SinkImpl<T> implements Sink<T> {
 
     private final String name;
-    private ProcessorMetaSupplier metaSupplier;
-    private final AtomicBoolean isAssignedToStage = new AtomicBoolean();
+    private final ProcessorMetaSupplier metaSupplier;
+    private final boolean isTotalParallelismOne;
+    private final FunctionEx<? super T, ?> inputPartitionKeyFunction;
+    private boolean isAssignedToStage;
 
-    public SinkImpl(@Nonnull String name, @Nonnull ProcessorMetaSupplier metaSupplier) {
+    public SinkImpl(
+            @Nonnull String name,
+            @Nonnull ProcessorMetaSupplier metaSupplier,
+            boolean isTotalParallelismOne,
+            @Nullable FunctionEx<? super T, ?> inputPartitionKeyFunction
+    ) {
+        if (inputPartitionKeyFunction != null && isTotalParallelismOne) {
+            throw new IllegalArgumentException();
+        }
         this.name = name;
         this.metaSupplier = metaSupplier;
+        this.isTotalParallelismOne = isTotalParallelismOne;
+        this.inputPartitionKeyFunction = inputPartitionKeyFunction;
     }
 
     @Nonnull
     public ProcessorMetaSupplier metaSupplier() {
         return metaSupplier;
+    }
+
+    public boolean isTotalParallelismOne() {
+        return isTotalParallelismOne;
+    }
+
+    public FunctionEx<? super T, ?> inputPartitionKeyFunction() {
+        return inputPartitionKeyFunction;
     }
 
     @Override
@@ -44,8 +65,9 @@ public class SinkImpl<T> implements Sink<T> {
     }
 
     void onAssignToStage() {
-        if (isAssignedToStage.getAndSet(true)) {
+        if (isAssignedToStage) {
             throw new IllegalStateException("Sink " + name + " was already assigned to a sink stage");
         }
+        isAssignedToStage = true;
     }
 }

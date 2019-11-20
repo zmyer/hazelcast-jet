@@ -16,553 +16,1104 @@
 
 package com.hazelcast.jet.pipeline;
 
-import com.hazelcast.core.IMap;
-import com.hazelcast.core.ReplicatedMap;
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.PredicateEx;
+import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.Util;
-import com.hazelcast.jet.accumulator.MutableReference;
+import com.hazelcast.jet.accumulator.LongAccumulator;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
+import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.datamodel.ItemsByTag;
 import com.hazelcast.jet.datamodel.Tag;
-import com.hazelcast.jet.datamodel.TimestampedItem;
 import com.hazelcast.jet.datamodel.Tuple2;
 import com.hazelcast.jet.datamodel.Tuple3;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedPredicate;
+import com.hazelcast.jet.function.TriFunction;
+import com.hazelcast.jet.impl.JetEvent;
+import com.hazelcast.map.IMap;
+import com.hazelcast.replicatedmap.ReplicatedMap;
 import org.junit.Test;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.stream.IntStream;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
+import static com.hazelcast.function.Functions.wholeItem;
+import static com.hazelcast.jet.Traversers.traverseItems;
 import static com.hazelcast.jet.Traversers.traverseStream;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.aggregate.AggregateOperations.counting;
-import static com.hazelcast.jet.datamodel.ItemsByTag.itemsByTag;
 import static com.hazelcast.jet.datamodel.Tuple2.tuple2;
 import static com.hazelcast.jet.datamodel.Tuple3.tuple3;
-import static com.hazelcast.jet.function.DistributedFunctions.wholeItem;
+import static com.hazelcast.jet.impl.JetEvent.jetEvent;
 import static com.hazelcast.jet.impl.pipeline.AbstractStage.transformOf;
 import static com.hazelcast.jet.pipeline.JoinClause.joinMapEntries;
 import static com.hazelcast.jet.pipeline.WindowDefinition.tumbling;
-import static java.util.stream.Collectors.toList;
+import static com.hazelcast.jet.pipeline.test.AssertionSinks.assertAnyOrder;
+import static com.hazelcast.jet.pipeline.test.AssertionSinks.assertOrdered;
+import static java.lang.Math.min;
+import static java.util.Collections.emptyList;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.joining;
 import static org.junit.Assert.assertEquals;
 
 public class StreamStageTest extends PipelineStreamTestSupport {
 
+    private static BiFunction<String, Integer, String> ENRICHING_FORMAT_FN =
+            (prefix, i) -> String.format("%s-%04d", prefix, i);
+
     @Test
     public void setName() {
-        //Given
+        // Given
         String stageName = randomName();
 
-        //When
-        StreamStage<Integer> stage = srcStage.withoutTimestamps();
+        // When
+        StreamStage<Integer> stage = streamStageFromList(emptyList());
         stage.setName(stageName);
 
-        //Then
+        // Then
         assertEquals(stageName, stage.name());
     }
 
     @Test
     public void setLocalParallelism() {
-        //Given
+        // Given
         int localParallelism = 10;
 
-        //When
-        StreamStage<Integer> stage = srcStage.withoutTimestamps();
-        stage.setLocalParallelism(localParallelism);
+        // When
+        StreamStage<Integer> stage = streamStageFromList(emptyList());
+        StreamStage<Integer> filter = stage.filter(i -> i < 10)
+                                           .setLocalParallelism(localParallelism);
 
-        //Then
-        assertEquals(localParallelism, transformOf(stage).localParallelism());
+        // Then
+        assertEquals(localParallelism, transformOf(filter).localParallelism());
     }
 
     @Test
     public void map() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        DistributedFunction<Integer, String> mapFn = item -> item + "-x";
+        FunctionEx<Integer, String> mapFn = item -> String.format("%04d-x", item);
 
         // When
-        StreamStage<String> mapped = srcStage.withoutTimestamps().map(mapFn);
+        StreamStage<String> mapped = streamStageFromList(input).map(mapFn);
 
         // Then
-        mapped.drainTo(sink);
-        executeAsync();
-        Map<String, Integer> expected = toBag(input.stream().map(mapFn).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(mapFn), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapAsFilter() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        PredicateEx<Integer> filterFn = i -> i % 2 == 1;
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
+
+        // When
+        StreamStage<Integer> filtered = streamStageFromList(input)
+                .map(i -> filterFn.test(i) ? i : null);
+
+        // Then
+        filtered.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().filter(filterFn), formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn));
     }
 
     @Test
     public void filter() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        DistributedPredicate<Integer> filterFn = i -> i % 2 == 1;
+        PredicateEx<Integer> filterFn = i -> i % 2 == 1;
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
 
         // When
-        StreamStage<Integer> filtered = srcStage.withoutTimestamps().filter(filterFn);
+        StreamStage<Integer> filtered = streamStageFromList(input).filter(filterFn);
 
         // Then
-        filtered.drainTo(sink);
-        executeAsync();
-        Map<Integer, Integer> expected = toBag(input.stream().filter(filterFn).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        filtered.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().filter(filterFn), formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn));
     }
 
     @Test
     public void flatMap() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        DistributedFunction<Integer, Stream<String>> flatMapFn = o -> Stream.of(o + "A", o + "B");
+        FunctionEx<Integer, Stream<String>> flatMapFn =
+                i -> Stream.of("A", "B").map(s -> String.format("%04d-%s", i, s));
 
         // When
-        StreamStage<String> flatMapped = srcStage.withoutTimestamps().flatMap(o -> traverseStream(flatMapFn.apply(o)));
+        StreamStage<String> flatMapped = streamStageFromList(input)
+                .flatMap(o -> traverseStream(flatMapFn.apply(o)));
 
         // Then
-        flatMapped.drainTo(sink);
-        executeAsync();
-        Map<String, Integer> expected = toBag(input.stream().flatMap(flatMapFn).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        flatMapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().flatMap(flatMapFn), identity()),
+                streamToString(sinkList.stream(), Object::toString));
     }
 
     @Test
-    public void mapUsingContext() {
-        // Given
-        List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-
-        // When
-        StreamStage<String> mapped = srcStage
-                .withIngestionTimestamps()
-                .mapUsingContext(ContextFactory.withCreateFn(i -> "-context"), (suffix, r) -> r + suffix);
-
-        // Then
-        mapped.drainTo(sink);
-        executeAsync();
-
-        List<String> expected = input.stream().map(r -> r + "-context").collect(toList());
-        assertTrueEventually(() -> assertEquals(toBag(expected), sinkToBag()));
+    public void fusing_map() {
+        test_fusing(
+                stage -> stage
+                        .map(item -> String.format("%04d", item))
+                        .map(item -> item + "-x"),
+                item -> Stream.of(String.format("%04d-x", item))
+        );
     }
 
     @Test
-    public void mapUsingContext_keyed() {
+    public void fusing_flatMap() {
+        test_fusing(
+                stage -> stage
+                        .flatMap(i -> Traversers.traverseItems(String.format("%04d-a", i), String.format("%04d-b", i)))
+                        .flatMap(item -> Traversers.traverseItems(item + "1", item + "2")),
+                item -> Stream.of(String.format("%04d-a1", item), String.format("%04d-a2", item),
+                        String.format("%04d-b1", item), String.format("%04d-b2", item))
+        );
+    }
+
+    @Test
+    public void fusing_filter() {
+        test_fusing(
+                stage -> stage
+                        .filter(i -> i % 2 == 0)
+                        .filter(i -> i % 3 == 0)
+                        .map(Objects::toString),
+                item -> item % 2 == 0 && item % 3 == 0 ? Stream.of(item.toString()) : Stream.empty()
+        );
+    }
+
+    @Test
+    public void fusing_flatMap_with_inputMap() {
+        test_fusing(
+                stage -> stage
+                        .map(Objects::toString)
+                        .flatMap(item -> Traversers.traverseItems(item + "-1", item + "-2")),
+                item -> Stream.of(item.toString() + "-1", item.toString() + "-2")
+        );
+    }
+
+    @Test
+    public void fusing_flatMap_with_outputMap() {
+        test_fusing(
+                stage -> stage
+                        .flatMap(item -> Traversers.traverseItems(item + "-1", item + "-2"))
+                        .map(item -> item + "x"),
+                item -> Stream.of(item.toString() + "-1x", item.toString() + "-2x")
+        );
+    }
+
+    @Test
+    public void fusing_flatMapComplex() {
+        test_fusing(
+                stage -> stage
+                        .filter(item -> item % 2 == 0)
+                        .map(item -> item + "-x")
+                        .flatMap(item -> Traversers.traverseItems(item + "1", item + "2"))
+                        .map(item -> item + "y")
+                        .flatMap(item -> Traversers.traverseItems(item + "3", item + "4"))
+                        .map(item -> item + "z"),
+                item -> item % 2 == 0
+                        ? Stream.of(item + "-x1y3z", item + "-x2y3z", item + "-x1y4z", item + "-x2y4z")
+                        : Stream.empty()
+        );
+    }
+
+    @Test
+    public void fusing_mapToNull_leading() {
+        test_fusing(
+                stage -> stage
+                        .map(item -> (String) null)
+                        .flatMap(Traversers::traverseItems),
+                item -> Stream.empty()
+        );
+    }
+
+    @Test
+    public void fusing_mapToNull_inside() {
+        test_fusing(
+                stage -> stage
+                        .flatMap(Traversers::traverseItems)
+                        .map(item -> (String) null)
+                        .flatMap(Traversers::traverseItems),
+                item -> Stream.empty()
+        );
+    }
+
+    @Test
+    public void fusing_mapToNull_trailing() {
+        test_fusing(
+                stage -> stage
+                        .flatMap(Traversers::traverseItems)
+                        .map(item -> (String) null),
+                item -> Stream.empty()
+        );
+    }
+
+    private void test_fusing(Function<GeneralStage<Integer>, GeneralStage<String>> addToPipelineFn,
+                             Function<Integer, Stream<String>> plainFlatMapFn) {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
 
         // When
-        StreamStage<String> mapped = srcStage
-                .withIngestionTimestamps()
+        StreamStage<Integer> sourceStage = streamStageFromList(input);
+        GeneralStage<String> mappedStage = addToPipelineFn.apply(sourceStage);
+
+        // Then
+        mappedStage.writeTo(sink);
+        assertVertexCount(p.toDag(), 4);
+        assertContainsFused(true);
+        execute();
+        assertEquals(
+                streamToString(input.stream().flatMap(plainFlatMapFn), Objects::toString),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    private void assertVertexCount(DAG dag, int expectedCount) {
+        int[] count = {0};
+        dag.iterator().forEachRemaining(v -> count[0]++);
+        assertEquals("unexpected vertex count in DAG:\n" + dag.toDotString(), expectedCount, count[0]);
+    }
+
+    @Test
+    public void fusing_testWithBranch() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        StreamStage<String> mappedSource = streamStageFromList(input)
+                .map(item -> item + "-x");
+
+        // When
+        StreamStage<String> mapped1 = mappedSource.map(item -> item + "-branch1");
+        StreamStage<String> mapped2 = mappedSource.map(item -> item + "-branch2");
+        p.writeTo(sink, mapped1, mapped2);
+
+        // Then
+        assertContainsFused(false);
+        assertVertexCount(p.toDag(), 6);
+        execute();
+        assertEquals(
+                streamToString(input.stream().flatMap(t -> Stream.of(t + "-x-branch1", t + "-x-branch2")), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void fusing_when_localParallelismDifferent_then_notFused() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        streamStageFromList(input)
+                .map(item -> item + "-a")
+                .setLocalParallelism(1)
+                .map(item -> item + "b")
+                .setLocalParallelism(2)
+                .writeTo(sink);
+
+        // Then
+        assertContainsFused(false);
+        assertVertexCount(p.toDag(), 5);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(t -> t  + "-ab"), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    private void assertContainsFused(boolean expectedContains) {
+        String dotString = p.toDag().toDotString();
+        assertEquals(dotString, expectedContains, dotString.contains("fused"));
+    }
+
+    @Test
+    public void mapUsingService() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-context";
+
+        // When
+        StreamStage<String> mapped = streamStageFromList(input).mapUsingService(
+                ServiceFactory.withCreateFn(x -> suffix),
+                formatFn);
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapUsingService_keyed() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-keyed-context";
+
+        // When
+        StreamStage<String> mapped = streamStageFromList(input)
                 .groupingKey(i -> i)
-                .mapUsingContext(ContextFactory.withCreateFn(i -> "-keyed-context"), (suffix, k, r) -> r + suffix);
+                .mapUsingService(ServiceFactory.withCreateFn(i -> suffix), (suff, k, i) -> formatFn.apply(suff, i));
 
         // Then
-        mapped.drainTo(sink);
-
-        executeAsync();
-
-        List<String> expected = input.stream().map(r -> r + "-keyed-context").collect(toList());
-        assertTrueEventually(() -> assertEquals(toBag(expected), sinkToBag()));
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkList.stream(), Object::toString));
     }
 
     @Test
-    public void filterUsingContext() {
+    public void filterUsingService() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
+        int acceptedRemainder = 1;
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
 
         // When
-        StreamStage<Integer> mapped = srcStage
-                .withIngestionTimestamps()
-                .filterUsingContext(ContextFactory.withCreateFn(i -> 1), (ctx, r) -> r % 2 == ctx);
+        StreamStage<Integer> mapped = streamStageFromList(input)
+                .filterUsingService(ServiceFactory.withCreateFn(i -> acceptedRemainder), (rem, i) -> i % 2 == rem);
 
         // Then
-        mapped.drainTo(sink);
-        executeAsync();
-
-        List<Integer> expected = input.stream()
-                .filter(r -> r % 2 == 1)
-                .collect(toList());
-        assertTrueEventually(() -> assertEquals(toBag(expected), sinkToBag()));
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().filter(i -> i % 2 == acceptedRemainder), formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn));
     }
 
     @Test
-    public void filterUsingContext_keyed() {
+    public void filterUsingService_keyed() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
+        int acceptedRemainder = 1;
 
         // When
-        StreamStage<Integer> mapped = srcStage
-                .withIngestionTimestamps()
+        StreamStage<Integer> mapped = streamStageFromList(input)
                 .groupingKey(i -> i)
-                .filterUsingContext(ContextFactory.withCreateFn(i -> 1), (ctx, k, r) -> r % 2 == ctx);
+                .filterUsingService(
+                        ServiceFactory.withCreateFn(i -> acceptedRemainder),
+                        (rem, k, i) -> i % 2 == rem);
 
         // Then
-        mapped.drainTo(sink);
-        executeAsync();
-        List<Integer> expected = input.stream()
-                .filter(r -> r % 2 == 1)
-                .collect(toList());
-        assertTrueEventually(() -> assertEquals(toBag(expected), sinkToBag()));
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().filter(r -> r % 2 == acceptedRemainder), formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn));
     }
 
     @Test
-    public void flatMapUsingContext() {
+    public void flatMapUsingService() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        DistributedFunction<Integer, Stream<String>> flatMapFn = o -> Stream.of(o + "A", o + "B");
+        FunctionEx<Integer, Stream<String>> flatMapFn =
+                i -> Stream.of("A", "B").map(s -> String.format("%04d-%s", i, s));
 
         // When
-        StreamStage<String> flatMapped = srcStage
-                .withIngestionTimestamps()
-                .flatMapUsingContext(
-                        ContextFactory.withCreateFn(procCtx -> flatMapFn),
-                        (ctx, o) -> traverseStream(ctx.apply(o))
+        StreamStage<String> flatMapped = streamStageFromList(input)
+                .flatMapUsingService(
+                        ServiceFactory.withCreateFn(x -> flatMapFn),
+                        (fn, i) -> traverseStream(fn.apply(i))
                 );
 
         // Then
-        flatMapped.drainTo(sink);
-        executeAsync();
-
-        Map<String, Integer> expected = toBag(input.stream().flatMap(flatMapFn).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        flatMapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().flatMap(flatMapFn), identity()),
+                streamToString(sinkList.stream(), Object::toString));
     }
 
     @Test
-    public void flatMapUsingContext_keyed() {
+    public void flatMapUsingService_keyed() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        DistributedFunction<Integer, Stream<String>> flatMapFn = o -> Stream.of(o + "A", o + "B");
+        FunctionEx<Integer, Stream<String>> flatMapFn =
+                i -> Stream.of("A", "B").map(s -> String.format("%04d-%s", i, s));
 
         // When
-        StreamStage<String> flatMapped = srcStage
-                .withIngestionTimestamps()
+        StreamStage<String> flatMapped = streamStageFromList(input)
                 .groupingKey(i -> i)
-                .flatMapUsingContext(
-                        ContextFactory.withCreateFn(procCtx -> flatMapFn),
-                        (ctx, k, o) -> traverseStream(ctx.apply(o))
+                .flatMapUsingService(
+                        ServiceFactory.withCreateFn(x -> flatMapFn),
+                        (fn, k, i) -> traverseStream(fn.apply(i))
                 );
 
         // Then
-        flatMapped.drainTo(sink);
-        executeAsync();
-
-        Map<String, Integer> expected = toBag(input.stream().flatMap(flatMapFn).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        flatMapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().flatMap(flatMapFn), identity()),
+                streamToString(sinkList.stream(), Object::toString));
     }
 
     @Test
     public void mapUsingReplicatedMap() {
+        // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-
+        String valuePrefix = "value-";
         ReplicatedMap<Integer, String> map = member.getReplicatedMap(randomMapName());
+        // ReplicatedMap: {0 -> "value-0000, 1 -> "value-0001", ...}
         for (int i : input) {
-            map.put(i, String.valueOf(i));
+            map.put(i, String.format("%s%04d", valuePrefix, i));
         }
 
-        srcStage.withIngestionTimestamps()
-                .mapUsingReplicatedMap(map, (m, r) -> entry(r, m.get(r)))
-                .drainTo(sink);
+        // When
+        StreamStage<Entry<Integer, String>> mapped = streamStageFromList(input)
+                .mapUsingReplicatedMap(map, FunctionEx.identity(), Util::entry);
 
-        executeAsync();
-
-        List<Entry<Integer, String>> expected = input.stream()
-                .map(i -> entry(i, String.valueOf(i)))
-                .collect(toList());
-        assertTrueEventually(() -> assertEquals(toBag(expected), sinkToBag()));
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        // sinkList: entry(0, "value-0000"), entry(1, "value-0001"), ...
+        assertEquals(
+                streamToString(
+                        input.stream().map(i -> String.format("(%04d, %s%04d)", i, valuePrefix, i)),
+                        identity()),
+                streamToString(
+                        this.<Integer, String>sinkStreamOfEntry(),
+                        e -> String.format("(%04d, %s)", e.getKey(), e.getValue())));
     }
 
     @Test
     public void mapUsingIMapAsync() {
+        // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-
+        String valuePrefix = "value-";
         IMap<Integer, String> map = member.getMap(randomMapName());
+        // IMap: {0 -> "value-0000, 1 -> "value-0001", ...}
         for (int i : input) {
-            map.put(i, String.valueOf(i));
+            map.put(i, String.format("%s%04d", valuePrefix, i));
         }
 
-        srcStage.withIngestionTimestamps()
-                .mapUsingIMapAsync(map, (m, r) -> Util.toCompletableFuture(m.getAsync(r))
-                                                      .thenApply(a -> entry(r, a)))
-                .drainTo(sink);
+        // When
+        StreamStage<Entry<Integer, String>> mapped = streamStageFromList(input)
+                .mapUsingIMap(map, FunctionEx.identity(), Util::entry);
 
-        executeAsync();
-
-        List<Entry<Integer, String>> expected = input.stream()
-                .map(i -> entry(i, String.valueOf(i)))
-                .collect(toList());
-        assertTrueEventually(() -> assertEquals(toBag(expected), sinkToBag()));
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        // sinkList: entry(0, "value-0000"), entry(1, "value-0001"), ...
+        assertEquals(
+                streamToString(
+                        input.stream().map(i -> String.format("(%04d, %s%04d)", i, valuePrefix, i)),
+                        identity()),
+                streamToString(
+                        this.<Integer, String>sinkStreamOfEntry(),
+                        e -> String.format("(%04d, %s)", e.getKey(), e.getValue())));
     }
 
     @Test
     public void mapUsingIMapAsync_keyed() {
+        // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-
+        String valuePrefix = "value-";
         IMap<Integer, String> map = member.getMap(randomMapName());
-        for (int integer : input) {
-            map.put(integer, String.valueOf(integer));
+        // IMap: {0 -> "value-0000, 1 -> "value-0001", ...}
+        for (int i : input) {
+            map.put(i, String.format("%s%04d", valuePrefix, i));
         }
 
-        srcStage.withIngestionTimestamps()
-                .groupingKey(r -> r)
-                .mapUsingIMapAsync(map, (k, v) -> Util.entry(k, v))
-                .drainTo(sink);
+        // When
+        StreamStage<Entry<Integer, String>> mapped = streamStageFromList(input)
+                .groupingKey(i -> i)
+                .mapUsingIMap(map, Util::entry);
 
-        executeAsync();
-
-        List<Entry<Integer, String>> expected = input.stream()
-                .map(i -> entry(i, String.valueOf(i)))
-                .collect(toList());
-        assertTrueEventually(() -> assertEquals(toBag(expected), sinkToBag()));
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        // sinkList: entry(0, "value-0000"), entry(1, "value-0001"), ...
+        assertEquals(
+                streamToString(
+                        input.stream().map(i -> String.format("(%04d, %s%04d)", i, valuePrefix, i)),
+                        identity()),
+                streamToString(
+                        this.<Integer, String>sinkStreamOfEntry(),
+                        e -> String.format("(%04d, %s)", e.getKey(), e.getValue())));
     }
 
+    @Test
+    public void mapStateful_global() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Long> stage = streamStageFromList(input)
+                .mapStateful(LongAccumulator::new, (acc, i) -> {
+                    acc.add(i);
+                    return acc.get();
+                });
+
+        // Then
+        stage.writeTo(sink);
+        execute();
+        Function<Long, String> formatFn = i -> String.format("%04d", i);
+        assertEquals(
+                streamToString(input.stream().map(i -> i * (i + 1L) / 2), formatFn),
+                streamToString(sinkStreamOf(Long.class), formatFn)
+        );
+    }
+
+    @Test
+    public void mapStateful_global_returningNull() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Long> stage = streamStageFromList(input)
+            .mapStateful(LongAccumulator::new, (acc, i) -> {
+                acc.add(1);
+                return (acc.get() == input.size()) ? acc.get() : null;
+            });
+        // Then
+        stage.writeTo(assertOrdered(Collections.singletonList((long) itemCount)));
+        execute();
+    }
+
+    @Test
+    public void mapStateful_keyed() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Entry<Integer, Long>> stage = streamStageFromList(input)
+                .groupingKey(i -> i % 2)
+                .mapStateful(LongAccumulator::new, (acc, k, i) -> {
+                    acc.add(i);
+                    return entry(k, acc.get());
+                });
+
+        // Then
+        stage.writeTo(sink);
+        execute();
+        Function<Entry<Integer, Long>, String> formatFn = e -> String.format("%d %04d", e.getKey(), e.getValue());
+        assertEquals(
+                streamToString(input.stream().map(i -> {
+                    int key = i % 2;
+                    long n = i / 2 + 1;
+                    return entry(key, (key + i) * n / 2);
+                }), formatFn),
+                streamToString(sinkStreamOfEntry(), formatFn)
+        );
+    }
+
+    @Test
+    public void mapStateful_withEvictFn() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        int ttl = 1;
+        String evictedSignal = "evicted";
+
+        // When
+        StreamStage<Entry<Integer, String>> stage = streamStageFromList(input)
+                .groupingKey(i -> min(1, i))
+                .mapStateful(
+                        ttl,
+                        Object::new,
+                        (acc, k, i) -> null,
+                        (acc, k, wm) -> entry(k, evictedSignal));
+
+        // Then
+        stage.writeTo(sink);
+        execute();
+        Function<Entry<Integer, String>, String> formatFn = e -> String.format("%d %s", e.getKey(), e.getValue());
+        assertEquals(
+                streamToString(Stream.of(entry(0, evictedSignal)), formatFn),
+                streamToString(sinkStreamOfEntry(), formatFn)
+        );
+    }
+
+    @Test
+    public void mapStateful_keyed_returningNull() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Entry<Integer, Long>> stage = streamStageFromList(input)
+                .groupingKey(i -> i % 2)
+                .mapStateful(LongAccumulator::new, (acc, k, i) -> {
+                    acc.addAllowingOverflow(1);
+                    if (acc.get() == input.size() / 2) {
+                        return entry(k, acc.get());
+                    }
+                    return null;
+                });
+
+        // Then
+        long expectedCount = itemCount / 2;
+        stage.writeTo(assertAnyOrder(Arrays.asList(entry(0, expectedCount), entry(1, expectedCount))));
+        execute();
+    }
+
+    @Test
+    public void mapStateful_withEvictFnReturningNull() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        int ttl = 1;
+        String evictedSignal = "evicted";
+
+        // When
+        StreamStage<Entry<Integer, String>> stage = streamStageFromList(input)
+                .groupingKey(i -> min(2, i))
+                .mapStateful(
+                        ttl,
+                        Object::new,
+                        (acc, k, i) -> null,
+                        (acc, k, wm) -> (k == 1) ? entry(k, evictedSignal) : null
+                );
+
+        // Then
+        stage.writeTo(sink);
+        execute();
+        Function<Entry<Integer, String>, String> formatFn = e -> String.format("%d %s", e.getKey(), e.getValue());
+        assertEquals(
+                streamToString(Stream.of(entry(1, evictedSignal)), formatFn),
+                streamToString(sinkStreamOfEntry(), formatFn)
+        );
+    }
+
+    @Test
+    public void filterStateful_global() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Integer> stage = streamStageFromList(input)
+                .filterStateful(LongAccumulator::new, (acc, i) -> {
+                    acc.add(i);
+                    return acc.get() % 2 == 0;
+                });
+
+        // Then
+        stage.writeTo(sink);
+        execute();
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
+        assertEquals(
+                streamToString(
+                        input.stream()
+                             .filter(i -> {
+                                 int sum = i * (i + 1) / 2;
+                                 return sum % 2 == 0;
+                             }),
+                        formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn)
+        );
+    }
+
+    @Test
+    public void filterStateful_keyed() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Integer> stage = streamStageFromList(input)
+                .groupingKey(i -> i % 2)
+                .filterStateful(LongAccumulator::new, (acc, i) -> {
+                    acc.add(i);
+                    return acc.get() % 2 == 0;
+                });
+
+        // Then
+        stage.writeTo(sink);
+        execute();
+        Function<Integer, String> formatFn = i -> String.format("%d %04d", i % 2, i);
+        assertEquals(
+                streamToString(
+                        input.stream()
+                             .map(i -> {
+                                 // Using direct formula to sum the sequence of even/odd numbers:
+                                 int first = i % 2;
+                                 long count = i / 2 + 1;
+                                 long sum = (first + i) * count / 2;
+                                 return sum % 2 == 0 ? i : null;
+                             })
+                             .filter(Objects::nonNull),
+                        formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn)
+        );
+    }
+
+    @Test
+    public void flatMapStateful_global() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Long> stage = streamStageFromList(input)
+                .flatMapStateful(LongAccumulator::new, (acc, i) -> {
+                    acc.add(i);
+                    return traverseItems(acc.get(), acc.get());
+                });
+
+        // Then
+        stage.writeTo(sink);
+        execute();
+        Function<Long, String> formatFn = i -> String.format("%04d", i);
+        assertEquals(
+                streamToString(
+                        input.stream()
+                             .flatMap(i -> {
+                                 long sum = i * (i + 1) / 2;
+                                 return Stream.of(sum, sum);
+                             }),
+                        formatFn),
+                streamToString(sinkStreamOf(Long.class), formatFn)
+        );
+    }
+
+    @Test
+    public void flatMapStateful_keyed() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Entry<Integer, Long>> stage = streamStageFromList(input)
+                .groupingKey(i -> i % 2)
+                .flatMapStateful(LongAccumulator::new, (acc, k, i) -> {
+                    acc.add(i);
+                    return traverseItems(entry(k, acc.get()), entry(k, acc.get()));
+                });
+
+        // Then
+        stage.writeTo(sink);
+        execute();
+        Function<Entry<Integer, Long>, String> formatFn = e -> String.format("%d %04d", e.getKey(), e.getValue());
+        assertEquals(
+                streamToString(input.stream().flatMap(i -> {
+                    int key = i % 2;
+                    long n = i / 2 + 1;
+                    long sum = (key + i) * n / 2;
+                    return Stream.of(entry(key, sum), entry(key, sum));
+                }), formatFn),
+                streamToString(sinkStreamOfEntry(), formatFn)
+        );
+    }
+
+    @Test
+    public void rollingAggregate() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<Long> rolled = streamStageFromList(input)
+                .rollingAggregate(counting());
+
+        // Then
+        rolled.writeTo(sink);
+        execute();
+        Function<Object, String> formatFn = i -> String.format("%04d", (Long) i);
+        assertEquals(
+                streamToString(LongStream.rangeClosed(1, itemCount).boxed(), formatFn),
+                streamToString(sinkList.stream(), formatFn));
+    }
 
     @Test
     public void rollingAggregate_keyed() {
         // Given
         List<Integer> input = sequence(itemCount);
-        putToBatchSrcMap(input);
 
         // When
-        StreamStage<Entry<Integer, Long>> mapped = srcStage
-                .withoutTimestamps()
+        StreamStage<Entry<Integer, Long>> mapped = streamStageFromList(input)
                 .groupingKey(i -> i % 2)
                 .rollingAggregate(counting());
 
         // Then
-        mapped.drainTo(sink);
-        executeAsync();
-
-        assertEquals(0, itemCount % 2);
-        Map<Entry<Integer, Long>, Integer> expected = toBag(LongStream.range(1, itemCount / 2 + 1)
-                .boxed()
-                .flatMap(i -> Stream.of(entry(0, i), entry(1, i)))
-                .collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
-    }
-
-    @Test
-    public void rollingAggregate_global() {
-        // Given
-        List<Integer> input = sequence(itemCount);
-        putToBatchSrcMap(input);
-
-        // When
-        StreamStage<Long> mapped = srcStage
-                .withoutTimestamps()
-                .rollingAggregate(counting());
-
-        // Then
-        mapped.drainTo(sink);
-        executeAsync();
-
-        Map<Long, Integer> expected = toBag(LongStream.range(1, itemCount + 1).boxed().collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        mapped.writeTo(sink);
+        execute();
+        Function<Entry<Integer, Long>, String> formatFn = e -> String.format("(%d, %04d)", e.getKey(), e.getValue());
+        assertEquals(
+                streamToString(
+                        IntStream.range(2, itemCount + 2).mapToObj(i -> entry(i % 2, (long) i / 2)),
+                        formatFn),
+                streamToString(sinkStreamOfEntry(), formatFn));
     }
 
     @Test
     public void when_rollingAggregateWithTimestamps_then_timestampsPropagated() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        addToSrcMapJournal(closingItems);
-        AggregateOperation1<Integer, MutableReference<Integer>, Integer> identity = AggregateOperation
-                .withCreate(MutableReference<Integer>::new)
-                .andAccumulate(MutableReference<Integer>::set)
-                .andExportFinish(MutableReference::get);
+        AggregateOperation1<Integer, LongAccumulator, Integer> identity = AggregateOperation
+                .withCreate(LongAccumulator::new)
+                .<Integer>andAccumulate((acc, i) -> acc.set((long) i))
+                .andExportFinish(acc -> (int) acc.get());
 
         // When
-        StreamStage<Integer> rolling = srcStage.withTimestamps(i -> i, 100)
-                                               .rollingAggregate(identity);
+        StreamStage<Integer> rolling = streamStageFromList(input).rollingAggregate(identity);
 
         // Then
         rolling.window(tumbling(1))
                .aggregate(identity)
-               .drainTo(sink);
-        executeAsync();
-        Map<TimestampedItem<Integer>, Integer> expected = toBag(
+               .writeTo(sink);
+        execute();
+        assertEquals(
                 LongStream.range(0, itemCount)
-                          .mapToObj(i -> new TimestampedItem<>(i + 1, (int) i))
-                          .collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+                          .mapToObj(i -> String.format("(%04d %04d)", i + 1, i))
+                          .collect(joining("\n")),
+                streamToString(
+                        this.<Long>sinkStreamOfWinResult(),
+                        wr -> String.format("(%04d %04d)", wr.end(), wr.result()))
+        );
     }
 
     @Test
     public void merge() {
         // Given
-        String src2Name = journaledMapName();
-        StreamStage<Integer> srcStage2 = drawEventJournalValues(src2Name).withoutTimestamps();
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        putToMap(jet().getMap(src2Name), input);
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
+        StreamStage<Integer> srcStage0 = streamStageFromList(input);
+        StreamStage<Integer> srcStage1 = streamStageFromList(input);
 
         // When
-        StreamStage<Integer> merged = srcStage.withoutTimestamps().merge(srcStage2);
+        StreamStage<Integer> merged = srcStage0.merge(srcStage1);
 
         // Then
-        merged.drainTo(sink);
-        executeAsync();
-
-        input.addAll(input);
-        Map<Integer, Integer> expected = toBag(input);
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        merged.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().flatMap(i -> Stream.of(i, i)), formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn));
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void hashJoin() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-
-        String enrichingName = randomMapName();
-        IMap<Integer, String> enriching = jet().getMap(enrichingName);
-        input.forEach(i -> enriching.put(i, i + "A"));
-        BatchStage<Entry<Integer, String>> enrichingStage = p.drawFrom(Sources.map(enrichingName));
+        String prefixA = "A";
+        // entry(0, "A-0000"), entry(1, "A-0001"), ...
+        BatchStage<Entry<Integer, String>> enrichingStage = enrichingStage(input, prefixA);
 
         // When
-        StreamStage<Tuple2<Integer, String>> hashJoined = srcStage.withoutTimestamps().hashJoin(
+        @SuppressWarnings("Convert2MethodRef")
+        // there's a method ref bug in JDK
+        StreamStage<Tuple2<Integer, String>> hashJoined = streamStageFromList(input).hashJoin(
                 enrichingStage,
                 joinMapEntries(wholeItem()),
-                Tuple2::tuple2
+                (i, valueA) -> tuple2(i, valueA)
         );
 
         // Then
-        hashJoined.drainTo(sink);
-        executeAsync();
-
-        Map<Tuple2<Integer, String>, Integer> expected = toBag(
-                input.stream().map(i -> tuple2(i, i + "A")).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        hashJoined.writeTo(sink);
+        execute();
+        BiFunction<Integer, String, String> formatFn = (i, value) -> String.format("(%04d, %s)", i, value);
+        // sinkList: tuple2(0, "A-0000"), tuple2(1, "A-0001"), ...
+        assertEquals(
+                streamToString(
+                        input.stream().map(i -> formatFn.apply(i, ENRICHING_FORMAT_FN.apply(prefixA, i))),
+                        identity()),
+                streamToString(
+                        sinkList.stream().map(t2 -> (Tuple2<Integer, String>) t2),
+                        t2 -> formatFn.apply(t2.f0(), t2.f1()))
+        );
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void hashJoin2() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-
-        String enriching1Name = randomMapName();
-        String enriching2Name = randomMapName();
-        BatchStage<Entry<Integer, String>> enrichingStage1 = p.drawFrom(Sources.map(enriching1Name));
-        BatchStage<Entry<Integer, String>> enrichingStage2 = p.drawFrom(Sources.map(enriching2Name));
-        IMap<Integer, String> enriching1 = jet().getMap(enriching1Name);
-        IMap<Integer, String> enriching2 = jet().getMap(enriching2Name);
-        input.forEach(i -> enriching1.put(i, i + "A"));
-        input.forEach(i -> enriching2.put(i, i + "B"));
+        String prefixA = "A";
+        String prefixB = "B";
+        // entry(0, "A-0000"), entry(1, "A-0001"), ...
+        BatchStage<Entry<Integer, String>> enrichingStage1 = enrichingStage(input, prefixA);
+        // entry(0, "B-0000"), entry(1, "B-0001"), ...
+        BatchStage<Entry<Integer, String>> enrichingStage2 = enrichingStage(input, prefixB);
 
         // When
-        StreamStage<Tuple3<Integer, String, String>> hashJoined = srcStage.withoutTimestamps().hashJoin2(
+        @SuppressWarnings("Convert2MethodRef")
+        // there's a method ref bug in JDK
+        StreamStage<Tuple3<Integer, String, String>> hashJoined = streamStageFromList(input).hashJoin2(
                 enrichingStage1, joinMapEntries(wholeItem()),
                 enrichingStage2, joinMapEntries(wholeItem()),
-                Tuple3::tuple3
+                (i, valueA, valueB) -> tuple3(i, valueA, valueB)
         );
 
         // Then
-        hashJoined.drainTo(sink);
-        executeAsync();
+        hashJoined.writeTo(sink);
+        execute();
 
-        Map<Tuple3<Integer, String, String>, Integer> expected = toBag(input
-                .stream().map(i -> tuple3(i, i + "A", i + "B")).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        TriFunction<Integer, String, String, String> formatFn =
+                (i, valueA, valueB) -> String.format("(%04d, %s, %s)", i, valueA, valueB);
+        // sinkList: tuple3(0, "A-0000", "B-0000"), tuple3(1, "A-0001", "B-0001"), ...
+        assertEquals(
+                streamToString(
+                        input.stream().map(i -> formatFn.apply(i,
+                                ENRICHING_FORMAT_FN.apply(prefixA, i),
+                                ENRICHING_FORMAT_FN.apply(prefixB, i))),
+                        identity()),
+                streamToString(sinkList.stream().map(t3 -> (Tuple3<Integer, String, String>) t3),
+                        t3 -> formatFn.apply(t3.f0(), t3.f1(), t3.f2()))
+        );
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     public void hashJoinBuilder() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-
-        String enriching1Name = randomMapName();
-        String enriching2Name = randomMapName();
-        BatchStage<Entry<Integer, String>> enrichingStage1 = p.drawFrom(Sources.map(enriching1Name));
-        BatchStage<Entry<Integer, String>> enrichingStage2 = p.drawFrom(Sources.map(enriching2Name));
-        IMap<Integer, String> enriching1 = jet().getMap(enriching1Name);
-        IMap<Integer, String> enriching2 = jet().getMap(enriching2Name);
-        input.forEach(i -> {
-            enriching1.put(i, i + "A");
-            enriching2.put(i, i + "B");
-        });
+        String prefixA = "A";
+        String prefixB = "B";
+        // entry(0, "A-0000"), entry(1, "A-0001"), ...
+        BatchStage<Entry<Integer, String>> enrichingStage1 = enrichingStage(input, prefixA);
+        // entry(0, "B-0000"), entry(1, "B-0001"), ...
+        BatchStage<Entry<Integer, String>> enrichingStage2 = enrichingStage(input, prefixB);
 
         // When
-        StreamHashJoinBuilder<Integer> b = srcStage.withoutTimestamps().hashJoinBuilder();
-        Tag<String> tagA = b.add(enrichingStage1, joinMapEntries(wholeItem()));
-        Tag<String> tagB = b.add(enrichingStage2, joinMapEntries(wholeItem()));
-        GeneralStage<Tuple2<Integer, ItemsByTag>> joined = b.build((t1, t2) -> tuple2(t1, t2));
+        StreamHashJoinBuilder<Integer> builder = streamStageFromList(input).hashJoinBuilder();
+        Tag<String> tagA = builder.add(enrichingStage1, joinMapEntries(wholeItem()));
+        Tag<String> tagB = builder.add(enrichingStage2, joinMapEntries(wholeItem()));
+        @SuppressWarnings("Convert2MethodRef")
+        // there's a method ref bug in JDK
+        StreamStage<Tuple2<Integer, ItemsByTag>> joined = builder.build((a, b) -> tuple2(a, b));
 
         // Then
-        joined.drainTo(sink);
-        executeAsync();
+        joined.writeTo(sink);
+        execute();
 
-        Map<Tuple2<Integer, ItemsByTag>, Integer> expected = toBag(input
-                .stream()
-                .map(i -> tuple2(i, itemsByTag(tagA, i + "A", tagB, i + "B")))
-                .collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        TriFunction<Integer, String, String, String> formatFn =
+                (i, valueA, valueB) -> String.format("(%04d, %s, %s)", i, valueA, valueB);
+        // sinkList: tuple2(0, ibt(tagA: "A-0000", tagB: "B-0000")), tuple2(1, ibt(tagA: "A-0001", tagB: "B-0001"))
+        assertEquals(
+                streamToString(
+                        input.stream().map(i -> formatFn.apply(i,
+                                ENRICHING_FORMAT_FN.apply(prefixA, i),
+                                ENRICHING_FORMAT_FN.apply(prefixB, i))),
+                        identity()),
+                streamToString(sinkList.stream().map(t2 -> (Tuple2<Integer, ItemsByTag>) t2),
+                        t2 -> formatFn.apply(t2.f0(), t2.f1().get(tagA), t2.f1().get(tagB)))
+        );
+    }
+
+    private BatchStage<Entry<Integer, String>> enrichingStage(List<Integer> input, String prefix) {
+        return p.readFrom(SourceBuilder.batch("data", x -> null)
+                .<Entry<Integer, String>>fillBufferFn((x, buf) -> {
+                    input.forEach(i -> buf.add(entry(i, ENRICHING_FORMAT_FN.apply(prefix, i))));
+                    buf.close();
+                }).build());
+    }
+
+    @Test
+    public void apply() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+
+        // When
+        StreamStage<String> mapped = streamStageFromList(input)
+                .apply(s -> s.map(i -> i + 1)
+                             .map(String::valueOf));
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(streamToString(input.stream(), i -> String.valueOf(i + 1)),
+                streamToString(sinkStreamOf(String.class), identity()));
     }
 
     @Test
     public void customTransform() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        DistributedFunction<Integer, String> mapFn = o -> o + "-x";
+        FunctionEx<Integer, String> mapFn = item -> String.format("%04d-x", item);
 
         // When
-        StreamStage<String> custom = srcStage.withoutTimestamps().customTransform("map", Processors.mapP(mapFn));
+        StreamStage<String> custom = streamStageFromList(input).customTransform("map",
+                Processors.mapP(o -> {
+                    @SuppressWarnings("unchecked")
+                    JetEvent<Integer> jetEvent = (JetEvent<Integer>) o;
+                    return jetEvent(jetEvent.timestamp(), mapFn.apply(jetEvent.payload()));
+                }));
 
         // Then
-        custom.drainTo(sink);
-        executeAsync();
+        custom.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(mapFn), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
 
-        Map<String, Integer> expected = toBag(input
-                .stream().map(mapFn).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+    @Test
+    public void customTransform_keyed() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        FunctionEx<Integer, Integer> extractKeyFn = i -> i % 2;
+
+        // When
+        StreamStage<Object> custom = streamStageFromList(input)
+                .groupingKey(extractKeyFn)
+                .customTransform("map", Processors.mapUsingServiceP(
+                        ServiceFactory.withCreateFn(jet -> new HashSet<>()),
+                        (Set<Integer> seen, JetEvent<Integer> jetEvent) -> {
+                            Integer key = extractKeyFn.apply(jetEvent.payload());
+                            return seen.add(key) ? jetEvent(jetEvent.timestamp(), key) : null;
+                        }));
+
+        // Then
+        custom.writeTo(sink);
+        execute();
+
+        // Each processor emitted distinct keys it observed. If groupingKey isn't
+        // correctly partitioning, multiple processors will observe the same keys.
+        assertEquals("0\n1", streamToString(sinkStreamOf(Integer.class), Object::toString));
     }
 
     @Test
     public void peek_when_addedTimestamp_then_unwrapsJetEvent() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
 
         // When
-        StreamStage<Integer> peeked = srcStage.withIngestionTimestamps().peek();
+        StreamStage<Integer> peeked = streamStageFromList(input).peek();
 
         // Then
-        peeked.drainTo(sink);
-        jet().newJob(p);
-        assertTrueEventually(() -> assertEquals(toBag(input), sinkToBag()), 10);
+        peeked.writeTo(sink);
+        execute();
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
+        assertEquals(
+                streamToString(input.stream(), formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn));
     }
 
     @Test
     public void peekWithToStringFunctionIsTransparent() {
         // Given
         List<Integer> input = sequence(itemCount);
-        addToSrcMapJournal(input);
-        DistributedPredicate<Integer> filterFn = i -> i % 2 == 1;
+        PredicateEx<Integer> filterFn = i -> i % 2 == 1;
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
 
         // When
-        srcStage
-         .withoutTimestamps()
+        streamStageFromList(input)
          .filter(filterFn)
          .peek(Object::toString)
-         .drainTo(sink);
+         .writeTo(sink);
 
         // Then
-        executeAsync();
-
-        Map<Integer, Integer> expected = toBag(input.stream().filter(filterFn).collect(toList()));
-        assertTrueEventually(() -> assertEquals(expected, sinkToBag()));
+        execute();
+        assertEquals(
+                streamToString(input.stream().filter(filterFn), formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn));
     }
 }

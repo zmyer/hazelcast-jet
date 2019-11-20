@@ -16,8 +16,8 @@
 
 package com.hazelcast.jet.benchmark;
 
-import com.hazelcast.core.Member;
-import com.hazelcast.core.Partition;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.cluster.Member;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.config.JetConfig;
@@ -28,12 +28,10 @@ import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.Vertex;
 import com.hazelcast.jet.core.processor.SinkProcessors;
-import com.hazelcast.nio.Address;
+import com.hazelcast.partition.Partition;
 import com.hazelcast.test.HazelcastSerialClassRunner;
-import com.hazelcast.test.annotation.NightlyTest;
 import org.junit.Before;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 
 import javax.annotation.Nonnull;
@@ -42,26 +40,26 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.ThreadLocalRandom;
 
+import static com.hazelcast.function.Functions.wholeItem;
 import static com.hazelcast.jet.Traversers.lazy;
 import static com.hazelcast.jet.Traversers.traverseIterable;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.processor.Processors.noopP;
-import static com.hazelcast.jet.function.DistributedFunctions.wholeItem;
+import static java.lang.Math.min;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
-@Category(NightlyTest.class)
 @RunWith(HazelcastSerialClassRunner.class)
 public class BackpressureTest extends JetTestSupport {
 
     private static final int CLUSTER_SIZE = 2;
-    private static final int TOTAL_PARALLELISM = Runtime.getRuntime().availableProcessors();
+    private static final int TOTAL_PARALLELISM = min(8, Runtime.getRuntime().availableProcessors());
     private static final int PARALLELISM_PER_MEMBER = TOTAL_PARALLELISM / CLUSTER_SIZE;
-    private static final int DISTINCT = 1000;
-    private static final int COUNT_PER_DISTINCT_AND_SLICE = 10_000;
+    private static final int KEY_COUNT = 1000;
+    private static final int COUNT_PER_KEY_AND_SLICE = 10_000;
 
     private JetInstance jet1;
     private JetInstance jet2;
@@ -102,28 +100,28 @@ public class BackpressureTest extends JetTestSupport {
     }
 
     private static void assertCounts(Map<String, Long> wordCounts) {
-        for (int i = 0; i < DISTINCT; i++) {
+        for (int i = 0; i < KEY_COUNT; i++) {
             Long count = wordCounts.get(Integer.toString(i));
             assertNotNull("Missing count for " + i, count);
-            assertEquals("The count for " + i + " is not correct",
-                    COUNT_PER_DISTINCT_AND_SLICE * PARALLELISM_PER_MEMBER, (long) count);
+            assertEquals("The count for key " + i + " is not correct",
+                    COUNT_PER_KEY_AND_SLICE * PARALLELISM_PER_MEMBER, (long) count);
         }
     }
 
     private static class GenerateP extends AbstractProcessor {
 
-        private int item;
-        private int count;
+        private int key;
+        private int itemsEmittedPerKey;
         private final Traverser<Entry<String, Long>> trav = () -> {
-            if (count == COUNT_PER_DISTINCT_AND_SLICE) {
+            if (itemsEmittedPerKey == COUNT_PER_KEY_AND_SLICE) {
                 return null;
             }
             try {
-                return entry(Integer.toString(item), 1L);
+                return entry(Integer.toString(key), 1L);
             } finally {
-                if (++item == DISTINCT) {
-                    count++;
-                    item = 0;
+                if (++key == KEY_COUNT) {
+                    itemsEmittedPerKey++;
+                    key = 0;
                 }
             }
         };
@@ -144,7 +142,8 @@ public class BackpressureTest extends JetTestSupport {
         private Traverser<Entry<String, Long>> resultTraverser = lazy(() -> traverseIterable(counts.entrySet()));
 
         @Override
-        protected boolean tryProcess(int ordinal, @Nonnull Object item) throws Exception {
+        protected boolean tryProcess(int ordinal, @Nonnull Object item) {
+            @SuppressWarnings("unchecked")
             Entry<String, Long> entry = (Entry<String, Long>) item;
             counts.compute(entry.getKey(), (k, v) -> v == null ? entry.getValue() : v + entry.getValue());
             return true;
@@ -163,42 +162,50 @@ public class BackpressureTest extends JetTestSupport {
 
     private static class HiccupP extends CombineP {
 
-        private long hiccupDeadline;
-        private long nextHiccupTime;
+        private long startTime;
+        private boolean isHiccuping;
+        private long nextDeadline;
+        private int itemsProcessed;
 
-        HiccupP() {
-            updateNextHiccupTime();
+        @Override
+        protected void init(@Nonnull Context context) throws Exception {
+            super.init(context);
+            long now = System.nanoTime();
+            this.startTime = now;
+            // Start in hiccup state, but with deadline set to immediately change to
+            // running state
+            isHiccuping = true;
+            nextDeadline = now;
         }
 
         @Override
-        protected boolean tryProcess(int ordinal, @Nonnull Object item) throws Exception {
-            if (isHiccuping()) {
+        protected boolean tryProcess(int ordinal, @Nonnull Object item) {
+            updateHiccupStatus();
+            if (isHiccuping) {
                 return false;
             }
+            itemsProcessed++;
             return super.tryProcess(ordinal, item);
         }
 
-        private boolean isHiccuping() {
-            if (hiccupDeadline != 0) {
-                if (System.nanoTime() < hiccupDeadline) {
-                    return true;
-                }
-                System.out.println("==== Resume");
-                hiccupDeadline = 0;
-                updateNextHiccupTime();
+        private void updateHiccupStatus() {
+            long now = System.nanoTime();
+            if (now < nextDeadline) {
+                return;
             }
-            if (System.nanoTime() >= nextHiccupTime) {
-                final long hiccupDuration = MILLISECONDS.toNanos(301)
-                        + ThreadLocalRandom.current().nextLong(MILLISECONDS.toNanos(570));
-                hiccupDeadline = System.nanoTime() + hiccupDuration;
-                System.out.println("==== Hiccup " + NANOSECONDS.toMillis(hiccupDuration) + " ms");
-            }
-            return false;
-        }
+            isHiccuping = !isHiccuping;
+            long minTime = isHiccuping ? 301 : 700;
+            long randomRange = isHiccuping ? 570 : 2_000;
+            long prevDeadline = nextDeadline;
+            nextDeadline = now + MILLISECONDS.toNanos(minTime)
+                    + MILLISECONDS.toNanos(ThreadLocalRandom.current().nextLong(randomRange));
 
-        private void updateNextHiccupTime() {
-            nextHiccupTime = System.nanoTime() + MILLISECONDS.toNanos(700)
-                    + MILLISECONDS.toNanos(ThreadLocalRandom.current().nextLong(2_000));
+            System.out.printf("==== %,7d %s for %,5d ms, late by %,d ms. Processed %,d items%n",
+                    NANOSECONDS.toMillis(now - startTime),
+                    isHiccuping ? "Hiccup" : "Resume",
+                    NANOSECONDS.toMillis(nextDeadline - now),
+                    NANOSECONDS.toMillis(now - prevDeadline),
+                    itemsProcessed);
         }
 
         @Override

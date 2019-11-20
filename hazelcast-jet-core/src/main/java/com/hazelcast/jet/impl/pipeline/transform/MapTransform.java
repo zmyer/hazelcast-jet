@@ -16,7 +16,7 @@
 
 package com.hazelcast.jet.impl.pipeline.transform;
 
-import com.hazelcast.jet.function.DistributedFunction;
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.impl.pipeline.Planner;
 import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
 
@@ -26,23 +26,24 @@ import static com.hazelcast.jet.core.processor.Processors.mapP;
 
 public class MapTransform<T, R> extends AbstractTransform {
     @Nonnull
-    private DistributedFunction<? super T, ? extends R> mapFn;
+    private FunctionEx<? super T, ? extends R> mapFn;
 
     public MapTransform(
+            @Nonnull String name,
             @Nonnull Transform upstream,
-            @Nonnull DistributedFunction<? super T, ? extends R> mapFn
+            @Nonnull FunctionEx<? super T, ? extends R> mapFn
     ) {
-        super("map", upstream);
+        super(name, upstream);
         this.mapFn = mapFn;
     }
 
-    public DistributedFunction<? super T, ? extends R> mapFn() {
+    public FunctionEx<? super T, ? extends R> mapFn() {
         return mapFn;
     }
 
     @Override
     public void addToDag(Planner p) {
-        PlannerVertex pv = p.addVertex(this, p.uniqueVertexName(name()), localParallelism(), mapP(mapFn()));
+        PlannerVertex pv = p.addVertex(this, name(), localParallelism(), mapP(mapFn()));
         p.addEdges(this, pv.v);
     }
 }

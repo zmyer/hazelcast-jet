@@ -16,8 +16,7 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.jet.function.DistributedSupplier;
-import com.hazelcast.jet.impl.SerializationConstants;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.impl.execution.init.CustomClassLoadedObject;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
@@ -28,8 +27,9 @@ import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.util.function.UnaryOperator;
 
+import static com.hazelcast.internal.util.Preconditions.checkNotNull;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
-import static com.hazelcast.util.Preconditions.checkNotNull;
+import static java.lang.Math.min;
 
 /**
  * Represents a unit of data processing in a Jet computation job. Conceptually,
@@ -50,6 +50,8 @@ import static com.hazelcast.util.Preconditions.checkNotNull;
  * same processor.
  * <p>
  * A vertex is uniquely identified in a DAG by its name.
+ *
+ * @since 3.0
  */
 public class Vertex implements IdentifiedDataSerializable {
 
@@ -82,7 +84,7 @@ public class Vertex implements IdentifiedDataSerializable {
      * @param name the unique name of the vertex. This name identifies the vertex in the snapshot
      * @param processorSupplier the simple, parameterless supplier of {@code Processor} instances
      */
-    public Vertex(@Nonnull String name, @Nonnull DistributedSupplier<? extends Processor> processorSupplier) {
+    public Vertex(@Nonnull String name, @Nonnull SupplierEx<? extends Processor> processorSupplier) {
         this(name, ProcessorMetaSupplier.of(processorSupplier));
     }
 
@@ -121,6 +123,26 @@ public class Vertex implements IdentifiedDataSerializable {
             throw new IllegalArgumentException("Parallelism must be either -1 or a positive number");
         }
         return parallelism;
+    }
+
+    /**
+     * Determines the local parallelism value for the vertex by looking
+     * its local parallelism and meta supplier's preferred local parallelism.
+     * <p>
+     * If none of them is set, returns the provided default parallelism
+     */
+    public int determineLocalParallelism(int defaultParallelism) {
+        int localParallelism = this.localParallelism;
+        int preferredLocalParallelism = this.metaSupplier.preferredLocalParallelism();
+        checkLocalParallelism(preferredLocalParallelism);
+        checkLocalParallelism(localParallelism);
+        return localParallelism != LOCAL_PARALLELISM_USE_DEFAULT
+                ? localParallelism
+                : preferredLocalParallelism != LOCAL_PARALLELISM_USE_DEFAULT
+                    ? defaultParallelism == LOCAL_PARALLELISM_USE_DEFAULT
+                        ? preferredLocalParallelism
+                        : min(preferredLocalParallelism, defaultParallelism)
+                    : defaultParallelism;
     }
 
     /**
@@ -200,12 +222,12 @@ public class Vertex implements IdentifiedDataSerializable {
 
     @Override
     public int getFactoryId() {
-        return SerializationConstants.FACTORY_ID;
+        return JetDataSerializerHook.FACTORY_ID;
     }
 
     @Override
-    public int getId() {
-        return SerializationConstants.VERTEX;
+    public int getClassId() {
+        return JetDataSerializerHook.VERTEX;
     }
 
     // END Implementation of IdentifiedDataSerializable

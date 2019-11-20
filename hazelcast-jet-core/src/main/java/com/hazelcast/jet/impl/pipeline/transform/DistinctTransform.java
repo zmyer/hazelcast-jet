@@ -16,31 +16,31 @@
 
 package com.hazelcast.jet.impl.pipeline.transform;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.Vertex;
-import com.hazelcast.jet.function.DistributedFunction;
 import com.hazelcast.jet.impl.pipeline.Planner;
 import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
-import com.hazelcast.jet.pipeline.ContextFactory;
+import com.hazelcast.jet.pipeline.ServiceFactory;
 
 import java.util.HashSet;
 
 import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.Partitioner.HASH_CODE;
-import static com.hazelcast.jet.core.processor.Processors.filterUsingContextP;
+import static com.hazelcast.jet.core.processor.Processors.filterUsingServiceP;
 import static com.hazelcast.jet.impl.pipeline.transform.AggregateTransform.FIRST_STAGE_VERTEX_NAME_SUFFIX;
 
 public class DistinctTransform<T, K> extends AbstractTransform {
-    private final DistributedFunction<? super T, ? extends K> keyFn;
+    private final FunctionEx<? super T, ? extends K> keyFn;
 
-    public DistinctTransform(Transform upstream, DistributedFunction<? super T, ? extends K> keyFn) {
+    public DistinctTransform(Transform upstream, FunctionEx<? super T, ? extends K> keyFn) {
         super("distinct", upstream);
         this.keyFn = keyFn;
     }
 
     @Override
     public void addToDag(Planner p) {
-        String vertexName = p.uniqueVertexName(this.name());
+        String vertexName = name();
         Vertex v1 = p.dag.newVertex(vertexName + FIRST_STAGE_VERTEX_NAME_SUFFIX, distinctP(keyFn))
                          .localParallelism(localParallelism());
         PlannerVertex pv2 = p.addVertex(this, vertexName, localParallelism(), distinctP(keyFn));
@@ -49,8 +49,8 @@ public class DistinctTransform<T, K> extends AbstractTransform {
     }
 
     @SuppressWarnings("unchecked")
-    private static <T, K> ProcessorSupplier distinctP(DistributedFunction<? super T, ? extends K> keyFn) {
-        return filterUsingContextP(ContextFactory.withCreateFn(jet -> new HashSet<>()),
+    private static <T, K> ProcessorSupplier distinctP(FunctionEx<? super T, ? extends K> keyFn) {
+        return filterUsingServiceP(ServiceFactory.withCreateFn(jet -> new HashSet<>()),
                 (seenItems, item) -> seenItems.add(keyFn.apply((T) item)));
     }
 }

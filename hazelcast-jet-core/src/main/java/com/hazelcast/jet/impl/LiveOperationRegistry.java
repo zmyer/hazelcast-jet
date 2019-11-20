@@ -16,16 +16,16 @@
 
 package com.hazelcast.jet.impl;
 
-import com.hazelcast.nio.Address;
-import com.hazelcast.spi.LiveOperations;
-import com.hazelcast.spi.Operation;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.spi.impl.operationservice.LiveOperations;
+import com.hazelcast.spi.impl.operationservice.Operation;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class LiveOperationRegistry {
     // memberAddress -> callId -> operation
-    final ConcurrentHashMap<Address, Map<Long, Operation>> liveOperations = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Address, Map<Long, Operation>> liveOperations = new ConcurrentHashMap<>();
 
     public void register(Operation operation) {
         Map<Long, Operation> callIds = liveOperations.computeIfAbsent(operation.getCallerAddress(),

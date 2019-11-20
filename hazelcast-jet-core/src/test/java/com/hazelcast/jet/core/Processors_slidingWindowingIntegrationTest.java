@@ -16,7 +16,9 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.core.IList;
+import com.hazelcast.collection.IList;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.ToLongFunctionEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.Traverser;
@@ -24,11 +26,9 @@ import com.hazelcast.jet.accumulator.LongAccumulator;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.core.processor.SinkProcessors;
-import com.hazelcast.jet.datamodel.TimestampedEntry;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedToLongFunction;
-import com.hazelcast.test.HazelcastParametersRunnerFactory;
-import com.hazelcast.test.annotation.ParallelTest;
+import com.hazelcast.jet.datamodel.KeyedWindowResult;
+import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
@@ -43,6 +43,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static com.hazelcast.function.Functions.entryKey;
 import static com.hazelcast.jet.Traversers.traverseIterable;
 import static com.hazelcast.jet.aggregate.AggregateOperations.counting;
 import static com.hazelcast.jet.core.Edge.between;
@@ -51,14 +52,13 @@ import static com.hazelcast.jet.core.SlidingWindowPolicy.slidingWinPolicy;
 import static com.hazelcast.jet.core.WatermarkPolicy.limitingLag;
 import static com.hazelcast.jet.core.processor.Processors.combineToSlidingWindowP;
 import static com.hazelcast.jet.core.processor.Processors.insertWatermarksP;
-import static com.hazelcast.jet.function.DistributedFunctions.entryKey;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(Parameterized.class)
-@Category(ParallelTest.class)
-@Parameterized.UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
+@Category(ParallelJVMTest.class)
+@Parameterized.UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
 public class Processors_slidingWindowingIntegrationTest extends JetTestSupport {
 
     @Parameter
@@ -86,13 +86,13 @@ public class Processors_slidingWindowingIntegrationTest extends JetTestSupport {
         DAG dag = new DAG();
         boolean isBatchLocal = isBatch; // to prevent serialization of whole class
 
-        DistributedFunction<? super MyEvent, ?> keyFn = MyEvent::getKey;
-        DistributedToLongFunction<? super MyEvent> timestampFn = MyEvent::getTimestamp;
+        FunctionEx<? super MyEvent, ?> keyFn = MyEvent::getKey;
+        ToLongFunctionEx<? super MyEvent> timestampFn = MyEvent::getTimestamp;
 
         List<MyEvent> inputData = singletonList(new MyEvent(10, "a", 1L));
         Vertex source = dag.newVertex("source", () -> new EmitListP(inputData, isBatchLocal)).localParallelism(1);
         Vertex insertPP = dag.newVertex("insertWmP", insertWatermarksP(eventTimePolicy(
-                timestampFn, limitingLag(0), wDef.frameSize(), wDef.frameOffset(), -1
+                timestampFn, limitingLag(0), wDef.frameSize(), wDef.frameOffset(), 0
         ))).localParallelism(1);
         Vertex sink = dag.newVertex("sink", SinkProcessors.writeListP("sink"));
 
@@ -106,8 +106,9 @@ public class Processors_slidingWindowingIntegrationTest extends JetTestSupport {
                             singletonList(timestampFn),
                             TimestampKind.EVENT,
                             wDef,
+                            0L,
                             counting,
-                            TimestampedEntry::fromWindowResult));
+                            KeyedWindowResult::new));
             dag
                     .edge(between(insertPP, slidingWin).partitioned(MyEvent::getKey).distributed())
                     .edge(between(slidingWin, sink));
@@ -122,7 +123,7 @@ public class Processors_slidingWindowingIntegrationTest extends JetTestSupport {
                             counting.withIdentityFinish()
                     ));
             Vertex slidingWin = dag.newVertex("slidingWin",
-                    combineToSlidingWindowP(wDef, counting, TimestampedEntry::fromWindowResult));
+                    combineToSlidingWindowP(wDef, counting, KeyedWindowResult::new));
             dag
                     .edge(between(insertPP, accumulateByFrame).partitioned(keyFn))
                     .edge(between(accumulateByFrame, slidingWin).partitioned(entryKey()).distributed())
@@ -137,13 +138,14 @@ public class Processors_slidingWindowingIntegrationTest extends JetTestSupport {
 
         IList<MyEvent> sinkList = instance.getList("sink");
 
-        List<TimestampedEntry<String, Long>> expectedOutput = asList(
-                new TimestampedEntry<>(1000, "a", 1L),
-                new TimestampedEntry<>(2000, "a", 1L)
+        List<KeyedWindowResult<String, Long>> expectedOutput = asList(
+                new KeyedWindowResult<>(-1000, 1000, "a", 1L),
+                new KeyedWindowResult<>(0, 2000, "a", 1L)
         );
-        assertTrueEventually(() ->
-                assertEquals(streamToString(expectedOutput.stream()), streamToString(new ArrayList<>(sinkList).stream())),
-                5);
+        assertTrueEventually(() -> assertEquals(
+                streamToString(expectedOutput.stream()),
+                streamToString(new ArrayList<>(sinkList).stream())
+        ), 5);
         // wait a little more and make sure, that there are no more frames
         Thread.sleep(1000);
         assertEquals(expectedOutput.size(), sinkList.size());

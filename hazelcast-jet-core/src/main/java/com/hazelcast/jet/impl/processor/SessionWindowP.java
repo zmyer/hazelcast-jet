@@ -17,6 +17,7 @@
 package com.hazelcast.jet.impl.processor;
 
 import com.hazelcast.internal.metrics.Probe;
+import com.hazelcast.internal.util.QuickMath;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
@@ -25,12 +26,11 @@ import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.BroadcastKey;
 import com.hazelcast.jet.core.Watermark;
-import com.hazelcast.jet.function.KeyedWindowResultFunction;
+import com.hazelcast.jet.core.function.KeyedWindowResultFunction;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
-import com.hazelcast.util.QuickMath;
 
 import javax.annotation.Nonnull;
 import java.io.IOException;
@@ -51,6 +51,8 @@ import java.util.function.Function;
 import java.util.function.ToLongFunction;
 import java.util.stream.Stream;
 
+import static com.hazelcast.internal.util.Preconditions.checkTrue;
+import static com.hazelcast.jet.Traversers.traverseIterable;
 import static com.hazelcast.jet.Traversers.traverseStream;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
@@ -60,11 +62,11 @@ import static com.hazelcast.jet.impl.util.Util.lazyAdd;
 import static com.hazelcast.jet.impl.util.Util.lazyIncrement;
 import static com.hazelcast.jet.impl.util.Util.logLateEvent;
 import static com.hazelcast.jet.impl.util.Util.toLocalDateTime;
-import static com.hazelcast.util.Preconditions.checkTrue;
 import static java.lang.Math.min;
 import static java.lang.System.arraycopy;
 import static java.util.Collections.emptyList;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
  * Session window processor. See {@link
@@ -89,21 +91,26 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
     @Nonnull
     private final List<Function<Object, K>> keyFns;
     @Nonnull
-    private final AggregateOperation<A, R> aggrOp;
+    private final AggregateOperation<A, ? extends R> aggrOp;
     @Nonnull
     private final BiConsumer<? super A, ? super A> combineFn;
     @Nonnull
-    private final KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn;
+    private final KeyedWindowResultFunction<? super K, ? super R, ? extends OUT> mapToOutputFn;
     @Nonnull
     private final FlatMapper<Watermark, Object> closedWindowFlatmapper;
     private ProcessingGuarantee processingGuarantee;
 
-    @Probe
-    private AtomicLong lateEventsDropped = new AtomicLong();
-    @Probe
-    private AtomicLong totalKeys = new AtomicLong();
-    @Probe
-    private AtomicLong totalWindows = new AtomicLong();
+    @Probe(name = "lateEventsDropped")
+    private final AtomicLong lateEventsDropped = new AtomicLong();
+    @Probe(name = "totalKeys")
+    private final AtomicLong totalKeys = new AtomicLong();
+    @Probe(name = "totalWindows")
+    private final AtomicLong totalWindows = new AtomicLong();
+
+    // Fields for early results emission
+    private final long earlyResultsPeriod;
+    private long lastTimeEarlyResultsEmitted;
+    private Traverser<OUT> earlyWinTraverser;
 
     private Traverser snapshotTraverser;
     private long minRestoredCurrentWatermark = Long.MAX_VALUE;
@@ -118,15 +125,17 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
     @SuppressWarnings("unchecked")
     public SessionWindowP(
             long sessionTimeout,
+            long earlyResultsPeriod,
             @Nonnull List<? extends ToLongFunction<?>> timestampFns,
             @Nonnull List<? extends Function<?, ? extends K>> keyFns,
-            @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn
+            @Nonnull AggregateOperation<A, ? extends R> aggrOp,
+            @Nonnull KeyedWindowResultFunction<? super K, ? super R, ? extends OUT> mapToOutputFn
     ) {
         checkTrue(keyFns.size() == aggrOp.arity(), keyFns.size() + " key functions " +
                 "provided for " + aggrOp.arity() + "-arity aggregate operation");
         this.timestampFns = (List<ToLongFunction<Object>>) timestampFns;
         this.keyFns = (List<Function<Object, K>>) keyFns;
+        this.earlyResultsPeriod = earlyResultsPeriod;
         this.aggrOp = aggrOp;
         this.combineFn = requireNonNull(aggrOp.combineFn());
         this.mapToOutputFn = mapToOutputFn;
@@ -137,6 +146,26 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
     @Override
     protected void init(@Nonnull Context context) {
         processingGuarantee = context.processingGuarantee();
+        lastTimeEarlyResultsEmitted = NANOSECONDS.toMillis(System.nanoTime());
+    }
+
+    @Override
+    public boolean tryProcess() {
+        if (earlyResultsPeriod == 0) {
+            return true;
+        }
+        if (earlyWinTraverser != null) {
+            return emitFromTraverser(earlyWinTraverser);
+        }
+        long now = NANOSECONDS.toMillis(System.nanoTime());
+        if (now < lastTimeEarlyResultsEmitted + earlyResultsPeriod) {
+            return true;
+        }
+        lastTimeEarlyResultsEmitted = now;
+        earlyWinTraverser = traverseIterable(keyToWindows.entrySet())
+                .flatMap(e -> earlyWindows(e.getKey(), e.getValue()))
+                .onFirstNull(() -> earlyWinTraverser = null);
+        return emitFromTraverser(earlyWinTraverser);
     }
 
     @Override
@@ -261,6 +290,25 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
         aggrOp.accumulateFn(ordinal).accept(resolveAcc(w, key, timestamp), item);
     }
 
+    private Traverser<OUT> earlyWindows(K key, Windows<A> w) {
+        return new Traverser<OUT>() {
+            private int i;
+
+            @Override
+            public OUT next() {
+                while (i < w.size) {
+                    OUT out = mapToOutputFn.apply(
+                            w.starts[i], w.ends[i], key, aggrOp.exportFn().apply(w.accs[i]), true);
+                    i++;
+                    if (out != null) {
+                        return out;
+                    }
+                }
+                return null;
+            }
+        };
+    }
+
     private List<OUT> closeWindows(Windows<A> w, K key, long wm) {
         if (w == null) {
             return emptyList();
@@ -268,7 +316,7 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
         List<OUT> results = new ArrayList<>();
         int i = 0;
         for (; i < w.size && w.ends[i] < wm; i++) {
-            OUT out = mapToOutputFn.apply(w.starts[i], w.ends[i], key, aggrOp.finishFn().apply(w.accs[i]));
+            OUT out = mapToOutputFn.apply(w.starts[i], w.ends[i], key, aggrOp.finishFn().apply(w.accs[i]), false);
             if (out != null) {
                 results.add(out);
             }
@@ -379,7 +427,7 @@ public class SessionWindowP<K, A, R, OUT> extends AbstractProcessor {
         }
 
         @Override
-        public int getId() {
+        public int getClassId() {
             return JetInitDataSerializerHook.SESSION_WINDOW_P_WINDOWS;
         }
 

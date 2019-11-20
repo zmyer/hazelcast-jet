@@ -23,14 +23,15 @@ import com.hazelcast.client.config.ClientConfig;
  * connect to the Jet cluster.
  * <p>
  * See {@link ClientConfig} for actual config options.
+ *
+ * @since 3.0
  */
 public class JetClientConfig extends ClientConfig {
 
     /**
-     * Creates a new config instance with default group name and password for Jet
+     * Creates a new config instance with default group name for Jet
      */
     public JetClientConfig() {
-        getGroupConfig().setName(JetConfig.DEFAULT_GROUP_NAME);
-        getGroupConfig().setPassword(JetConfig.DEFAULT_GROUP_PASSWORD);
+        setClusterName(JetConfig.DEFAULT_CLUSTER_NAME);
     }
 }

@@ -16,14 +16,14 @@
 
 package com.hazelcast.jet.impl.processor;
 
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.core.Processor.Context;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.WatermarkPolicy;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
-import com.hazelcast.jet.function.DistributedSupplier;
-import com.hazelcast.test.HazelcastParametersRunnerFactory;
-import com.hazelcast.test.annotation.ParallelTest;
+import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -51,8 +51,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 @RunWith(Parameterized.class)
-@Category(ParallelTest.class)
-@Parameterized.UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
+@Category(ParallelJVMTest.class)
+@Parameterized.UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
 public class InsertWatermarksPTest {
 
     private static final long LAG = 3;
@@ -65,7 +65,7 @@ public class InsertWatermarksPTest {
     private TestOutbox outbox;
     private List<Object> resultToCheck = new ArrayList<>();
     private Context context;
-    private DistributedSupplier<WatermarkPolicy> wmPolicy = limitingLag(LAG);
+    private SupplierEx<WatermarkPolicy> wmPolicy = limitingLag(LAG);
     private long watermarkThrottlingFrameSize = 1;
 
     @Parameters(name = "outboxCapacity={0}")
@@ -277,7 +277,7 @@ public class InsertWatermarksPTest {
 
     private void doTest(List<Object> input, List<Object> expectedOutput) throws Exception {
         if (p == null) {
-            createProcessor(-1);
+            createProcessor(0);
         }
 
         for (Object inputItem : input) {
@@ -306,7 +306,7 @@ public class InsertWatermarksPTest {
 
     private String myToString(Object o) {
         return o instanceof Watermark
-                ? "Watermark{timestamp=" + ((Watermark) o).timestamp() + "}"
+                ? "Watermark{timestamp=" + ((Watermark) o).timestamp() + '}'
                 : o.toString();
     }
 

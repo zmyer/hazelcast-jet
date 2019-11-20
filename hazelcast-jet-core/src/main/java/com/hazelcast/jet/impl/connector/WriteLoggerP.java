@@ -16,16 +16,16 @@
 
 package com.hazelcast.jet.impl.connector;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.DiagnosticProcessors;
-import com.hazelcast.jet.function.DistributedFunction;
 
 import javax.annotation.Nonnull;
 import java.util.function.Function;
 
 /**
- * See {@link DiagnosticProcessors#writeLoggerP(DistributedFunction)}.
+ * See {@link DiagnosticProcessors#writeLoggerP(FunctionEx)}.
  */
 public class WriteLoggerP<T> extends AbstractProcessor {
 

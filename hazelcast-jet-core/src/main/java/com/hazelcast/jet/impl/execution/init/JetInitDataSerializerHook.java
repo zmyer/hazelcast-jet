@@ -22,23 +22,22 @@ import com.hazelcast.jet.impl.ClusterMetadata;
 import com.hazelcast.jet.impl.JobExecutionRecord;
 import com.hazelcast.jet.impl.JobExecutionRecord.SnapshotStats;
 import com.hazelcast.jet.impl.JobRecord;
-import com.hazelcast.jet.impl.JobRepository.FilterExecutionIdByJobIdPredicate;
-import com.hazelcast.jet.impl.JobRepository.FilterJobIdPredicate;
-import com.hazelcast.jet.impl.JobRepository.FilterJobRecordByNamePredicate;
 import com.hazelcast.jet.impl.JobRepository.FilterJobResultByNamePredicate;
 import com.hazelcast.jet.impl.JobRepository.UpdateJobExecutionRecordEntryProcessor;
 import com.hazelcast.jet.impl.JobResult;
 import com.hazelcast.jet.impl.JobSummary;
 import com.hazelcast.jet.impl.SnapshotValidationRecord;
+import com.hazelcast.jet.impl.aggregate.AggregateOpAggregator;
 import com.hazelcast.jet.impl.operation.CompleteExecutionOperation;
-import com.hazelcast.jet.impl.operation.ExportSnapshotOperation;
 import com.hazelcast.jet.impl.operation.GetClusterMetadataOperation;
 import com.hazelcast.jet.impl.operation.GetJobConfigOperation;
 import com.hazelcast.jet.impl.operation.GetJobIdsByNameOperation;
 import com.hazelcast.jet.impl.operation.GetJobIdsOperation;
+import com.hazelcast.jet.impl.operation.GetJobMetricsOperation;
 import com.hazelcast.jet.impl.operation.GetJobStatusOperation;
 import com.hazelcast.jet.impl.operation.GetJobSubmissionTimeOperation;
 import com.hazelcast.jet.impl.operation.GetJobSummaryListOperation;
+import com.hazelcast.jet.impl.operation.GetLocalJobMetricsOperation;
 import com.hazelcast.jet.impl.operation.InitExecutionOperation;
 import com.hazelcast.jet.impl.operation.JoinSubmittedJobOperation;
 import com.hazelcast.jet.impl.operation.NotifyMemberShutdownOperation;
@@ -56,10 +55,10 @@ import com.hazelcast.jet.impl.util.AsyncSnapshotWriterImpl;
 import com.hazelcast.nio.serialization.DataSerializableFactory;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 
-public final class JetInitDataSerializerHook implements DataSerializerHook {
+import static com.hazelcast.jet.impl.JetFactoryIdHelper.JET_IMPL_DS_FACTORY;
+import static com.hazelcast.jet.impl.JetFactoryIdHelper.JET_IMPL_DS_FACTORY_ID;
 
-    public static final String JET_IMPL_DS_FACTORY = "hazelcast.serialization.ds.jet.impl";
-    public static final int JET_IMPL_DS_FACTORY_ID = -10002;
+public final class JetInitDataSerializerHook implements DataSerializerHook {
 
     public static final int EXECUTION_PLAN = 0;
     public static final int VERTEX_DEF = 1;
@@ -74,35 +73,34 @@ public final class JetInitDataSerializerHook implements DataSerializerHook {
     public static final int SNAPSHOT_OPERATION = 10;
     public static final int JOB_EXECUTION_RECORD = 11;
     public static final int SESSION_WINDOW_P_WINDOWS = 12;
-    public static final int FILTER_EXECUTION_ID_BY_JOB_ID_PREDICATE = 13;
-    public static final int FILTER_JOB_ID = 14;
+    // 13 and 14 are unused
     public static final int SLIDING_WINDOW_P_SNAPSHOT_KEY = 15;
     public static final int GET_JOB_IDS = 16;
     public static final int JOIN_SUBMITTED_JOB = 17;
     public static final int UPDATE_JOB_EXECUTION_RECORD_EP = 18;
     public static final int TERMINATE_EXECUTION_OP = 20;
-    public static final int FILTER_JOB_RECORD_BY_NAME = 21;
-    public static final int FILTER_JOB_RESULT_BY_NAME = 22;
-    public static final int GET_JOB_IDS_BY_NAME_OP = 23;
-    public static final int GET_JOB_SUBMISSION_TIME_OP = 24;
-    public static final int GET_JOB_CONFIG_OP = 25;
-    public static final int TERMINATE_JOB_OP = 26;
-    public static final int ASYNC_SNAPSHOT_WRITER_SNAPSHOT_DATA_KEY = 27;
-    public static final int ASYNC_SNAPSHOT_WRITER_SNAPSHOT_DATA_VALUE_TERMINATOR = 28;
-    public static final int SNAPSHOT_OPERATION_RESULT = 29;
-    public static final int RESUME_JOB_OP = 30;
-    public static final int NOTIFY_MEMBER_SHUTDOWN_OP = 31;
-    public static final int GET_JOB_SUMMARY_LIST_OP = 32;
-    public static final int JOB_SUMMARY = 33;
-    public static final int SNAPSHOT_STATS = 34;
-    public static final int PREPARE_FOR_PASSIVE_CLUSTER_OP = 35;
-    public static final int EXPORT_SNAPSHOT_OP = 36;
-    public static final int SNAPSHOT_VALIDATION_RECORD = 37;
-    public static final int CLUSTER_METADATA = 38;
-    public static final int GET_CLUSTER_METADATA_OP = 39;
+    public static final int FILTER_JOB_RESULT_BY_NAME = 21;
+    public static final int GET_JOB_IDS_BY_NAME_OP = 22;
+    public static final int GET_JOB_SUBMISSION_TIME_OP = 23;
+    public static final int GET_JOB_CONFIG_OP = 24;
+    public static final int TERMINATE_JOB_OP = 25;
+    public static final int ASYNC_SNAPSHOT_WRITER_SNAPSHOT_DATA_KEY = 26;
+    public static final int ASYNC_SNAPSHOT_WRITER_SNAPSHOT_DATA_VALUE_TERMINATOR = 27;
+    public static final int SNAPSHOT_OPERATION_RESULT = 28;
+    public static final int RESUME_JOB_OP = 29;
+    public static final int NOTIFY_MEMBER_SHUTDOWN_OP = 30;
+    public static final int GET_JOB_SUMMARY_LIST_OP = 31;
+    public static final int JOB_SUMMARY = 32;
+    public static final int SNAPSHOT_STATS = 33;
+    public static final int PREPARE_FOR_PASSIVE_CLUSTER_OP = 34;
+    public static final int SNAPSHOT_VALIDATION_RECORD = 35;
+    public static final int CLUSTER_METADATA = 36;
+    public static final int GET_CLUSTER_METADATA_OP = 37;
+    public static final int AGGREGATE_OP_AGGREGATOR = 38;
+    public static final int GET_JOB_METRICS_OP = 39;
+    public static final int GET_LOCAL_JOB_METRICS_OP = 40;
 
     public static final int FACTORY_ID = FactoryIdHelper.getFactoryId(JET_IMPL_DS_FACTORY, JET_IMPL_DS_FACTORY_ID);
-
 
     @Override
     public int getFactoryId() {
@@ -145,10 +143,6 @@ public final class JetInitDataSerializerHook implements DataSerializerHook {
                     return new JobExecutionRecord();
                 case SESSION_WINDOW_P_WINDOWS:
                     return new SessionWindowP.Windows<>();
-                case FILTER_EXECUTION_ID_BY_JOB_ID_PREDICATE:
-                    return new FilterExecutionIdByJobIdPredicate();
-                case FILTER_JOB_ID:
-                    return new FilterJobIdPredicate();
                 case SLIDING_WINDOW_P_SNAPSHOT_KEY:
                     return new SnapshotKey();
                 case GET_JOB_IDS:
@@ -159,8 +153,6 @@ public final class JetInitDataSerializerHook implements DataSerializerHook {
                     return new UpdateJobExecutionRecordEntryProcessor();
                 case TERMINATE_EXECUTION_OP:
                     return new TerminateExecutionOperation();
-                case FILTER_JOB_RECORD_BY_NAME:
-                    return new FilterJobRecordByNamePredicate();
                 case FILTER_JOB_RESULT_BY_NAME:
                     return new FilterJobResultByNamePredicate();
                 case GET_JOB_IDS_BY_NAME_OP:
@@ -189,14 +181,18 @@ public final class JetInitDataSerializerHook implements DataSerializerHook {
                     return new SnapshotStats();
                 case PREPARE_FOR_PASSIVE_CLUSTER_OP:
                     return new PrepareForPassiveClusterOperation();
-                case EXPORT_SNAPSHOT_OP:
-                    return new ExportSnapshotOperation();
                 case SNAPSHOT_VALIDATION_RECORD:
                     return new SnapshotValidationRecord();
                 case CLUSTER_METADATA:
                     return new ClusterMetadata();
                 case GET_CLUSTER_METADATA_OP:
                     return new GetClusterMetadataOperation();
+                case AGGREGATE_OP_AGGREGATOR:
+                    return new AggregateOpAggregator<>();
+                case GET_JOB_METRICS_OP:
+                    return new GetJobMetricsOperation();
+                case GET_LOCAL_JOB_METRICS_OP:
+                    return new GetLocalJobMetricsOperation();
                 default:
                     throw new IllegalArgumentException("Unknown type id " + typeId);
             }

@@ -27,19 +27,23 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.function.Function;
 
+import static com.hazelcast.internal.util.Preconditions.checkNotNegative;
 import static com.hazelcast.jet.core.Edge.between;
+import static com.hazelcast.jet.core.EventTimePolicy.DEFAULT_IDLE_TIMEOUT;
 import static com.hazelcast.jet.core.EventTimePolicy.noEventTime;
 import static com.hazelcast.jet.core.processor.Processors.insertWatermarksP;
 import static java.util.Collections.emptyList;
 
 public class StreamSourceTransform<T> extends AbstractTransform implements StreamSource<T> {
 
-    private final Function<? super EventTimePolicy<? super T>, ? extends ProcessorMetaSupplier> metaSupplierFn;
+    public final Function<? super EventTimePolicy<? super T>, ? extends ProcessorMetaSupplier> metaSupplierFn;
+    private boolean isAssignedToStage;
     private final boolean emitsWatermarks;
 
     @Nullable
     private EventTimePolicy<? super T> eventTimePolicy;
     private final boolean supportsNativeTimestamps;
+    private long partitionIdleTimeout = DEFAULT_IDLE_TIMEOUT;
 
     public StreamSourceTransform(
             @Nonnull String name,
@@ -53,13 +57,19 @@ public class StreamSourceTransform<T> extends AbstractTransform implements Strea
         this.supportsNativeTimestamps = supportsNativeTimestamps;
     }
 
+    public void onAssignToStage() {
+        if (isAssignedToStage) {
+            throw new IllegalStateException("Sink " + name() + " was already assigned to a sink stage");
+        }
+        isAssignedToStage = true;
+    }
+
     @Override
-    @SuppressWarnings("unchecked")
     public void addToDag(Planner p) {
         if (emitsWatermarks || eventTimePolicy == null) {
             // Reached when the source either emits both JetEvents and watermarks
             // or neither. In these cases we don't have to insert watermarks.
-            p.addVertex(this, p.uniqueVertexName(name()), localParallelism(),
+            p.addVertex(this, name(), localParallelism(),
                     metaSupplierFn.apply(eventTimePolicy != null ? eventTimePolicy : noEventTime())
             );
         } else {
@@ -72,11 +82,12 @@ public class StreamSourceTransform<T> extends AbstractTransform implements Strea
             //                  -------------
             //                 |  insertWmP  |
             //                  -------------
-            String v1name = p.uniqueVertexName(name());
+            String v1name = name();
             Vertex v1 = p.dag.newVertex(v1name, metaSupplierFn.apply(eventTimePolicy))
                              .localParallelism(localParallelism());
+            int localParallelism = v1.determineLocalParallelism(localParallelism());
             PlannerVertex pv2 = p.addVertex(
-                    this, v1name + "-add-timestamps", localParallelism(), insertWatermarksP(eventTimePolicy)
+                    this, v1name + "-add-timestamps", localParallelism, insertWatermarksP(eventTimePolicy)
             );
             p.dag.edge(between(v1, pv2.v).isolated());
         }
@@ -98,5 +109,17 @@ public class StreamSourceTransform<T> extends AbstractTransform implements Strea
     @Override
     public boolean supportsNativeTimestamps() {
         return supportsNativeTimestamps;
+    }
+
+    @Override
+    public StreamSource<T> setPartitionIdleTimeout(long timeoutMillis) {
+        checkNotNegative(timeoutMillis, "timeout must be >= 0 (0 means disabled)");
+        this.partitionIdleTimeout = timeoutMillis;
+        return this;
+    }
+
+    @Override
+    public long partitionIdleTimeout() {
+        return partitionIdleTimeout;
     }
 }

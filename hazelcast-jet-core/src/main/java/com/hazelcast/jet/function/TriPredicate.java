@@ -16,17 +16,27 @@
 
 package com.hazelcast.jet.function;
 
+import com.hazelcast.jet.impl.util.ExceptionUtil;
+
 import javax.annotation.Nonnull;
+import java.io.Serializable;
 import java.util.function.Predicate;
 
-import static com.hazelcast.util.Preconditions.checkNotNull;
+import static com.hazelcast.internal.util.Preconditions.checkNotNull;
 
 /**
  * Represents a predicate which accepts three arguments. This
  * is the three-arity specialization of {@link Predicate}.
+ *
+ * @since 3.0
  */
 @FunctionalInterface
-public interface TriPredicate<T, U, V> {
+public interface TriPredicate<T, U, V> extends Serializable {
+
+    /**
+     * Exception-declaring version of {@link TriPredicate#test}.
+     */
+    boolean testEx(T t, U u, V v) throws Exception;
 
     /**
      * Evaluates this predicate with the given arguments.
@@ -36,7 +46,13 @@ public interface TriPredicate<T, U, V> {
      * @param v the third argument
      * @return {@code true} if predicate evaluated to true, {@code false} otherwise
      */
-    boolean test(T t, U u, V v);
+    default boolean test(T t, U u, V v) {
+        try {
+            return testEx(t, u, v);
+        } catch (Exception e) {
+            throw ExceptionUtil.sneakyThrow(e);
+        }
+    }
 
     /**
      * Returns a composite predicate which evaluates the

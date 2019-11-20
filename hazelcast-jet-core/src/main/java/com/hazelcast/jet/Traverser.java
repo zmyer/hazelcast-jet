@@ -39,6 +39,8 @@ import java.util.function.Predicate;
  * and stop using the original instance.
  *
  * @param <T> traversed item type
+ *
+ * @since 3.0
  */
 @FunctionalInterface
 public interface Traverser<T> {
@@ -93,10 +95,13 @@ public interface Traverser<T> {
      * Returns a traverser that will apply the given mapping function to each
      * item retrieved from this traverser and emit all the items from the
      * resulting traversers, which must be <em>null-terminated</em>.
+     * <p>
+     * The function must not return null traverser, but can return an {@linkplain
+     * Traversers#empty() empty traverser}.
      */
     @Nonnull
     @CheckReturnValue
-    default <R> Traverser<R> flatMap(@Nonnull Function<? super T, ? extends Traverser<? extends R>> flatMapFn) {
+    default <R> Traverser<R> flatMap(@Nonnull Function<? super T, ? extends Traverser<R>> flatMapFn) {
         return new FlatMappingTraverser<>(this, flatMapFn);
     }
 

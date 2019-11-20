@@ -16,8 +16,10 @@
 
 package com.hazelcast.jet.impl.execution.init;
 
+import com.hazelcast.cluster.Address;
 import com.hazelcast.internal.cluster.MemberInfo;
 import com.hazelcast.internal.cluster.impl.MembersView;
+import com.hazelcast.internal.partition.IPartitionService;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.EdgeConfig;
 import com.hazelcast.jet.config.JobConfig;
@@ -29,9 +31,7 @@ import com.hazelcast.jet.core.TopologyChangedException;
 import com.hazelcast.jet.core.Vertex;
 import com.hazelcast.jet.impl.execution.init.Contexts.MetaSupplierCtx;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.nio.Address;
-import com.hazelcast.spi.NodeEngine;
-import com.hazelcast.spi.partition.IPartitionService;
+import com.hazelcast.spi.impl.NodeEngine;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -42,11 +42,9 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.function.Function;
 
-import static com.hazelcast.jet.core.Vertex.LOCAL_PARALLELISM_USE_DEFAULT;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static com.hazelcast.jet.impl.util.Util.getJetInstance;
-import static java.lang.Integer.min;
 import static java.util.stream.Collectors.toList;
 
 public final class ExecutionPlanBuilder {
@@ -78,8 +76,7 @@ public final class ExecutionPlanBuilder {
             final Vertex vertex = dag.getVertex(entry.getKey());
             final ProcessorMetaSupplier metaSupplier = vertex.getMetaSupplier();
             final int vertexId = entry.getValue();
-            final int localParallelism = determineParallelism(vertex,
-                    metaSupplier.preferredLocalParallelism(), defaultParallelism);
+            final int localParallelism = vertex.determineLocalParallelism(defaultParallelism);
             final int totalParallelism = localParallelism * clusterSize;
             final List<EdgeDef> inbound = toEdgeDefs(dag.getInboundEdges(vertex.getName()), defaultEdgeConfig,
                     e -> vertexIdMap.get(e.getSourceName()), isJobDistributed);
@@ -89,7 +86,8 @@ public final class ExecutionPlanBuilder {
                     metaSupplier.getClass().getName(), vertex.getName()));
             try {
                 metaSupplier.init(new MetaSupplierCtx(instance, jobId, executionId, jobConfig, logger,
-                        vertex.getName(), localParallelism, totalParallelism, clusterSize));
+                        vertex.getName(), localParallelism, totalParallelism, clusterSize,
+                        jobConfig.getProcessingGuarantee()));
             } catch (Exception e) {
                 throw sneakyThrow(e);
             }
@@ -112,17 +110,6 @@ public final class ExecutionPlanBuilder {
         final int[] vertexId = {0};
         dag.forEach(v -> vertexIdMap.put(v.getName(), vertexId[0]++));
         return vertexIdMap;
-    }
-
-    private static int determineParallelism(Vertex vertex, int preferredLocalParallelism, int defaultParallelism) {
-        int localParallelism = vertex.getLocalParallelism();
-        Vertex.checkLocalParallelism(preferredLocalParallelism);
-        Vertex.checkLocalParallelism(localParallelism);
-        return localParallelism != LOCAL_PARALLELISM_USE_DEFAULT
-                        ? localParallelism
-             : preferredLocalParallelism != LOCAL_PARALLELISM_USE_DEFAULT
-                        ? min(preferredLocalParallelism, defaultParallelism)
-             : defaultParallelism;
     }
 
     private static List<EdgeDef> toEdgeDefs(

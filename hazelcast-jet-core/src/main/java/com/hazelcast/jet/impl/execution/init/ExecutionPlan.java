@@ -16,10 +16,9 @@
 
 package com.hazelcast.jet.impl.execution.init;
 
-import com.hazelcast.internal.metrics.LongProbeFunction;
-import com.hazelcast.internal.metrics.ProbeBuilder;
-import com.hazelcast.internal.metrics.ProbeLevel;
-import com.hazelcast.internal.metrics.ProbeUnit;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.internal.partition.IPartitionService;
+import com.hazelcast.internal.util.StringUtil;
 import com.hazelcast.internal.util.concurrent.ConcurrentConveyor;
 import com.hazelcast.internal.util.concurrent.OneToOneConcurrentArrayQueue;
 import com.hazelcast.internal.util.concurrent.QueuedPipe;
@@ -48,14 +47,11 @@ import com.hazelcast.jet.impl.execution.init.Contexts.ProcCtx;
 import com.hazelcast.jet.impl.execution.init.Contexts.ProcSupplierCtx;
 import com.hazelcast.jet.impl.util.AsyncSnapshotWriterImpl;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.nio.Address;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
-import com.hazelcast.spi.NodeEngine;
+import com.hazelcast.spi.impl.NodeEngine;
 import com.hazelcast.spi.impl.NodeEngineImpl;
-import com.hazelcast.spi.partition.IPartitionService;
-import com.hazelcast.util.StringUtil;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -66,20 +62,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.internal.util.concurrent.ConcurrentConveyor.concurrentConveyor;
-import static com.hazelcast.jet.Util.idToString;
 import static com.hazelcast.jet.config.EdgeConfig.DEFAULT_QUEUE_SIZE;
 import static com.hazelcast.jet.impl.execution.OutboundCollector.compositeCollector;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
+import static com.hazelcast.jet.impl.util.ImdgUtil.readList;
+import static com.hazelcast.jet.impl.util.ImdgUtil.writeList;
 import static com.hazelcast.jet.impl.util.Util.getJetInstance;
 import static com.hazelcast.jet.impl.util.Util.memoize;
-import static com.hazelcast.jet.impl.util.Util.readList;
-import static com.hazelcast.jet.impl.util.Util.writeList;
+import static com.hazelcast.jet.impl.util.Util.sanitizeLoggerNamePart;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 
@@ -90,12 +85,18 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
     private static final int SNAPSHOT_QUEUE_SIZE = DEFAULT_QUEUE_SIZE;
 
     private final List<Tasklet> tasklets = new ArrayList<>();
-    /** dest vertex id --> dest ordinal --> sender addr -> receiver tasklet */
+    /**
+     * dest vertex id --> dest ordinal --> sender addr -> receiver tasklet
+     */
     private final Map<Integer, Map<Integer, Map<Address, ReceiverTasklet>>> receiverMap = new HashMap<>();
-    /** dest vertex id --> dest ordinal --> dest addr --> sender tasklet */
+    /**
+     * dest vertex id --> dest ordinal --> dest addr --> sender tasklet
+     */
     private final Map<Integer, Map<Integer, Map<Address, SenderTasklet>>> senderMap = new HashMap<>();
 
-    /** Snapshot of partition table used to route items on partitioned edges */
+    /**
+     * Snapshot of partition table used to route items on partitioned edges
+     */
     private Address[] partitionOwners;
 
     private JobConfig jobConfig;
@@ -133,7 +134,9 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
         this.memberCount = memberCount;
     }
 
-    public void initialize(NodeEngine nodeEngine, long jobId, long executionId, SnapshotContext snapshotContext) {
+    public void initialize(
+            NodeEngine nodeEngine, long jobId, long executionId, SnapshotContext snapshotContext
+    ) {
         this.nodeEngine = (NodeEngineImpl) nodeEngine;
         this.executionId = executionId;
         initProcSuppliers(jobId, executionId);
@@ -152,8 +155,9 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                     new ConcurrentInboundEdgeStream(ssConveyor, 0, 0, true,
                             "ssFrom:" + vertex.name()),
                     new AsyncSnapshotWriterImpl(nodeEngine, snapshotContext, vertex.name(), memberIndex, memberCount),
-                    nodeEngine.getLogger(StoreSnapshotTasklet.class.getName() + "." + vertex.name()),
-                    vertex.name(), vertex.isHigherPriorityUpstream());
+                    nodeEngine.getLogger(StoreSnapshotTasklet.class.getName() + "."
+                            + sanitizeLoggerNamePart(vertex.name())),
+                    vertex.name(), vertex.isHigherPrioritySource());
             tasklets.add(ssTasklet);
 
             int localProcessorIdx = 0;
@@ -162,8 +166,8 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                 String loggerName = createLoggerName(
                         processor.getClass().getName(),
                         jobConfig.getName(),
-                        vertex.name()
-                        , globalProcessorIndex
+                        vertex.name(),
+                        globalProcessorIndex
                 );
                 ProcCtx context = new ProcCtx(
                         instance,
@@ -180,31 +184,10 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                         memberCount
                 );
 
-                ProbeBuilder probeBuilder = this.nodeEngine.getMetricsRegistry().newProbeBuilder()
-                        .withTag("module", "jet")
-                        .withTag("job", idToString(jobId))
-                        .withTag("exec", idToString(executionId))
-                        .withTag("vertex", vertex.name());
-
-                // ignore vertices which are only used for snapshot restore and do not
-                // consider snapshot restore edges for determining source tag
-                if (vertex.inboundEdges().stream().allMatch(EdgeDef::isSnapshotRestoreEdge)
-                        && !vertex.isSnapshotVertex()) {
-                    probeBuilder = probeBuilder.withTag("source", "true");
-                }
-                if (vertex.outboundEdges().size() == 0) {
-                    probeBuilder = probeBuilder.withTag("sink", "true");
-                }
-                ProbeBuilder processorProbeBuilder = probeBuilder
-                        .withTag("proc", String.valueOf(globalProcessorIndex));
-                processorProbeBuilder
-                        .withTag("procType", processor.getClass().getSimpleName())
-                        .scanAndRegister(processor);
-
                 // createOutboundEdgeStreams() populates localConveyorMap and edgeSenderConveyorMap.
                 // Also populates instance fields: senderMap, receiverMap, tasklets.
                 List<OutboundEdgeStream> outboundStreams = createOutboundEdgeStreams(
-                        vertex, localProcessorIdx, probeBuilder
+                        vertex, localProcessorIdx
                 );
                 List<InboundEdgeStream> inboundStreams = createInboundEdgeStreams(
                         vertex, localProcessorIdx, globalProcessorIndex
@@ -213,8 +196,8 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                 OutboundCollector snapshotCollector = new ConveyorCollector(ssConveyor, localProcessorIdx, null);
 
                 ProcessorTasklet processorTasklet = new ProcessorTasklet(context, nodeEngine.getSerializationService(),
-                        processor, inboundStreams, outboundStreams, snapshotContext, snapshotCollector,
-                        processorProbeBuilder);
+                        processor, inboundStreams, outboundStreams, snapshotContext, snapshotCollector
+                );
                 tasklets.add(processorTasklet);
                 this.processors.add(processor);
                 localProcessorIdx++;
@@ -231,6 +214,7 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
     public static String createLoggerName(
             String processorClassName, String jobName, String vertexName, int processorIndex
     ) {
+        vertexName = sanitizeLoggerNamePart(vertexName);
         if (StringUtil.isNullOrEmptyAfterTrim(jobName)) {
             return processorClassName + '.' + vertexName + '#' + processorIndex;
         } else {
@@ -270,7 +254,7 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return JetInitDataSerializerHook.EXECUTION_PLAN;
     }
 
@@ -321,7 +305,8 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                         vertex.localParallelism(),
                         vertex.localParallelism() * memberCount,
                         memberIndex,
-                        memberCount
+                        memberCount,
+                        jobConfig.getProcessingGuarantee()
                 ));
             } catch (Exception e) {
                 throw sneakyThrow(e);
@@ -331,10 +316,10 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
 
     private void initDag() {
         final Map<Integer, VertexDef> vMap = vertices.stream().collect(toMap(VertexDef::vertexId, v -> v));
-        vertices.forEach(v -> {
+        for (VertexDef v : vertices) {
             v.inboundEdges().forEach(e -> e.initTransientFields(vMap, v, false));
             v.outboundEdges().forEach(e -> e.initTransientFields(vMap, v, true));
-        });
+        }
         final IPartitionService partitionService = nodeEngine.getPartitionService();
         vertices.stream()
                 .map(VertexDef::outboundEdges)
@@ -358,16 +343,15 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
      * Populates {@link #senderMap} and {@link #tasklets} fields.
      */
     private List<OutboundEdgeStream> createOutboundEdgeStreams(
-            VertexDef srcVertex, int processorIdx, final ProbeBuilder probeBuilder
+            VertexDef srcVertex, int processorIdx
     ) {
         final List<OutboundEdgeStream> outboundStreams = new ArrayList<>();
         for (EdgeDef edge : srcVertex.outboundEdges()) {
-            ProbeBuilder probeBuilder2 = probeBuilder.withTag("ordinal", String.valueOf(edge.sourceOrdinal()));
             Map<Address, ConcurrentConveyor<Object>> memberToSenderConveyorMap = null;
             if (edge.isDistributed()) {
-                memberToSenderConveyorMap = memberToSenderConveyorMap(edgeSenderConveyorMap, edge, probeBuilder2);
+                memberToSenderConveyorMap = memberToSenderConveyorMap(edgeSenderConveyorMap, edge);
             }
-            outboundStreams.add(createOutboundEdgeStream(edge, processorIdx, memberToSenderConveyorMap, probeBuilder2));
+            outboundStreams.add(createOutboundEdgeStream(edge, processorIdx, memberToSenderConveyorMap));
         }
         return outboundStreams;
     }
@@ -378,15 +362,11 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
      * Populates the {@link #senderMap} and {@link #tasklets} fields.
      */
     private Map<Address, ConcurrentConveyor<Object>> memberToSenderConveyorMap(
-            Map<String, Map<Address, ConcurrentConveyor<Object>>> edgeSenderConveyorMap, EdgeDef edge,
-            ProbeBuilder probeBuilder
+            Map<String, Map<Address, ConcurrentConveyor<Object>>> edgeSenderConveyorMap, EdgeDef edge
     ) {
         assert edge.isDistributed() : "Edge is not distributed";
         return edgeSenderConveyorMap.computeIfAbsent(edge.edgeId(), x -> {
             final Map<Address, ConcurrentConveyor<Object>> addrToConveyor = new HashMap<>();
-            List<AtomicLong> bytesCounters = new ArrayList<>();
-            List<AtomicLong> itemsCounters = new ArrayList<>();
-            Tasklet firstTasklet = null;
             for (Address destAddr : remoteMembers.get()) {
                 final ConcurrentConveyor<Object> conveyor = createConveyorArray(
                         1, edge.sourceVertex().localParallelism(), edge.getConfig().getQueueSize())[0];
@@ -394,42 +374,18 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                         "sender-toVertex:" + edge.destVertex().name() + "-toMember:"
                                 + destAddr.toString().replace('.', '-'));
                 final int destVertexId = edge.destVertex().vertexId();
-                final SenderTasklet t = new SenderTasklet(inboundEdgeStream, nodeEngine,
-                        destAddr, executionId, destVertexId, edge.getConfig().getPacketSizeLimit());
-                if (firstTasklet == null) {
-                    firstTasklet = t;
-                }
-                bytesCounters.add(t.getBytesOutCounter());
-                itemsCounters.add(t.getItemsOutCounter());
+                final SenderTasklet t = new SenderTasklet(inboundEdgeStream, nodeEngine, destAddr,
+                        destVertexId, edge.getConfig().getPacketSizeLimit(), executionId,
+                        edge.sourceVertex().name(), edge.sourceOrdinal()
+                );
                 senderMap.computeIfAbsent(destVertexId, xx -> new HashMap<>())
                          .computeIfAbsent(edge.destOrdinal(), xx -> new HashMap<>())
                          .put(destAddr, t);
                 tasklets.add(t);
                 addrToConveyor.put(destAddr, conveyor);
             }
-
-            // We register the metrics to the first tasklet. The metrics itself aggregate counters from all tasklets
-            // and don't use the reference to source, but we use the source to deregister the metrics when the job
-            // finishes.
-            if (firstTasklet != null) {
-                probeBuilder.register(firstTasklet, "distributedBytesOut", ProbeLevel.INFO, ProbeUnit.BYTES,
-                        addCountersProbeFunction(bytesCounters));
-                probeBuilder.register(firstTasklet, "distributedItemsOut", ProbeLevel.INFO, ProbeUnit.BYTES,
-                        addCountersProbeFunction(itemsCounters));
-            }
             return addrToConveyor;
         });
-    }
-
-    private static <T> LongProbeFunction<T> addCountersProbeFunction(List<AtomicLong> counters) {
-        AtomicLong[] countersArray = counters.toArray(new AtomicLong[0]);
-        return source -> {
-            long total = 0;
-            for (AtomicLong counter : countersArray) {
-                total += counter.get();
-            }
-            return total;
-        };
     }
 
     @SuppressWarnings("unchecked")
@@ -444,34 +400,29 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
     }
 
     private OutboundEdgeStream createOutboundEdgeStream(
-            EdgeDef edge, int processorIndex, Map<Address, ConcurrentConveyor<Object>> senderConveyorMap,
-            ProbeBuilder probeBuilder
+            EdgeDef edge, int processorIndex, Map<Address, ConcurrentConveyor<Object>> senderConveyorMap
     ) {
         final int totalPtionCount = nodeEngine.getPartitionService().getPartitionCount();
         OutboundCollector[] outboundCollectors = createOutboundCollectors(
-                edge, processorIndex, senderConveyorMap, probeBuilder
+                edge, processorIndex, senderConveyorMap
         );
         OutboundCollector compositeCollector = compositeCollector(outboundCollectors, edge, totalPtionCount);
         return new OutboundEdgeStream(edge.sourceOrdinal(), compositeCollector);
     }
 
     private OutboundCollector[] createOutboundCollectors(
-            EdgeDef edge, int processorIndex, Map<Address, ConcurrentConveyor<Object>> senderConveyorMap,
-            ProbeBuilder probeBuilder
+            EdgeDef edge, int processorIndex, Map<Address, ConcurrentConveyor<Object>> senderConveyorMap
     ) {
         final int upstreamParallelism = edge.sourceVertex().localParallelism();
         final int downstreamParallelism = edge.destVertex().localParallelism();
         final int numRemoteMembers = ptionArrgmt.remotePartitionAssignment.get().size();
         final int queueSize = edge.getConfig().getQueueSize();
 
-        final int[][] ptionsPerProcessor =
-                ptionArrgmt.assignPartitionsToProcessors(downstreamParallelism, edge.isDistributed());
-
         if (edge.routingPolicy() == RoutingPolicy.ISOLATED) {
             if (downstreamParallelism < upstreamParallelism) {
                 throw new IllegalArgumentException(String.format(
                         "The edge %s specifies the %s routing policy, but the downstream vertex" +
-                        " parallelism (%d) is less than the upstream vertex parallelism (%d)",
+                                " parallelism (%d) is less than the upstream vertex parallelism (%d)",
                         edge, RoutingPolicy.ISOLATED.name(), downstreamParallelism, upstreamParallelism));
             }
             if (edge.isDistributed()) {
@@ -483,7 +434,7 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                     e -> createConveyorArray(downstreamParallelism, 1, queueSize));
             return IntStream.range(0, downstreamParallelism)
                             .filter(i -> i % upstreamParallelism == processorIndex)
-                            .mapToObj(i -> new ConveyorCollector(localConveyors[i], 0, ptionsPerProcessor[i]))
+                            .mapToObj(i -> new ConveyorCollector(localConveyors[i], 0, null))
                             .toArray(OutboundCollector[]::new);
         }
 
@@ -495,6 +446,7 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
          * For a distributed edge, there is one additional producer per member represented
          * by the ReceiverTasklet.
          */
+        final int[][] ptionsPerProcessor = getPartitionDistribution(edge, downstreamParallelism);
         final ConcurrentConveyor<Object>[] localConveyors = localConveyorMap.computeIfAbsent(edge.edgeId(),
                 e -> {
                     int queueCount = upstreamParallelism + (edge.isDistributed() ? numRemoteMembers : 0);
@@ -513,7 +465,7 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
         // allCollectors[n] where n > 0 is a collector pointing to a remote member _n_.
         final int totalPtionCount = nodeEngine.getPartitionService().getPartitionCount();
         final OutboundCollector[] allCollectors;
-        createIfAbsentReceiverTasklet(edge, ptionsPerProcessor, totalPtionCount, probeBuilder);
+        createIfAbsentReceiverTasklet(edge, ptionsPerProcessor, totalPtionCount);
 
         // assign remote partitions to outbound data collectors
         final Map<Address, int[]> memberToPartitions = ptionArrgmt.remotePartitionAssignment.get();
@@ -527,9 +479,13 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
         return allCollectors;
     }
 
-    private void createIfAbsentReceiverTasklet(
-            EdgeDef edge, int[][] ptionsPerProcessor, int totalPtionCount, ProbeBuilder probeBuilder
-    ) {
+    private int[][] getPartitionDistribution(EdgeDef edge, int downstreamParallelism) {
+        return edge.routingPolicy().equals(RoutingPolicy.PARTITIONED) ?
+                ptionArrgmt.assignPartitionsToProcessors(downstreamParallelism, edge.isDistributed())
+                : new int[downstreamParallelism][];
+    }
+
+    private void createIfAbsentReceiverTasklet(EdgeDef edge, int[][] ptionsPerProcessor, int totalPtionCount) {
         final ConcurrentConveyor<Object>[] localConveyors = localConveyorMap.get(edge.edgeId());
 
         receiverMap.computeIfAbsent(edge.destVertex().vertexId(), x -> new HashMap<>())
@@ -537,9 +493,6 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                        Map<Address, ReceiverTasklet> addrToTasklet = new HashMap<>();
                        //create a receiver per address
                        int offset = 0;
-                       List<AtomicLong> itemCounters = new ArrayList<>();
-                       List<AtomicLong> bytesCounters = new ArrayList<>();
-                       Tasklet firstTasklet = null;
                        for (Address addr : ptionArrgmt.remotePartitionAssignment.get().keySet()) {
                            final OutboundCollector[] collectors = new OutboundCollector[ptionsPerProcessor.length];
                            // assign the queues starting from end
@@ -550,22 +503,9 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
                            final OutboundCollector collector = compositeCollector(collectors, edge, totalPtionCount);
                            ReceiverTasklet receiverTasklet = new ReceiverTasklet(
                                    collector, edge.getConfig().getReceiveWindowMultiplier(),
-                                   getConfig().getInstanceConfig().getFlowControlPeriodMs());
+                                   getConfig().getInstanceConfig().getFlowControlPeriodMs(),
+                                   nodeEngine.getLoggingService(), addr, edge.destOrdinal(), edge.destVertex().name());
                            addrToTasklet.put(addr, receiverTasklet);
-                           if (firstTasklet == null) {
-                               firstTasklet = receiverTasklet;
-                           }
-                           itemCounters.add(receiverTasklet.getItemsInCounter());
-                           bytesCounters.add(receiverTasklet.getBytesInCounter());
-                       }
-                       if (firstTasklet != null) {
-                           // We register the metrics to the first tasklet. The metrics itself aggregate counters from
-                           // all tasklets and don't use the reference to source, but we use the source to deregister
-                           // the metrics when the job finishes.
-                           probeBuilder.register(firstTasklet, "distributedItemsIn", ProbeLevel.INFO, ProbeUnit.COUNT,
-                                   addCountersProbeFunction(itemCounters));
-                           probeBuilder.register(firstTasklet, "distributedBytesIn", ProbeLevel.INFO, ProbeUnit.COUNT,
-                                   addCountersProbeFunction(bytesCounters));
                        }
                        return addrToTasklet;
                    });
@@ -611,7 +551,12 @@ public class ExecutionPlan implements IdentifiedDataSerializable {
 
     public int getHigherPriorityVertexCount() {
         return (int) vertices.stream()
-                             .filter(VertexDef::isHigherPriorityUpstream)
+                             .filter(VertexDef::isHigherPrioritySource)
                              .count();
+    }
+
+    // for test
+    List<VertexDef> getVertices() {
+        return vertices;
     }
 }

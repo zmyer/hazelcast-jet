@@ -17,30 +17,30 @@
 package com.hazelcast.jet.pipeline;
 
 import com.hazelcast.cache.CacheEventType;
-import com.hazelcast.cache.journal.EventJournalCacheEvent;
+import com.hazelcast.cache.EventJournalCacheEvent;
 import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.collection.IList;
 import com.hazelcast.config.EventJournalConfig;
 import com.hazelcast.core.EntryEventType;
-import com.hazelcast.core.IList;
-import com.hazelcast.core.IMap;
-import com.hazelcast.jet.GenericPredicates;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.PredicateEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Util;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.EventTimeMapper;
-import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.EventTimePolicy;
+import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.processor.SourceProcessors;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedPredicate;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.function.ToResultSetFunction;
 import com.hazelcast.jet.impl.pipeline.transform.BatchSourceTransform;
 import com.hazelcast.jet.impl.pipeline.transform.StreamSourceTransform;
-import com.hazelcast.map.journal.EventJournalMapEvent;
+import com.hazelcast.map.IMap;
+import com.hazelcast.map.EventJournalMapEvent;
 import com.hazelcast.projection.Projection;
 import com.hazelcast.projection.Projections;
 import com.hazelcast.query.Predicate;
 import com.hazelcast.query.PredicateBuilder;
+import com.hazelcast.query.Predicates;
 
 import javax.annotation.Nonnull;
 import javax.jms.ConnectionFactory;
@@ -48,7 +48,6 @@ import javax.jms.Message;
 import java.nio.charset.Charset;
 import java.sql.Connection;
 import java.sql.ResultSet;
-import java.util.Map;
 import java.util.Map.Entry;
 import java.util.function.Function;
 
@@ -67,11 +66,12 @@ import static com.hazelcast.jet.core.processor.SourceProcessors.streamMapP;
 import static com.hazelcast.jet.core.processor.SourceProcessors.streamRemoteCacheP;
 import static com.hazelcast.jet.core.processor.SourceProcessors.streamRemoteMapP;
 import static com.hazelcast.jet.core.processor.SourceProcessors.streamSocketP;
+import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * Contains factory methods for various types of pipeline sources. To start
- * building a pipeline, pass a source to {@link Pipeline#drawFrom(BatchSource)}
+ * building a pipeline, pass a source to {@link Pipeline#readFrom(BatchSource)}
  * and you will obtain the initial {@link BatchStage}. You can then
  * attach further stages to it.
  * <p>
@@ -81,6 +81,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * <p>
  * The default local parallelism for sources in this class is 1 or 2, check the
  * documentation of individual methods.
+ *
+ * @since 3.0
  */
 public final class Sources {
 
@@ -99,6 +101,7 @@ public final class Sources {
             @Nonnull String sourceName,
             @Nonnull ProcessorMetaSupplier metaSupplier
     ) {
+        checkSerializable(metaSupplier, "metaSupplier");
         return new BatchSourceTransform<>(sourceName, metaSupplier);
     }
 
@@ -113,17 +116,15 @@ public final class Sources {
      * If you are implementing a custom source processor, be sure to check out
      * the {@link EventTimeMapper} class that will help you correctly implement
      * watermark emission.
-     *
-     * @param sourceName user-friendly source name
-     * @param metaSupplierFn factory of processor meta-suppliers
+     *  @param sourceName user-friendly source name
      * @param supportsNativeTimestamps true, if the processor is able to work
-     *                                 without timestampFn in EventTimePolicy
+     * @param metaSupplierFn factory of processor meta-suppliers
      */
     @Nonnull
     public static <T> StreamSource<T> streamFromProcessorWithWatermarks(
             @Nonnull String sourceName,
-            @Nonnull Function<EventTimePolicy<? super T>, ProcessorMetaSupplier> metaSupplierFn,
-            boolean supportsNativeTimestamps
+            boolean supportsNativeTimestamps,
+            @Nonnull Function<EventTimePolicy<? super T>, ProcessorMetaSupplier> metaSupplierFn
     ) {
         return new StreamSourceTransform<>(sourceName, metaSupplierFn, true, supportsNativeTimestamps);
     }
@@ -140,6 +141,7 @@ public final class Sources {
             @Nonnull String sourceName,
             @Nonnull ProcessorMetaSupplier metaSupplier
     ) {
+        checkSerializable(metaSupplier, "metaSupplier");
         return new StreamSourceTransform<>(sourceName, w -> metaSupplier, false, false);
     }
 
@@ -153,8 +155,11 @@ public final class Sources {
      * it will re-emit all entries.
      * <p>
      * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may
-     * miss and/or duplicate some entries.
+     * cluster topology change (triggering data migration), the source may miss
+     * and/or duplicate some entries. If we detect a topology change, the job
+     * will fail, but the detection is only on a best-effort basis - we might
+     * still give incorrect results without reporting a failure. Concurrent
+     * mutation is not detected at all.
      * <p>
      * The default local parallelism for this processor is 2 (or 1 if just 1
      * CPU is available).
@@ -179,8 +184,11 @@ public final class Sources {
      * it will re-emit all entries.
      * <p>
      * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may
-     * miss and/or duplicate some entries.
+     * cluster topology change (triggering data migration), the source may miss
+     * and/or duplicate some entries. If we detect a topology change, the job
+     * will fail, but the detection is only on a best-effort basis - we might
+     * still give incorrect results without reporting a failure. Concurrent
+     * mutation is not detected at all.
      * <p>
      * The default local parallelism for this processor is 2 (or 1 if just 1
      * CPU is available).
@@ -197,11 +205,11 @@ public final class Sources {
      * transforms you allow the source to apply these functions early, before
      * generating any output, with the potential of significantly reducing
      * data traffic. If your data is stored in the IMDG using the <a href=
-     *     "http://docs.hazelcast.org/docs/3.10/manual/html-single/index.html#implementing-portable-serialization">
+     *     "http://docs.hazelcast.org/docs/latest/manual/html-single/index.html#implementing-portable-serialization">
      * portable serialization format</a>, there are additional optimizations
      * available when using {@link Projections#singleAttribute} and
      * {@link Projections#multiAttribute}) to create your projection instance and
-     * using the {@link GenericPredicates} factory or {@link PredicateBuilder}
+     * using the {@link Predicates} factory or {@link PredicateBuilder}
      * to create the predicate. In this case Jet can test the predicate and
      * apply the projection without deserializing the whole object.
      * <p>
@@ -216,8 +224,11 @@ public final class Sources {
      * it will re-emit all entries.
      * <p>
      * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may
-     * miss and/or duplicate some entries.
+     * cluster topology change (triggering data migration), the source may miss
+     * and/or duplicate some entries. If we detect a topology change, the job
+     * will fail, but the detection is only on a best-effort basis - we might
+     * still give incorrect results without reporting a failure. Concurrent
+     * mutation is not detected at all.
      * <p>
      * The default local parallelism for this processor is 2 (or 1 if just 1
      * CPU is available).
@@ -235,7 +246,7 @@ public final class Sources {
      * @param mapName the name of the map
      * @param predicate the predicate to filter the events. If you want to specify just the
      *                  projection, use {@link
-     *                  GenericPredicates#alwaysTrue()} as a pass-through
+     *                  Predicates#alwaysTrue()} as a pass-through
      *                  predicate
      * @param projection the projection to map the events. If the projection returns a {@code
      *                   null} for an item, that item will be filtered out. If you want to
@@ -245,7 +256,7 @@ public final class Sources {
     @Nonnull
     public static <T, K, V> BatchSource<T> map(
             @Nonnull String mapName,
-            @Nonnull Predicate<? super K, ? super V> predicate,
+            @Nonnull Predicate<K, V> predicate,
             @Nonnull Projection<? super Entry<K, V>, ? extends T> projection
     ) {
         return batchFromProcessor("mapSource(" + mapName + ')', readMapP(mapName, predicate, projection));
@@ -264,11 +275,11 @@ public final class Sources {
      * this.
      * <p>
      * If your data is stored in the IMDG using the <a href=
-     *   "http://docs.hazelcast.org/docs/3.10/manual/html-single/index.html#implementing-portable-serialization">
+     *   "http://docs.hazelcast.org/docs/latest/manual/html-single/index.html#implementing-portable-serialization">
      * portable serialization format</a>, there are additional optimizations
      * available when using {@link Projections#singleAttribute} and
      * {@link Projections#multiAttribute}) to create your projection instance
-     * and using the {@link GenericPredicates} factory or {@link PredicateBuilder}
+     * and using the {@link Predicates} factory or {@link PredicateBuilder}
      * to create the predicate. In this case Jet can test the predicate and
      * apply the projection without deserializing the whole object.
      * <p>
@@ -283,8 +294,11 @@ public final class Sources {
      * it will re-emit all entries.
      * <p>
      * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may
-     * miss and/or duplicate some entries.
+     * cluster topology change (triggering data migration), the source may miss
+     * and/or duplicate some entries. If we detect a topology change, the job
+     * will fail, but the detection is only on a best-effort basis - we might
+     * still give incorrect results without reporting a failure. Concurrent
+     * mutation is not detected at all.
      * <p>
      * The default local parallelism for this processor is 2 (or 1 if just 1
      * CPU is available).
@@ -299,10 +313,10 @@ public final class Sources {
      * requirements, use {@link #map(String)} and add a subsequent
      * {@link GeneralStage#map map} or {@link GeneralStage#filter filter} stage.
      *
-     * @param map        the Hazelcast map to draw data from
+     * @param map        the Hazelcast map to read data from
      * @param predicate  the predicate to filter the events. If you want to specify just the
      *                   projection, use {@link
-     *                   GenericPredicates#alwaysTrue()} as a pass-through
+     *                   Predicates#alwaysTrue()} as a pass-through
      *                   predicate
      * @param projection the projection to map the events. If the projection returns a {@code
      *                   null} for an item, that item will be filtered out. If you want to
@@ -312,41 +326,10 @@ public final class Sources {
     @Nonnull
     public static <T, K, V> BatchSource<T> map(
             @Nonnull IMap<? extends K, ? extends V> map,
-            @Nonnull Predicate<? super K, ? super V> predicate,
+            @Nonnull Predicate<K, V> predicate,
             @Nonnull Projection<? super Entry<K, V>, ? extends T> projection
     ) {
         return map(map.getName(), predicate, projection);
-    }
-
-    /**
-     * Convenience for {@link #map(String, Predicate, Projection)}
-     * which uses a {@link DistributedFunction} as the projection function.
-     */
-    @Nonnull
-    public static <T, K, V> BatchSource<T> map(
-            @Nonnull String mapName,
-            @Nonnull Predicate<? super K, ? super V> predicate,
-            @Nonnull DistributedFunction<? super Map.Entry<K, V>, ? extends T> projectionFn
-    ) {
-        return batchFromProcessor("mapSource(" + mapName + ')', readMapP(mapName, predicate, projectionFn));
-    }
-
-    /**
-     * Convenience for {@link #map(IMap, Predicate, Projection)} which uses a
-     * {@link DistributedFunction} as the projection function.
-     * <p>
-     * <strong>NOTE:</strong> Jet only remembers the name of the map you supply
-     * and acquires a map with that name on the local cluster. If you supply a
-     * map instance from another cluster, no error will be thrown to indicate
-     * this.
-     */
-    @Nonnull
-    public static <T, K, V> BatchSource<T> map(
-            @Nonnull IMap<? extends K, ? extends V> map,
-            @Nonnull Predicate<? super K, ? super V> predicate,
-            @Nonnull DistributedFunction<? super Map.Entry<K, V>, ? extends T> projectionFn
-    ) {
-        return map(map.getName(), predicate, projectionFn);
     }
 
     /**
@@ -386,27 +369,27 @@ public final class Sources {
      * add a subsequent {@link GeneralStage#map map} or {@link GeneralStage#filter
      * filter} stage.
      *
-     * @param mapName      the name of the map
-     * @param predicateFn  the predicate to filter the events. If you want to specify just the
-     *                     projection, use {@link Util#mapPutEvents} to pass
-     *                     only {@link EntryEventType#ADDED ADDED} and
-     *                     {@link EntryEventType#UPDATED UPDATED} events.
-     * @param projectionFn the projection to map the events. If the projection returns a {@code
-     *                     null} for an item, that item will be filtered out. You may use {@link
-     *                     Util#mapEventToEntry()} to extract just the key and
-     *                     the new value.
-     * @param initialPos   describes which event to start receiving from
      * @param <T>          type of emitted item
+     * @param mapName      the name of the map
+     * @param initialPos   describes which event to start receiving from
+     * @param projectionFn the projection to map the events. If the projection returns a {@code
+*                     null} for an item, that item will be filtered out. You may use {@link
+*                     Util#mapEventToEntry()} to extract just the key and
+*                     the new value.
+     * @param predicateFn  the predicate to filter the events. If you want to specify just the
+*                     projection, use {@link Util#mapPutEvents} to pass
+*                     only {@link EntryEventType#ADDED ADDED} and
+*                     {@link EntryEventType#UPDATED UPDATED} events.
      */
     @Nonnull
     public static <T, K, V> StreamSource<T> mapJournal(
             @Nonnull String mapName,
-            @Nonnull DistributedPredicate<? super EventJournalMapEvent<K, V>> predicateFn,
-            @Nonnull DistributedFunction<? super EventJournalMapEvent<K, V>, ? extends T> projectionFn,
-            @Nonnull JournalInitialPosition initialPos
+            @Nonnull JournalInitialPosition initialPos,
+            @Nonnull FunctionEx<? super EventJournalMapEvent<K, V>, ? extends T> projectionFn,
+            @Nonnull PredicateEx<? super EventJournalMapEvent<K, V>> predicateFn
     ) {
         return streamFromProcessorWithWatermarks("mapJournalSource(" + mapName + ')',
-                w -> streamMapP(mapName, predicateFn, projectionFn, initialPos, w), false);
+                false, w -> streamMapP(mapName, predicateFn, projectionFn, initialPos, w));
     }
 
     /**
@@ -451,31 +434,47 @@ public final class Sources {
      * and add a subsequent {@link GeneralStage#map map} or
      * {@link GeneralStage#filter filter} stage.
      *
-     * @param map          the map to draw data from
-     * @param predicateFn  the predicate to filter the events. If you want to specify just the
-     *                     projection, use {@link Util#mapPutEvents} to pass
-     *                     only {@link EntryEventType#ADDED ADDED} and
-     *                     {@link EntryEventType#UPDATED UPDATED} events.
-     * @param projectionFn the projection to map the events. If the projection returns a {@code
-     *                     null} for an item, that item will be filtered out. You may use {@link
-     *                     Util#mapEventToEntry()} to extract just the key and
-     *                     the new value.
-     * @param initialPos   describes which event to start receiving from
+     * <h4>Issue when "catching up"</h4>
+     *
+     * This processor does not coalesce watermarks from partitions. It reads
+     * partitions one by one: it emits events from one partition and then from
+     * another one in batches. This adds time disorder to events: it might emit
+     * very recent event from partition1 while not yet emitting an old event
+     * from partition2; and it generates watermarks based on this order. Even
+     * if items in your partitions are ordered by timestamp, you can't use
+     * allowed lag of 0. Most notably, the "catching up" happens after the job
+     * is restarted, when events since the last snapshot are reprocessed in a
+     * burst. In order to not lose any events, the lag should be configured to
+     * at least {@code snapshotInterval + timeToRestart + normalEventLag}. The
+     * reason for this behavior that the default partition count in the cluster
+     * is pretty high and cannot by changed per object and for low-traffic maps
+     * it takes long until all partitions see an event to allow emitting of a
+     * coalesced watermark.
+     *
      * @param <T>          type of emitted item
+     * @param map          the map to read data from
+     * @param initialPos   describes which event to start receiving from
+     * @param projectionFn the projection to map the events. If the projection returns a {@code
+*                     null} for an item, that item will be filtered out. You may use {@link
+*                     Util#mapEventToEntry()} to extract just the key and
+*                     the new value.
+     * @param predicateFn  the predicate to filter the events. If you want to specify just the
+*                     projection, use {@link Util#mapPutEvents} to pass
+*                     only {@link EntryEventType#ADDED ADDED} and
+*                     {@link EntryEventType#UPDATED UPDATED} events.
      */
     @Nonnull
     public static <T, K, V> StreamSource<T> mapJournal(
             @Nonnull IMap<? extends K, ? extends V> map,
-            @Nonnull DistributedPredicate<? super EventJournalMapEvent<K, V>> predicateFn,
-            @Nonnull DistributedFunction<? super EventJournalMapEvent<K, V>, ? extends T> projectionFn,
-            @Nonnull JournalInitialPosition initialPos
+            @Nonnull JournalInitialPosition initialPos,
+            @Nonnull FunctionEx<? super EventJournalMapEvent<K, V>, ? extends T> projectionFn,
+            @Nonnull PredicateEx<? super EventJournalMapEvent<K, V>> predicateFn
     ) {
-        return mapJournal(map.getName(), predicateFn, projectionFn, initialPos);
+        return mapJournal(map.getName(), initialPos, projectionFn, predicateFn);
     }
 
     /**
-     * Convenience for {@link #mapJournal(String, DistributedPredicate,
-     * DistributedFunction, JournalInitialPosition)}
+     * Convenience for {@link #mapJournal(String, JournalInitialPosition, FunctionEx, PredicateEx)}
      * which will pass only {@link EntryEventType#ADDED ADDED} and
      * {@link EntryEventType#UPDATED UPDATED} events and will project the
      * event's key and new value into a {@code Map.Entry}.
@@ -485,12 +484,11 @@ public final class Sources {
             @Nonnull String mapName,
             @Nonnull JournalInitialPosition initialPos
     ) {
-        return mapJournal(mapName, mapPutEvents(), mapEventToEntry(), initialPos);
+        return mapJournal(mapName, initialPos, mapEventToEntry(), mapPutEvents());
     }
 
     /**
-     * Convenience for {@link #mapJournal(IMap, DistributedPredicate,
-     * DistributedFunction, JournalInitialPosition)}
+     * Convenience for {@link #mapJournal(IMap, JournalInitialPosition, FunctionEx, PredicateEx)}
      * which will pass only {@link EntryEventType#ADDED
      * ADDED} and {@link EntryEventType#UPDATED UPDATED}
      * events and will project the event's key and new value into a {@code
@@ -506,7 +504,7 @@ public final class Sources {
             @Nonnull IMap<? extends K, ? extends V> map,
             @Nonnull JournalInitialPosition initialPos
     ) {
-        return mapJournal(map.getName(), mapPutEvents(), mapEventToEntry(), initialPos);
+        return mapJournal(map.getName(), initialPos, mapEventToEntry(), mapPutEvents());
     }
 
     /**
@@ -518,8 +516,11 @@ public final class Sources {
      * it will re-emit all entries.
      * <p>
      * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may
-     * miss and/or duplicate some entries.
+     * cluster topology change (triggering data migration), the source may miss
+     * and/or duplicate some entries. If we detect a topology change, the job
+     * will fail, but the detection is only on a best-effort basis - we might
+     * still give incorrect results without reporting a failure. Concurrent
+     * mutation is not detected at all.
      * <p>
      * The default local parallelism for this processor is 1.
      */
@@ -528,7 +529,8 @@ public final class Sources {
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig
     ) {
-        return batchFromProcessor("remoteMapSource(" + mapName + ')', readRemoteMapP(mapName, clientConfig));
+        return batchFromProcessor("remoteMapSource(" + mapName + ')',
+                ProcessorMetaSupplier.of(readRemoteMapP(mapName, clientConfig)));
     }
 
     /**
@@ -539,11 +541,11 @@ public final class Sources {
      * transforms you allow the source to apply these functions early, before
      * generating any output, with the potential of significantly reducing
      * data traffic. If your data is stored in the IMDG using the <a href=
-     *     "http://docs.hazelcast.org/docs/3.10/manual/html-single/index.html#implementing-portable-serialization">
+     *     "http://docs.hazelcast.org/docs/latest/manual/html-single/index.html#implementing-portable-serialization">
      * portable serialization format</a>, there are additional optimizations
      * available when using {@link Projections#singleAttribute} and {@link
      * Projections#multiAttribute}) to create your projection instance and
-     * using the {@link GenericPredicates} factory or
+     * using the {@link Predicates} factory or
      * {@link PredicateBuilder PredicateBuilder} to create
      * the predicate. In this case Jet can test the predicate and apply the
      * projection without deserializing the whole object.
@@ -555,8 +557,11 @@ public final class Sources {
      * it will re-emit all entries.
      * <p>
      * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may
-     * miss and/or duplicate some entries.
+     * cluster topology change (triggering data migration), the source may miss
+     * and/or duplicate some entries. If we detect a topology change, the job
+     * will fail, but the detection is only on a best-effort basis - we might
+     * still give incorrect results without reporting a failure. Concurrent
+     * mutation is not detected at all.
      * <p>
      * The default local parallelism for this processor is 1.
      *
@@ -573,7 +578,7 @@ public final class Sources {
      *
      * @param mapName the name of the map
      * @param predicate the predicate to filter the events. If you want to specify just the
-     *                  projection, use {@link GenericPredicates#alwaysTrue()}
+     *                  projection, use {@link Predicates#alwaysTrue()}
      *                  as a pass-through predicate
      * @param projection the projection to map the events. If the projection returns a {@code
      *                   null} for an item, that item will be filtered out. If you want to
@@ -584,26 +589,11 @@ public final class Sources {
     public static <T, K, V> BatchSource<T> remoteMap(
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull Predicate<? super K, ? super V> predicate,
+            @Nonnull Predicate<K, V> predicate,
             @Nonnull Projection<? super Entry<K, V>, ? extends T> projection
     ) {
         return batchFromProcessor("remoteMapSource(" + mapName + ')',
-                readRemoteMapP(mapName, clientConfig, predicate, projection));
-    }
-
-    /**
-     * Convenience for {@link #remoteMap(String, ClientConfig, Predicate, Projection)}
-     * which use a {@link DistributedFunction} as the projection function.
-     */
-    @Nonnull
-    public static <T, K, V> BatchSource<T> remoteMap(
-            @Nonnull String mapName,
-            @Nonnull ClientConfig clientConfig,
-            @Nonnull Predicate<? super K, ? super V> predicate,
-            @Nonnull DistributedFunction<? super Entry<K, V>, ? extends T> projectionFn
-    ) {
-        return batchFromProcessor("remoteMapSource(" + mapName + ')',
-                readRemoteMapP(mapName, clientConfig, predicate, projectionFn));
+                ProcessorMetaSupplier.of(readRemoteMapP(mapName, clientConfig, predicate, projection)));
     }
 
     /**
@@ -639,37 +629,35 @@ public final class Sources {
      * requirements, use {@link #remoteMapJournal(String, ClientConfig, JournalInitialPosition)}
      * and add a subsequent {@link GeneralStage#map map} or
      * {@link GeneralStage#filter filter} stage.
-     *
-     * @param mapName the name of the map
-     * @param clientConfig configuration for the client to connect to the remote cluster
-     * @param predicateFn the predicate to filter the events. You may use {@link
-     *                    Util#mapPutEvents} to pass only {@link
-     *                    EntryEventType#ADDED ADDED} and {@link EntryEventType#UPDATED UPDATED}
-     *                    events.
-     * @param projectionFn the projection to map the events. If the projection returns a {@code
-     *                     null} for an item, that item will be filtered out. You may use {@link
-     *                     Util#mapEventToEntry()} to extract just the key and
-     *                     the new value.
-     * @param initialPos describes which event to start receiving from
-     * @param <K> type of key
+     *  @param <K> type of key
      * @param <V> type of value
      * @param <T> type of emitted item
+     * @param mapName the name of the map
+     * @param clientConfig configuration for the client to connect to the remote cluster
+     * @param initialPos describes which event to start receiving from
+     * @param projectionFn the projection to map the events. If the projection returns a {@code
+*                     null} for an item, that item will be filtered out. You may use {@link
+*                     Util#mapEventToEntry()} to extract just the key and
+*                     the new value.
+     * @param predicateFn the predicate to filter the events. You may use {@link
+*                    Util#mapPutEvents} to pass only {@link
+*                    EntryEventType#ADDED ADDED} and {@link EntryEventType#UPDATED UPDATED}
+*                    events.
      */
     @Nonnull
     public static <T, K, V> StreamSource<T> remoteMapJournal(
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull DistributedPredicate<? super EventJournalMapEvent<K, V>> predicateFn,
-            @Nonnull DistributedFunction<? super EventJournalMapEvent<K, V>, ? extends T> projectionFn,
-            @Nonnull JournalInitialPosition initialPos
+            @Nonnull JournalInitialPosition initialPos,
+            @Nonnull FunctionEx<? super EventJournalMapEvent<K, V>, ? extends T> projectionFn,
+            @Nonnull PredicateEx<? super EventJournalMapEvent<K, V>> predicateFn
     ) {
         return streamFromProcessorWithWatermarks("remoteMapJournalSource(" + mapName + ')',
-                w -> streamRemoteMapP(mapName, clientConfig, predicateFn, projectionFn, initialPos, w), false);
+                false, w -> streamRemoteMapP(mapName, clientConfig, predicateFn, projectionFn, initialPos, w));
     }
 
     /**
-     * Convenience for {@link #remoteMapJournal(String, ClientConfig,
-     * DistributedPredicate, DistributedFunction, JournalInitialPosition)}
+     * Convenience for {@link #remoteMapJournal(String, ClientConfig, JournalInitialPosition, FunctionEx, PredicateEx)}
      * which will pass only {@link EntryEventType#ADDED ADDED}
      * and {@link EntryEventType#UPDATED UPDATED} events and will
      * project the event's key and new value into a {@code Map.Entry}.
@@ -680,7 +668,7 @@ public final class Sources {
             @Nonnull ClientConfig clientConfig,
             @Nonnull JournalInitialPosition initialPos
     ) {
-        return remoteMapJournal(mapName, clientConfig, mapPutEvents(), mapEventToEntry(), initialPos);
+        return remoteMapJournal(mapName, clientConfig, initialPos, mapEventToEntry(), mapPutEvents());
     }
 
     /**
@@ -693,8 +681,11 @@ public final class Sources {
      * it will re-emit all entries.
      * <p>
      * If the {@code ICache} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may
-     * miss and/or duplicate some entries.
+     * cluster topology change (triggering data migration), the source may miss
+     * and/or duplicate some entries. If we detect a topology change, the job
+     * will fail, but the detection is only on a best-effort basis - we might
+     * still give incorrect results without reporting a failure. Concurrent
+     * mutation is not detected at all.
      * <p>
      * The default local parallelism for this processor is 2 (or 1 if just 1
      * CPU is available).
@@ -741,32 +732,31 @@ public final class Sources {
      * and add a subsequent {@link GeneralStage#map map} or
      * {@link GeneralStage#filter filter} stage.
      *
-     * @param cacheName the name of the cache
-     * @param predicateFn the predicate to filter the events. You may use {@link
-     *                    Util#cachePutEvents()} to pass only {@link
-     *                    CacheEventType#CREATED CREATED} and {@link
-     *                    CacheEventType#UPDATED UPDATED} events.
-     * @param projectionFn the projection to map the events. If the projection returns a {@code
-     *                     null} for an item, that item will be filtered out. You may use {@link
-     *                     Util#cacheEventToEntry()} to extract just the key
-     *                     and the new value.
-     * @param initialPos describes which event to start receiving from
      * @param <T> type of emitted item
+     * @param cacheName the name of the cache
+     * @param initialPos describes which event to start receiving from
+     * @param projectionFn the projection to map the events. If the projection returns a {@code
+*                     null} for an item, that item will be filtered out. You may use {@link
+*                     Util#cacheEventToEntry()} to extract just the key
+*                     and the new value.
+     * @param predicateFn the predicate to filter the events. You may use {@link
+*                    Util#cachePutEvents()} to pass only {@link
+*                    CacheEventType#CREATED CREATED} and {@link
+*                    CacheEventType#UPDATED UPDATED} events.
      */
     @Nonnull
     public static <T, K, V> StreamSource<T> cacheJournal(
             @Nonnull String cacheName,
-            @Nonnull DistributedPredicate<? super EventJournalCacheEvent<K, V>> predicateFn,
-            @Nonnull DistributedFunction<? super EventJournalCacheEvent<K, V>, ? extends T> projectionFn,
-            @Nonnull JournalInitialPosition initialPos
+            @Nonnull JournalInitialPosition initialPos,
+            @Nonnull FunctionEx<? super EventJournalCacheEvent<K, V>, ? extends T> projectionFn,
+            @Nonnull PredicateEx<? super EventJournalCacheEvent<K, V>> predicateFn
     ) {
         return streamFromProcessorWithWatermarks("cacheJournalSource(" + cacheName + ')',
-                w -> streamCacheP(cacheName, predicateFn, projectionFn, initialPos, w), false);
+                false, w -> streamCacheP(cacheName, predicateFn, projectionFn, initialPos, w));
     }
 
     /**
-     * Convenience for {@link #cacheJournal(String, DistributedPredicate,
-     * DistributedFunction, JournalInitialPosition)}
+     * Convenience for {@link #cacheJournal(String, JournalInitialPosition, FunctionEx, PredicateEx)}
      * which will pass only {@link CacheEventType#CREATED
      * CREATED} and {@link CacheEventType#UPDATED UPDATED}
      * events and will project the event's key and new value into a {@code
@@ -777,7 +767,7 @@ public final class Sources {
             @Nonnull String cacheName,
             @Nonnull JournalInitialPosition initialPos
     ) {
-        return cacheJournal(cacheName, cachePutEvents(), cacheEventToEntry(), initialPos);
+        return cacheJournal(cacheName, initialPos, cacheEventToEntry(), cachePutEvents());
     }
 
     /**
@@ -789,8 +779,11 @@ public final class Sources {
      * it will re-emit all entries.
      * <p>
      * If the {@code ICache} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may
-     * miss and/or duplicate some entries.
+     * cluster topology change (triggering data migration), the source may miss
+     * and/or duplicate some entries. If we detect a topology change, the job
+     * will fail, but the detection is only on a best-effort basis - we might
+     * still give incorrect results without reporting a failure. Concurrent
+     * mutation is not detected at all.
      * <p>
      * The default local parallelism for this processor is 1.
      */
@@ -799,9 +792,8 @@ public final class Sources {
             @Nonnull String cacheName,
             @Nonnull ClientConfig clientConfig
     ) {
-        return batchFromProcessor(
-                "remoteCacheSource(" + cacheName + ')', readRemoteCacheP(cacheName, clientConfig)
-        );
+        return batchFromProcessor("remoteCacheSource(" + cacheName + ')',
+                ProcessorMetaSupplier.of(readRemoteCacheP(cacheName, clientConfig)));
     }
 
     /**
@@ -838,34 +830,33 @@ public final class Sources {
      * and add a subsequent {@link GeneralStage#map map} or
      * {@link GeneralStage#filter filter} stage.
      *
+     * @param <T> type of emitted item
      * @param cacheName the name of the cache
      * @param clientConfig configuration for the client to connect to the remote cluster
-     * @param predicateFn the predicate to filter the events. You may use {@link
-     *                    Util#cachePutEvents()} to pass only {@link
-     *                    CacheEventType#CREATED CREATED} and {@link
-     *                    CacheEventType#UPDATED UPDATED} events.
-     * @param projectionFn the projection to map the events. If the projection returns a {@code
-     *                     null} for an item, that item will be filtered out. You may use {@link
-     *                     Util#cacheEventToEntry()} to extract just the key
-     *                     and the new value.
      * @param initialPos describes which event to start receiving from
-     * @param <T> type of emitted item
+     * @param projectionFn the projection to map the events. If the projection returns a {@code
+*                     null} for an item, that item will be filtered out. You may use {@link
+*                     Util#cacheEventToEntry()} to extract just the key
+*                     and the new value.
+     * @param predicateFn the predicate to filter the events. You may use {@link
+*                    Util#cachePutEvents()} to pass only {@link
+*                    CacheEventType#CREATED CREATED} and {@link
+*                    CacheEventType#UPDATED UPDATED} events.
      */
     @Nonnull
     public static <T, K, V> StreamSource<T> remoteCacheJournal(
             @Nonnull String cacheName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull DistributedPredicate<? super EventJournalCacheEvent<K, V>> predicateFn,
-            @Nonnull DistributedFunction<? super EventJournalCacheEvent<K, V>, ? extends T> projectionFn,
-            @Nonnull JournalInitialPosition initialPos
+            @Nonnull JournalInitialPosition initialPos,
+            @Nonnull FunctionEx<? super EventJournalCacheEvent<K, V>, ? extends T> projectionFn,
+            @Nonnull PredicateEx<? super EventJournalCacheEvent<K, V>> predicateFn
     ) {
         return streamFromProcessorWithWatermarks("remoteCacheJournalSource(" + cacheName + ')',
-                w -> streamRemoteCacheP(cacheName, clientConfig, predicateFn, projectionFn, initialPos, w), false);
+                false, w -> streamRemoteCacheP(cacheName, clientConfig, predicateFn, projectionFn, initialPos, w));
     }
 
     /**
-     * Convenience for {@link #remoteCacheJournal(String, ClientConfig,
-     * DistributedPredicate, DistributedFunction, JournalInitialPosition)}
+     * Convenience for {@link #remoteCacheJournal(String, ClientConfig, JournalInitialPosition, FunctionEx, PredicateEx)}
      * which will pass only
      * {@link CacheEventType#CREATED CREATED}
      * and {@link CacheEventType#UPDATED UPDATED}
@@ -878,7 +869,7 @@ public final class Sources {
             @Nonnull ClientConfig clientConfig,
             @Nonnull JournalInitialPosition initialPos
     ) {
-        return remoteCacheJournal(cacheName, clientConfig, cachePutEvents(), cacheEventToEntry(), initialPos);
+        return remoteCacheJournal(cacheName, clientConfig, initialPos, cacheEventToEntry(), cachePutEvents());
     }
 
     /**
@@ -1027,6 +1018,13 @@ public final class Sources {
      *      .buildWatcher()
      * }</pre>
      *
+     * <h3>Appending lines using an text editor</h3>
+     * If you're testing this source, you might think of using a text editor to
+     * append the lines. However, it might not work as expected because some
+     * editors write to a temp file and then rename it or append extra newline
+     * character at the end which gets overwritten if more text is added in the
+     * editor. Best way to append is to use {@code echo text >> yourfile}.
+     *
      * See {@link #filesBuilder(String)}.
      */
     @Nonnull
@@ -1035,13 +1033,13 @@ public final class Sources {
     }
 
     /**
-     * Convenience for {@link #jmsQueueBuilder(DistributedSupplier)}. This
+     * Convenience for {@link #jmsQueueBuilder(SupplierEx)}. This
      * version creates a connection without any authentication parameters and
      * uses non-transacted sessions with {@code Session.AUTO_ACKNOWLEDGE} mode.
      * JMS {@link Message} objects are emitted to downstream.
      * <p>
      * <b>Note:</b> {@link javax.jms.Message} might not be serializable. In
-     * that case you can use {@linkplain #jmsQueueBuilder(DistributedSupplier)
+     * that case you can use {@linkplain #jmsQueueBuilder(SupplierEx)
      * the builder} and add a projection.
      *
      * @param factorySupplier supplier to obtain JMS connection factory
@@ -1049,7 +1047,7 @@ public final class Sources {
      */
     @Nonnull
     public static StreamSource<Message> jmsQueue(
-            @Nonnull DistributedSupplier<? extends ConnectionFactory> factorySupplier,
+            @Nonnull SupplierEx<? extends ConnectionFactory> factorySupplier,
             @Nonnull String name
     ) {
         return jmsQueueBuilder(factorySupplier)
@@ -1078,18 +1076,18 @@ public final class Sources {
      * are available).
      */
     @Nonnull
-    public static JmsSourceBuilder jmsQueueBuilder(DistributedSupplier<? extends ConnectionFactory> factorySupplier) {
+    public static JmsSourceBuilder jmsQueueBuilder(SupplierEx<? extends ConnectionFactory> factorySupplier) {
         return new JmsSourceBuilder(factorySupplier, false);
     }
 
     /**
-     * Convenience for {@link #jmsTopicBuilder(DistributedSupplier)}. This
+     * Convenience for {@link #jmsTopicBuilder(SupplierEx)}. This
      * version creates a connection without any authentication parameters and
      * uses non-transacted sessions with {@code Session.AUTO_ACKNOWLEDGE} mode.
      * JMS {@link Message} objects are emitted to downstream.
      * <p>
      * <b>Note:</b> {@link javax.jms.Message} might not be serializable. In
-     * that case you can use {@linkplain #jmsTopicBuilder(DistributedSupplier)
+     * that case you can use {@linkplain #jmsTopicBuilder(SupplierEx)
      * the builder} and add a projection.
      *
      * @param factorySupplier supplier to obtain JMS connection factory
@@ -1097,7 +1095,7 @@ public final class Sources {
      */
     @Nonnull
     public static StreamSource<Message> jmsTopic(
-            @Nonnull DistributedSupplier<? extends ConnectionFactory> factorySupplier,
+            @Nonnull SupplierEx<? extends ConnectionFactory> factorySupplier,
             @Nonnull String name
     ) {
         return jmsTopicBuilder(factorySupplier)
@@ -1133,13 +1131,13 @@ public final class Sources {
      * documentation for details.
      */
     @Nonnull
-    public static JmsSourceBuilder jmsTopicBuilder(DistributedSupplier<? extends ConnectionFactory> factorySupplier) {
+    public static JmsSourceBuilder jmsTopicBuilder(SupplierEx<? extends ConnectionFactory> factorySupplier) {
         return new JmsSourceBuilder(factorySupplier, true);
     }
 
     /**
      * Returns a source which connects to the specified database using the given
-     * {@code connectionSupplier}, queries the database and creates a result set
+     * {@code newConnectionFn}, queries the database and creates a result set
      * using the the given {@code resultSetFn}. It creates output objects from the
      * {@link ResultSet} using given {@code mapOutputFn} and emits them to
      * downstream.
@@ -1150,7 +1148,7 @@ public final class Sources {
      * should be used to fetch a part of the whole result set specific to the
      * processor. If the table itself isn't partitioned by the same key, then
      * running multiple queries might not really be faster than using the
-     * {@linkplain #jdbc(String, String, DistributedFunction) simpler
+     * {@linkplain #jdbc(String, String, FunctionEx) simpler
      * version} of this method, do your own testing.
      * <p>
      * {@code createOutputFn} gets the {@link ResultSet} and creates desired
@@ -1159,7 +1157,7 @@ public final class Sources {
      * cursor-navigating functions.
      * <p>
      * Example: <pre>{@code
-     *     p.drawFrom(Sources.jdbc(
+     *     p.readFrom(Sources.jdbc(
      *         () -> DriverManager.getConnection(DB_CONNECTION_URL),
      *         (con, parallelism, index) -> {
      *              PreparedStatement stmt = con.prepareStatement("SELECT * FROM TABLE WHERE MOD(id, ?) = ?)");
@@ -1181,24 +1179,24 @@ public final class Sources {
      * <p>
      * The default local parallelism for this processor is 1.
      *
-     * @param connectionSupplier creates the connection
+     * @param newConnectionFn creates the connection
      * @param resultSetFn creates a {@link ResultSet} using the connection,
      *                    total parallelism and index
      * @param createOutputFn creates output objects from {@link ResultSet}
      * @param <T> type of output objects
      */
     public static <T> BatchSource<T> jdbc(
-            @Nonnull DistributedSupplier<? extends Connection> connectionSupplier,
+            @Nonnull SupplierEx<? extends Connection> newConnectionFn,
             @Nonnull ToResultSetFunction resultSetFn,
-            @Nonnull DistributedFunction<? super ResultSet, ? extends T> createOutputFn
+            @Nonnull FunctionEx<? super ResultSet, ? extends T> createOutputFn
     ) {
         return batchFromProcessor("jdbcSource",
-                SourceProcessors.readJdbcP(connectionSupplier, resultSetFn, createOutputFn));
+                SourceProcessors.readJdbcP(newConnectionFn, resultSetFn, createOutputFn));
     }
 
     /**
-     * Convenience for {@link Sources#jdbc(DistributedSupplier,
-     * ToResultSetFunction, DistributedFunction)}.
+     * Convenience for {@link Sources#jdbc(SupplierEx,
+     * ToResultSetFunction, FunctionEx)}.
      * A non-distributed, single-worker source which fetches the whole resultSet
      * with a single query on single member.
      * <p>
@@ -1208,7 +1206,7 @@ public final class Sources {
      * to the documentation for the target database system.
      * <p>
      * Example: <pre>{@code
-     *     p.drawFrom(Sources.jdbc(
+     *     p.readFrom(Sources.jdbc(
      *         DB_CONNECTION_URL,
      *         "select ID, NAME from PERSON",
      *         resultSet -> new Person(resultSet.getInt(1), resultSet.getString(2))))
@@ -1217,7 +1215,7 @@ public final class Sources {
     public static <T> BatchSource<T> jdbc(
             @Nonnull String connectionURL,
             @Nonnull String query,
-            @Nonnull DistributedFunction<? super ResultSet, ? extends T> createOutputFn
+            @Nonnull FunctionEx<? super ResultSet, ? extends T> createOutputFn
     ) {
         return batchFromProcessor("jdbcSource",
                 SourceProcessors.readJdbcP(connectionURL, query, createOutputFn));

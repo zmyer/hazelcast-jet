@@ -17,17 +17,19 @@
 package com.hazelcast.jet.impl.execution.init;
 
 import com.hazelcast.jet.core.ProcessorSupplier;
-import com.hazelcast.jet.impl.MasterContext;
+import com.hazelcast.jet.impl.MasterJobContext;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 
 import java.io.IOException;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
-import static com.hazelcast.jet.impl.util.Util.readList;
-import static com.hazelcast.jet.impl.util.Util.writeList;
+import static com.hazelcast.jet.impl.util.ImdgUtil.readList;
+import static com.hazelcast.jet.impl.util.ImdgUtil.writeList;
 
 public class VertexDef implements IdentifiedDataSerializable {
 
@@ -80,10 +82,6 @@ public class VertexDef implements IdentifiedDataSerializable {
         return processorSupplier;
     }
 
-    boolean isSnapshotVertex() {
-        return name.startsWith(MasterContext.SNAPSHOT_VERTEX_PREFIX);
-    }
-
     /**
      * Returns true in any of the following cases:<ul>
      *     <li>this vertex is a higher-priority source for some of its
@@ -92,30 +90,36 @@ public class VertexDef implements IdentifiedDataSerializable {
      *     <li>it sits upstream of a vertex meeting the other conditions
      * </ul>
      *
-     * (*) We consider a snapshot-restoring vertices to by higher priority
-     * because when connected to a source vertex, they are the only input to it
-     * and therefore they wouldn't be a higher-priority source. However, we
-     * want to prevent snapshot before snapshot restoring is done.
+     * (*) We consider all snapshot-restoring vertices to be higher priority
+     * because we want to prevent a snapshot before the snapshot restoring is
+     * done. If a snapshot-restoring vertex is connected to a source, it would
+     * be its only input and therefore will not be higher-priority upstream
+     * otherwise.
      * Fixes https://github.com/hazelcast/hazelcast-jet/pull/1101
      */
-    boolean isHigherPriorityUpstream() {
-        for (EdgeDef outboundEdge : outboundEdges) {
+    boolean isHigherPrioritySource() {
+        Deque<EdgeDef> stack = new ArrayDeque<>();
+        stack.addAll(outboundEdges);
+        while (!stack.isEmpty()) {
+            EdgeDef outboundEdge = stack.pop();
             VertexDef downstream = outboundEdge.destVertex();
             if (downstream.inboundEdges.stream()
                                        .anyMatch(edge -> edge.priority() > outboundEdge.priority())
-                    || outboundEdge.isSnapshotRestoreEdge()
-                    || downstream.isHigherPriorityUpstream()) {
+                    || outboundEdge.isSnapshotRestoreEdge()) {
                 return true;
             }
+            stack.addAll(downstream.outboundEdges);
         }
         return false;
     }
 
+    public static boolean isSnapshotVertex(String vertexName) {
+        return vertexName.startsWith(MasterJobContext.SNAPSHOT_VERTEX_PREFIX);
+    }
+
     @Override
     public String toString() {
-        return "VertexDef{" +
-                "name='" + name + '\'' +
-                '}';
+        return "VertexDef{name='" + name + '\'' + '}';
     }
 
     //             IdentifiedDataSerializable implementation
@@ -126,7 +130,7 @@ public class VertexDef implements IdentifiedDataSerializable {
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return JetInitDataSerializerHook.VERTEX_DEF;
     }
 

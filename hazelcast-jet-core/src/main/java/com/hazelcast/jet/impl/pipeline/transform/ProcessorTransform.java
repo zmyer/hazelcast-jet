@@ -16,32 +16,32 @@
 
 package com.hazelcast.jet.impl.pipeline.transform;
 
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.BiPredicateEx;
 import com.hazelcast.jet.Traverser;
-import com.hazelcast.jet.core.Processor;
-import com.hazelcast.jet.core.ProcessorSupplier;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedBiPredicate;
-import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.impl.pipeline.Planner;
 import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
-import com.hazelcast.jet.pipeline.ContextFactory;
+import com.hazelcast.jet.pipeline.ServiceFactory;
 
 import javax.annotation.Nonnull;
-
 import java.util.concurrent.CompletableFuture;
 
-import static com.hazelcast.jet.core.processor.Processors.filterUsingContextP;
-import static com.hazelcast.jet.core.processor.Processors.flatMapUsingContextAsyncP;
-import static com.hazelcast.jet.core.processor.Processors.flatMapUsingContextP;
-import static com.hazelcast.jet.core.processor.Processors.mapUsingContextP;
+import static com.hazelcast.jet.core.Vertex.LOCAL_PARALLELISM_USE_DEFAULT;
+import static com.hazelcast.jet.core.processor.Processors.filterUsingServiceP;
+import static com.hazelcast.jet.core.processor.Processors.flatMapUsingServiceAsyncP;
+import static com.hazelcast.jet.core.processor.Processors.flatMapUsingServiceP;
+import static com.hazelcast.jet.core.processor.Processors.mapUsingServiceP;
 
 public class ProcessorTransform extends AbstractTransform {
-    final ProcessorSupplier processorSupplier;
+    public static final int NON_COOPERATIVE_DEFAULT_LOCAL_PARALLELISM = 2;
+
+    final ProcessorMetaSupplier processorSupplier;
 
     ProcessorTransform(
             @Nonnull String name,
             @Nonnull Transform upstream,
-            @Nonnull ProcessorSupplier processorSupplier
+            @Nonnull ProcessorMetaSupplier processorSupplier
     ) {
         super(name, upstream);
         this.processorSupplier = processorSupplier;
@@ -50,52 +50,59 @@ public class ProcessorTransform extends AbstractTransform {
     public static ProcessorTransform customProcessorTransform(
             @Nonnull String name,
             @Nonnull Transform upstream,
-            @Nonnull DistributedSupplier<Processor> createProcessorFn
+            @Nonnull ProcessorMetaSupplier createProcessorFn
     ) {
-        return new ProcessorTransform(name, upstream, ProcessorSupplier.of(createProcessorFn));
+        return new ProcessorTransform(name, upstream, createProcessorFn);
     }
 
-    public static <C, T, R> ProcessorTransform mapUsingContextTransform(
+    public static <S, T, R> ProcessorTransform mapUsingServiceTransform(
             @Nonnull Transform upstream,
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends R> mapFn
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
     ) {
-        return new ProcessorTransform("mapUsingContext", upstream, mapUsingContextP(contextFactory, mapFn));
+        return new ProcessorTransform("mapUsingService", upstream,
+                ProcessorMetaSupplier.of(getPreferredLP(serviceFactory), mapUsingServiceP(serviceFactory, mapFn)));
     }
 
-    public static <C, T> ProcessorTransform filterUsingContextTransform(
+    public static <S, T> ProcessorTransform filterUsingServiceTransform(
             @Nonnull Transform upstream,
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiPredicateEx<? super S, ? super T> filterFn
     ) {
-        return new ProcessorTransform("filterUsingContext", upstream, filterUsingContextP(contextFactory, filterFn));
+        return new ProcessorTransform("filterUsingService", upstream,
+                ProcessorMetaSupplier.of(getPreferredLP(serviceFactory), filterUsingServiceP(serviceFactory, filterFn)));
     }
 
-    public static <C, T, R> ProcessorTransform flatMapUsingContextTransform(
+    public static <S, T, R> ProcessorTransform flatMapUsingServiceTransform(
             @Nonnull Transform upstream,
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<? extends R>> flatMapFn
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<? extends R>> flatMapFn
     ) {
-        return new ProcessorTransform("flatMapUsingContext", upstream,
-                flatMapUsingContextP(contextFactory, flatMapFn));
+        return new ProcessorTransform("flatMapUsingService", upstream,
+                ProcessorMetaSupplier.of(getPreferredLP(serviceFactory), flatMapUsingServiceP(serviceFactory, flatMapFn)));
     }
 
-    public static <C, T, R> ProcessorTransform flatMapUsingContextAsyncTransform(
+    public static <S, T, R> ProcessorTransform flatMapUsingServiceAsyncTransform(
             @Nonnull Transform upstream,
             @Nonnull String operationName,
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, CompletableFuture<Traverser<R>>> flatMapAsyncFn
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<Traverser<R>>> flatMapAsyncFn
     ) {
         // TODO use better key so that snapshots are local. Currently they will
         //      be sent to a random member. We keep it this way for simplicity:
         //      the number of in-flight items is limited (maxAsyncOps)
-        return new ProcessorTransform(operationName + "UsingContextAsync", upstream,
-                flatMapUsingContextAsyncP(contextFactory, Object::hashCode, flatMapAsyncFn));
+        return new ProcessorTransform(operationName + "UsingServiceAsync", upstream,
+                ProcessorMetaSupplier.of(getPreferredLP(serviceFactory),
+                        flatMapUsingServiceAsyncP(serviceFactory, Object::hashCode, flatMapAsyncFn)));
+    }
+
+    static <S> int getPreferredLP(@Nonnull ServiceFactory<S> serviceFactory) {
+        return serviceFactory.isCooperative() ? LOCAL_PARALLELISM_USE_DEFAULT : NON_COOPERATIVE_DEFAULT_LOCAL_PARALLELISM;
     }
 
     @Override
     public void addToDag(Planner p) {
-        PlannerVertex pv = p.addVertex(this, p.uniqueVertexName(name()), localParallelism(), processorSupplier);
+        PlannerVertex pv = p.addVertex(this, name(), localParallelism(), processorSupplier);
         p.addEdges(this, pv.v);
     }
 }

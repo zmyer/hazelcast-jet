@@ -16,17 +16,18 @@
 
 package com.hazelcast.jet.impl.connector;
 
+import com.hazelcast.function.BiConsumerEx;
+import com.hazelcast.function.SupplierEx;
+import com.hazelcast.internal.util.concurrent.BackoffIdleStrategy;
+import com.hazelcast.internal.util.concurrent.IdleStrategy;
 import com.hazelcast.jet.core.Inbox;
 import com.hazelcast.jet.core.Outbox;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
+import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.SinkProcessors;
-import com.hazelcast.jet.function.DistributedBiConsumer;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.impl.util.ExceptionUtil;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.util.concurrent.BackoffIdleStrategy;
-import com.hazelcast.util.concurrent.IdleStrategy;
 
 import javax.annotation.Nonnull;
 import java.sql.Connection;
@@ -36,6 +37,7 @@ import java.sql.SQLNonTransientException;
 import java.util.ArrayList;
 import java.util.List;
 
+import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
@@ -47,8 +49,8 @@ public final class WriteJdbcP<T> implements Processor {
             new BackoffIdleStrategy(0, 0, SECONDS.toNanos(1), SECONDS.toNanos(10));
     private static final int BATCH_LIMIT = 50;
 
-    private final DistributedSupplier<? extends Connection> connectionSupplier;
-    private final DistributedBiConsumer<? super PreparedStatement, ? super T> bindFn;
+    private final SupplierEx<? extends Connection> newConnectionFn;
+    private final BiConsumerEx<? super PreparedStatement, ? super T> bindFn;
     private final String updateQuery;
 
     private ILogger logger;
@@ -61,11 +63,11 @@ public final class WriteJdbcP<T> implements Processor {
 
     private WriteJdbcP(
             @Nonnull String updateQuery,
-            @Nonnull DistributedSupplier<? extends Connection> connectionSupplier,
-            @Nonnull DistributedBiConsumer<? super PreparedStatement, ? super T> bindFn
+            @Nonnull SupplierEx<? extends Connection> newConnectionFn,
+            @Nonnull BiConsumerEx<? super PreparedStatement, ? super T> bindFn
     ) {
         this.updateQuery = updateQuery;
-        this.connectionSupplier = connectionSupplier;
+        this.newConnectionFn = newConnectionFn;
         this.bindFn = bindFn;
     }
 
@@ -74,12 +76,14 @@ public final class WriteJdbcP<T> implements Processor {
      */
     public static <T> ProcessorMetaSupplier metaSupplier(
             @Nonnull String updateQuery,
-            @Nonnull DistributedSupplier<? extends Connection> connectionSupplier,
-            @Nonnull DistributedBiConsumer<? super PreparedStatement, ? super T> bindFn
-
+            @Nonnull SupplierEx<? extends Connection> newConnectionFn,
+            @Nonnull BiConsumerEx<? super PreparedStatement, ? super T> bindFn
     ) {
+        checkSerializable(newConnectionFn, "newConnectionFn");
+        checkSerializable(bindFn, "bindFn");
+
         return ProcessorMetaSupplier.preferLocalParallelismOne(() ->
-                new WriteJdbcP<>(updateQuery, connectionSupplier, bindFn));
+                new WriteJdbcP<>(updateQuery, newConnectionFn, bindFn));
     }
 
     @Override
@@ -117,6 +121,11 @@ public final class WriteJdbcP<T> implements Processor {
     }
 
     @Override
+    public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+        return true;
+    }
+
+    @Override
     public boolean isCooperative() {
         return false;
     }
@@ -129,7 +138,7 @@ public final class WriteJdbcP<T> implements Processor {
 
     private boolean connectAndPrepareStatement() {
         try {
-            connection = connectionSupplier.get();
+            connection = newConnectionFn.get();
             connection.setAutoCommit(false);
             supportsBatch = connection.getMetaData().supportsBatchUpdates();
             statement = connection.prepareStatement(updateQuery);

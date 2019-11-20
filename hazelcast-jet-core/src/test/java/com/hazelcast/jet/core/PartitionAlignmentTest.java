@@ -16,11 +16,11 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.core.TestProcessors.ListSource;
 import com.hazelcast.jet.core.processor.SinkProcessors;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Before;
 import org.junit.Test;
@@ -33,10 +33,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
+import static com.hazelcast.function.Functions.wholeItem;
 import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.Edge.from;
 import static com.hazelcast.jet.core.TestUtil.executeAndPeel;
-import static com.hazelcast.jet.function.DistributedFunctions.wholeItem;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.IntStream.range;
 import static org.junit.Assert.assertEquals;
@@ -61,7 +61,7 @@ public class PartitionAlignmentTest extends JetTestSupport {
     public void when_localAndDistributedEdges_thenPartitionsAligned() throws Throwable {
         final int localProcessorCount = PARTITION_COUNT / 4;
         final List<Integer> items = range(0, ITEM_COUNT).boxed().collect(toList());
-        final DistributedSupplier<Processor> supplierOfListProducer = () -> new ListSource(items);
+        final SupplierEx<Processor> supplierOfListProducer = () -> new ListSource(items);
         final Partitioner<Integer> partitioner = (item, partitionCount) -> item % partitionCount;
 
         final DAG dag = new DAG();

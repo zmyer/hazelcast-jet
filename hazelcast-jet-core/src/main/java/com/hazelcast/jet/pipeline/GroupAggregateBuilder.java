@@ -22,7 +22,6 @@ import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.aggregate.CoAggregateOperationBuilder;
 import com.hazelcast.jet.datamodel.ItemsByTag;
 import com.hazelcast.jet.datamodel.Tag;
-import com.hazelcast.jet.function.DistributedBiFunction;
 import com.hazelcast.jet.impl.pipeline.GrAggBuilder;
 
 import javax.annotation.Nonnull;
@@ -33,8 +32,9 @@ import static com.hazelcast.jet.aggregate.AggregateOperations.coAggregateOperati
 /**
  * Offers a step-by-step API to build a pipeline stage that co-groups and
  * aggregates the data from several input stages. To obtain it, call {@link
- * BatchStageWithKey#aggregateBuilder()} on one of the stages to co-group
- * and refer to that method's Javadoc for further details.
+ * BatchStageWithKey#aggregateBuilder(AggregateOperation1)
+ * stage.aggregateBuilder(aggrOp)} on one of the stages to co-group and
+ * refer to that method's Javadoc for further details.
  * <p>
  * <strong>Note:</strong> this is not a builder of {@code
  * AggregateOperation}. If that' s what you are looking for, go {@link
@@ -42,6 +42,8 @@ import static com.hazelcast.jet.aggregate.AggregateOperations.coAggregateOperati
  *
  * @param <K> type of the grouping key
  * @param <R0> type of the aggregation result for stream-0
+ *
+ * @since 3.0
  */
 public class GroupAggregateBuilder<K, R0> {
     private final GrAggBuilder<K> grAggBuilder;
@@ -83,26 +85,6 @@ public class GroupAggregateBuilder<K, R0> {
 
     /**
      * Creates and returns a pipeline stage that performs the co-aggregation
-     * of the stages registered with this builder object. The composite
-     * aggregate operation places the results of the individual aggregate
-     * operations in an {@code ItemsByTag} and the {@code mapToOutputFn} you
-     * supply transforms it to the final result to emit. Use the tags you got
-     * from this builder in the implementation of {@code mapToOutputFn} to
-     * access the results.
-     *
-     * @param mapToOutputFn function that transforms the aggregation result into the output item
-     * @param <OUT> the output item type
-     */
-    @Nonnull
-    public <OUT> BatchStage<OUT> build(
-            @Nonnull DistributedBiFunction<? super K, ItemsByTag, OUT> mapToOutputFn
-    ) {
-        AggregateOperation<Object[], ItemsByTag> aggrOp = aggrOpBuilder.build();
-        return grAggBuilder.buildBatch(aggrOp, mapToOutputFn);
-    }
-
-    /**
-     * Creates and returns a pipeline stage that performs the co-aggregation
      * of the stages registered with this builder object and emits a {@code
      * Map.Entry(key, resultsByTag)} for each distinct key. The composite
      * aggregate operation places the results of the individual aggregate
@@ -113,6 +95,7 @@ public class GroupAggregateBuilder<K, R0> {
      */
     @Nonnull
     public BatchStage<Entry<K, ItemsByTag>> build() {
-        return build(Util::entry);
+        AggregateOperation<Object[], ItemsByTag> aggrOp = aggrOpBuilder.build();
+        return grAggBuilder.buildBatch(aggrOp, Util::entry);
     }
 }

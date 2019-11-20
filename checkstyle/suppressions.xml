@@ -46,9 +46,6 @@
     <!-- Exclude variations of JDK classes from Javadoc checks -->
     <suppress checks="Javadoc(Type|Method|Variable)" files="com[\\/]hazelcast[\\/]jet[\\/]function" />
 
-    <!-- Javadoc includes links to JDK classes -->
-    <suppress checks="UnusedImports" files="com[\\/]hazelcast[\\/]jet[\\/]stream[\\/]Distributed.+\.java" />
-
     <!-- Generated code in Client Protocol Templates -->
     <suppress checks="LineLength|MethodName|MethodCount|ParameterNumber|WhitespaceAround"
               files="com[\\/]hazelcast[\\/]client[\\/]impl[\\/]protocol[\\/]template[\\/].*Template\.java$"/>
@@ -56,4 +53,16 @@
 
     <!-- Suppress checks for test code -->
     <suppress checks="Javadoc|Name|MagicNumber|VisibilityModifier" files="[\\/]src[\\/]test[\\/]"/>
+    <suppress checks="LineLength" files="DecoratorTest.java"/>
+
+    <!-- Suppress checks for examples code -->
+    <suppress checks="Javadoc|Name|MagicNumber|VisibilityModifier|HideUtilityClassConstructor|RegexpSinglelineJava" files="[\\/]examples[\\/]"/>
+
+    <!-- Suppress maximum line count of a large factory file with lot of javadoc -->
+    <suppress checks="FileLength" files="com[\\/]hazelcast[\\/]jet[\\/]aggregate[\\/]AggregateOperations.java"/>
+
+    <!-- Suppress checks for auto-generated client protocol codecs -->
+    <suppress checks="UnusedImports|LineLength|VisibilityModifier|AvoidStarImport|RegexpSingleline|ParameterNumber"
+    files="src[\\/]main[\\/]java[\\/]com[\\/]hazelcast[\\/]jet[\\/]impl[\\/]client[\\/]protocol[\\/]codec[\\/]"/>
+
 </suppressions>

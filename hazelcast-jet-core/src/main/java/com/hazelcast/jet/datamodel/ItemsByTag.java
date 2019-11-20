@@ -33,9 +33,11 @@ import java.util.Set;
  * tuple has a fixed number of integer-indexed, statically-typed fields,
  * and {@code ItemsByTag} has a variable number of tag-indexed fields whose
  * whose static type is encoded in the tags.
+ *
+ * @since 3.0
  */
-public class ItemsByTag {
-    static final Object NONE = new Object();
+public final class ItemsByTag {
+    private static final Object NONE = new Object();
 
     private final Map<Tag<?>, Object> map = new HashMap<>();
 
@@ -65,11 +67,11 @@ public class ItemsByTag {
     @Nullable
     @SuppressWarnings("unchecked")
     public <E> E get(@Nonnull Tag<E> tag) {
-        Object got = map.get(tag);
-        if (got == null) {
+        Object got = map.getOrDefault(tag, NONE);
+        if (got == NONE) {
             throw new IllegalArgumentException("No value associated with " + tag);
         }
-        return got != NONE ? (E) got : null;
+        return (E) got;
     }
 
     /**
@@ -78,7 +80,7 @@ public class ItemsByTag {
      * associated with a {@code null} value.
      */
     public <E> void put(@Nonnull Tag<E> tag, E value) {
-        map.put(tag, value != null ? value : NONE);
+        map.put(tag, value);
     }
 
     @Override

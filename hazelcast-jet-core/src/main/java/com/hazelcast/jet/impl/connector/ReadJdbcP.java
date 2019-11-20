@@ -16,13 +16,13 @@
 
 package com.hazelcast.jet.impl.connector;
 
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.processor.SourceProcessors;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.function.ToResultSetFunction;
 
 import javax.annotation.Nonnull;
@@ -33,6 +33,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
+import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static com.hazelcast.jet.impl.util.Util.uncheckCall;
 
 /**
@@ -40,9 +41,9 @@ import static com.hazelcast.jet.impl.util.Util.uncheckCall;
  */
 public final class ReadJdbcP<T> extends AbstractProcessor {
 
-    private final DistributedSupplier<? extends Connection> connectionSupplier;
+    private final SupplierEx<? extends Connection> newConnectionFn;
     private final ToResultSetFunction resultSetFn;
-    private final DistributedFunction<? super ResultSet, ? extends T> mapOutputFn;
+    private final FunctionEx<? super ResultSet, ? extends T> mapOutputFn;
 
     private Connection connection;
     private ResultSet resultSet;
@@ -51,11 +52,11 @@ public final class ReadJdbcP<T> extends AbstractProcessor {
     private int index;
 
     private ReadJdbcP(
-            @Nonnull DistributedSupplier<? extends Connection> connectionSupplier,
+            @Nonnull SupplierEx<? extends Connection> newConnectionFn,
             @Nonnull ToResultSetFunction resultSetFn,
-            @Nonnull DistributedFunction<? super ResultSet, ? extends T> mapOutputFn
+            @Nonnull FunctionEx<? super ResultSet, ? extends T> mapOutputFn
     ) {
-        this.connectionSupplier = connectionSupplier;
+        this.newConnectionFn = newConnectionFn;
         this.resultSetFn = resultSetFn;
         this.mapOutputFn = mapOutputFn;
     }
@@ -69,19 +70,25 @@ public final class ReadJdbcP<T> extends AbstractProcessor {
      * Use {@link SourceProcessors#readJdbcP}.
      */
     public static <T> ProcessorMetaSupplier supplier(
-            @Nonnull DistributedSupplier<? extends Connection> connectionSupplier,
+            @Nonnull SupplierEx<? extends Connection> newConnectionFn,
             @Nonnull ToResultSetFunction resultSetFn,
-            @Nonnull DistributedFunction<? super ResultSet, ? extends T> mapOutputFn
+            @Nonnull FunctionEx<? super ResultSet, ? extends T> mapOutputFn
     ) {
+        checkSerializable(newConnectionFn, "newConnectionFn");
+        checkSerializable(resultSetFn, "resultSetFn");
+        checkSerializable(mapOutputFn, "mapOutputFn");
+
         return ProcessorMetaSupplier.preferLocalParallelismOne(() ->
-                new ReadJdbcP<>(connectionSupplier, resultSetFn, mapOutputFn));
+                new ReadJdbcP<>(newConnectionFn, resultSetFn, mapOutputFn));
     }
 
     public static <T> ProcessorMetaSupplier supplier(
             @Nonnull String connectionURL,
             @Nonnull String query,
-            @Nonnull DistributedFunction<? super ResultSet, ? extends T> mapOutputFn
+            @Nonnull FunctionEx<? super ResultSet, ? extends T> mapOutputFn
     ) {
+        checkSerializable(mapOutputFn, "mapOutputFn");
+
         return ProcessorMetaSupplier.forceTotalParallelismOne(ProcessorSupplier.of(() ->
                 new ReadJdbcP<>(
                         () -> DriverManager.getConnection(connectionURL),
@@ -100,7 +107,7 @@ public final class ReadJdbcP<T> extends AbstractProcessor {
 
     @Override
     protected void init(@Nonnull Context context) {
-        this.connection = connectionSupplier.get();
+        this.connection = newConnectionFn.get();
         this.parallelism = context.totalParallelism();
         this.index = context.globalProcessorIndex();
     }

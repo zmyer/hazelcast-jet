@@ -16,14 +16,17 @@
 
 package com.hazelcast.jet.impl;
 
-import com.hazelcast.core.ICompletableFuture;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.internal.serialization.SerializationService;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.JobStateSnapshot;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.JobStatus;
-import com.hazelcast.jet.impl.operation.ExportSnapshotOperation;
+import com.hazelcast.jet.core.metrics.JobMetrics;
+import com.hazelcast.jet.impl.metrics.RawJobMetrics;
 import com.hazelcast.jet.impl.operation.GetJobConfigOperation;
+import com.hazelcast.jet.impl.operation.GetJobMetricsOperation;
 import com.hazelcast.jet.impl.operation.GetJobStatusOperation;
 import com.hazelcast.jet.impl.operation.GetJobSubmissionTimeOperation;
 import com.hazelcast.jet.impl.operation.JoinSubmittedJobOperation;
@@ -31,14 +34,15 @@ import com.hazelcast.jet.impl.operation.ResumeJobOperation;
 import com.hazelcast.jet.impl.operation.SubmitJobOperation;
 import com.hazelcast.jet.impl.operation.TerminateJobOperation;
 import com.hazelcast.logging.LoggingService;
-import com.hazelcast.nio.Address;
 import com.hazelcast.nio.serialization.Data;
-import com.hazelcast.spi.Operation;
 import com.hazelcast.spi.impl.NodeEngineImpl;
-import com.hazelcast.spi.serialization.SerializationService;
+import com.hazelcast.spi.impl.operationservice.Operation;
 
 import javax.annotation.Nonnull;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
+import static com.hazelcast.jet.impl.JobMetricsUtil.toJobMetrics;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
 import static com.hazelcast.jet.impl.util.Util.getJetInstance;
 
@@ -64,18 +68,28 @@ public class JobProxy extends AbstractJobProxy<NodeEngineImpl> {
         }
     }
 
-    @Override
-    protected ICompletableFuture<Void> invokeSubmitJob(Data dag, JobConfig config) {
-        return invokeOp(new SubmitJobOperation(getId(), dag, config));
+    @Nonnull @Override
+    public JobMetrics getMetrics() {
+        try {
+            List<RawJobMetrics> shards = this.<List<RawJobMetrics>>invokeOp(new GetJobMetricsOperation(getId())).get();
+            return toJobMetrics(shards);
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
     }
 
     @Override
-    protected ICompletableFuture<Void> invokeJoinJob() {
+    protected CompletableFuture<Void> invokeSubmitJob(Data dag, JobConfig config) {
+        return invokeOp(new SubmitJobOperation(getId(), dag, serializationService().toData(config)));
+    }
+
+    @Override
+    protected CompletableFuture<Void> invokeJoinJob() {
         return invokeOp(new JoinSubmittedJobOperation(getId()));
     }
 
     @Override
-    protected ICompletableFuture<Void> invokeTerminateJob(TerminationMode mode) {
+    protected CompletableFuture<Void> invokeTerminateJob(TerminationMode mode) {
         return invokeOp(new TerminateJobOperation(getId(), mode));
     }
 
@@ -90,18 +104,19 @@ public class JobProxy extends AbstractJobProxy<NodeEngineImpl> {
 
     @Override
     public JobStateSnapshot cancelAndExportSnapshot(String name) {
-        try {
-            invokeOp(new ExportSnapshotOperation(getId(), name, true)).get();
-        } catch (Exception e) {
-            throw rethrow(e);
-        }
-        return getJetInstance(container()).getJobStateSnapshot(name);
+        return doExportSnapshot(name, true);
     }
 
     @Override
     public JobStateSnapshot exportSnapshot(String name) {
+        return doExportSnapshot(name, false);
+    }
+
+    private JobStateSnapshot doExportSnapshot(String name, boolean cancelJob) {
         try {
-            invokeOp(new ExportSnapshotOperation(getId(), name, false)).get();
+            JetService jetService = container().getService(JetService.SERVICE_NAME);
+            Operation operation = jetService.createExportSnapshotOperation(getId(), name, cancelJob);
+            invokeOp(operation).get();
         } catch (Exception e) {
             throw rethrow(e);
         }
@@ -128,7 +143,11 @@ public class JobProxy extends AbstractJobProxy<NodeEngineImpl> {
 
     @Override
     protected Address masterAddress() {
-        return container().getMasterAddress();
+        Address masterAddress = container().getMasterAddress();
+        if (masterAddress == null) {
+            throw new IllegalStateException("Master address unknown: instance is not yet initialized or is shut down");
+        }
+        return masterAddress;
     }
 
     @Override
@@ -141,7 +160,7 @@ public class JobProxy extends AbstractJobProxy<NodeEngineImpl> {
         return container().getLoggingService();
     }
 
-    private <T> ICompletableFuture<T> invokeOp(Operation op) {
+    private <T> CompletableFuture<T> invokeOp(Operation op) {
         return container()
                 .getOperationService()
                 .createInvocationBuilder(JetService.SERVICE_NAME, op, masterAddress())

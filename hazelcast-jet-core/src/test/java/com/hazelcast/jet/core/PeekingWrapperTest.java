@@ -16,16 +16,16 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.PredicateEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.core.TestProcessors.ListSource;
 import com.hazelcast.jet.core.test.TestInbox;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedPredicate;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.impl.JetEvent;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.test.HazelcastParametersRunnerFactory;
+import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -55,23 +55,23 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyZeroInteractions;
 
 @RunWith(Parameterized.class)
-@Parameterized.UseParametersRunnerFactory(HazelcastParametersRunnerFactory.class)
+@Parameterized.UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
 public class PeekingWrapperTest {
 
-    private static final JetEvent<Integer> TEST_JET_EVENT = jetEvent(2, 123);
+    private static final JetEvent<Integer> TEST_JET_EVENT = jetEvent(123, 2);
 
     @Parameter
     public String mode;
 
-    private DistributedFunction<Object, String> toStringFn;
-    private DistributedPredicate<Object> shouldLogFn;
+    private FunctionEx<Object, String> toStringFn;
+    private PredicateEx<Object> shouldLogFn;
 
     private TestProcessorContext context;
     private ILogger logger;
     private Processor peekP;
 
-    private DistributedFunction<Entry<Integer, Integer>, String> snapshotToStringFn;
-    private DistributedPredicate<Entry<Integer, Integer>> snapshotShouldLogFn;
+    private FunctionEx<Entry<Integer, Integer>, String> snapshotToStringFn;
+    private PredicateEx<Entry<Integer, Integer>> snapshotShouldLogFn;
     private String testJetEventString;
 
     @Parameters(name = "mode={0}")
@@ -84,9 +84,9 @@ public class PeekingWrapperTest {
         logger = mock(ILogger.class);
         context = new TestProcessorContext().setLogger(logger);
         if (mode.equals("customFunctions")) {
-            toStringFn = (DistributedFunction<Object, String>) o -> "a" + o;
+            toStringFn = (FunctionEx<Object, String>) o -> "a" + o;
             snapshotToStringFn = e -> toStringFn.apply(e.getKey()) + '=' + toStringFn.apply(e.getValue());
-            shouldLogFn = (DistributedPredicate<Object>) o -> !(o instanceof Integer) || ((Integer) o) % 2 == 0;
+            shouldLogFn = (PredicateEx<Object>) o -> !(o instanceof Integer) || ((Integer) o) % 2 == 0;
             snapshotShouldLogFn = e -> shouldLogFn.test(e.getKey());
         } else {
             toStringFn = null;
@@ -99,9 +99,9 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekInputWithPeekingProcessor_distributedSupplier() throws Exception {
+    public void when_peekInputWithPeekingProcessor_supplier() throws Exception {
         // Given
-        DistributedSupplier<Processor> wrappedSupplier = procSupplier(TestPeekRemoveProcessor.class);
+        SupplierEx<Processor> wrappedSupplier = procSupplier(TestPeekRemoveProcessor.class);
         peekP = (toStringFn == null
                 ? peekInputP(wrappedSupplier)
                 : peekInputP(toStringFn, shouldLogFn, wrappedSupplier)
@@ -112,9 +112,9 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekInputWithPollingProcessor_distributedSupplier() throws Exception {
+    public void when_peekInputWithPollingProcessor_supplier() throws Exception {
         // Given
-        DistributedSupplier<Processor> passThroughPSupplier = procSupplier(TestPollProcessor.class);
+        SupplierEx<Processor> passThroughPSupplier = procSupplier(TestPollProcessor.class);
         peekP = (toStringFn == null
                 ? peekInputP(passThroughPSupplier)
                 : peekInputP(toStringFn, shouldLogFn, passThroughPSupplier)
@@ -151,14 +151,14 @@ public class PeekingWrapperTest {
         assertPeekInput();
     }
 
-    private DistributedSupplier<Processor> peekOutputProcessorSupplier() {
+    private SupplierEx<Processor> peekOutputProcessorSupplier() {
         return () -> new ListSource(0, 1, new Watermark(2), TEST_JET_EVENT);
     }
 
     @Test
-    public void when_peekOutput_distributedSupplier() throws Exception {
+    public void when_peekOutput_supplier() throws Exception {
         // Given
-        DistributedSupplier<Processor> passThroughPSupplier = peekOutputProcessorSupplier();
+        SupplierEx<Processor> passThroughPSupplier = peekOutputProcessorSupplier();
         peekP = (toStringFn == null
                 ? peekOutputP(passThroughPSupplier)
                 : peekOutputP(toStringFn, shouldLogFn, passThroughPSupplier)
@@ -195,9 +195,9 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekSnapshot_distributedSupplier() throws Exception {
+    public void when_peekSnapshot_supplier() throws Exception {
         // Given
-        DistributedSupplier<Processor> wrappedSupplier = procSupplier(TestSourceProcessor.class);
+        SupplierEx<Processor> wrappedSupplier = procSupplier(TestSourceProcessor.class);
         peekP = (toStringFn == null
                 ? peekSnapshotP(wrappedSupplier)
                 : peekSnapshotP(snapshotToStringFn, snapshotShouldLogFn, wrappedSupplier)
@@ -233,7 +233,7 @@ public class PeekingWrapperTest {
         assertPeekSnapshot();
     }
 
-    private static DistributedSupplier<Processor> procSupplier(Class<? extends Processor> processor) {
+    private static SupplierEx<Processor> procSupplier(Class<? extends Processor> processor) {
         return () -> uncheckCall(processor::newInstance);
     }
 

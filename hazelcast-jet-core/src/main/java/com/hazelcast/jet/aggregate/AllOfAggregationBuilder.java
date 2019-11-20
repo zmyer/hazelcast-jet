@@ -16,17 +16,17 @@
 
 package com.hazelcast.jet.aggregate;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.datamodel.ItemsByTag;
 import com.hazelcast.jet.datamodel.Tag;
-import com.hazelcast.jet.function.DistributedFunction;
 
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import static com.hazelcast.function.FunctionEx.identity;
 import static com.hazelcast.jet.datamodel.Tag.tag;
-import static com.hazelcast.jet.function.DistributedFunction.identity;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 
 /**
@@ -34,6 +34,8 @@ import static com.hazelcast.jet.impl.util.Util.checkSerializable;
  * operations. To obtain it, call {@link AggregateOperations#allOfBuilder()}.
  *
  * @param <T> the type of the input items
+ *
+ * @since 3.0
  */
 public final class AllOfAggregationBuilder<T> {
 
@@ -76,7 +78,7 @@ public final class AllOfAggregationBuilder<T> {
      */
     @Nonnull
     @SuppressWarnings({"unchecked", "ConstantConditions"})
-    public <R> AggregateOperation1<T, Object[], R> build(@Nonnull DistributedFunction<ItemsByTag, R> exportFinishFn) {
+    public <R> AggregateOperation1<T, Object[], R> build(@Nonnull FunctionEx<ItemsByTag, R> exportFinishFn) {
         checkSerializable(exportFinishFn, "exportFinishFn");
 
         // Avoid capturing this builder in the lambdas:

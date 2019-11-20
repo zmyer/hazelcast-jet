@@ -17,18 +17,18 @@
 package com.hazelcast.jet.pipeline;
 
 import com.hazelcast.client.config.ClientConfig;
-import com.hazelcast.core.IList;
-import com.hazelcast.core.IMap;
+import com.hazelcast.collection.IList;
 import com.hazelcast.core.Offloadable;
+import com.hazelcast.function.BiConsumerEx;
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.BinaryOperatorEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.processor.SinkProcessors;
-import com.hazelcast.jet.function.DistributedBiConsumer;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedBinaryOperator;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.impl.pipeline.SinkImpl;
 import com.hazelcast.map.EntryProcessor;
+import com.hazelcast.map.IMap;
 
 import javax.annotation.Nonnull;
 import javax.jms.ConnectionFactory;
@@ -40,6 +40,8 @@ import java.sql.SQLException;
 import java.sql.SQLNonTransientException;
 import java.util.Map.Entry;
 
+import static com.hazelcast.function.Functions.entryKey;
+import static com.hazelcast.function.Functions.entryValue;
 import static com.hazelcast.jet.core.ProcessorMetaSupplier.preferLocalParallelismOne;
 import static com.hazelcast.jet.core.processor.DiagnosticProcessors.writeLoggerP;
 import static com.hazelcast.jet.core.processor.Processors.noopP;
@@ -54,7 +56,6 @@ import static com.hazelcast.jet.core.processor.SinkProcessors.writeRemoteCacheP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeRemoteListP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeRemoteMapP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeSocketP;
-import static com.hazelcast.jet.function.DistributedFunctions.entryValue;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
@@ -64,6 +65,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * <p>
  * The default local parallelism for the sinks in this class is typically 1,
  * check the documentation of individual methods.
+ *
+ * @since 3.0
  */
 public final class Sinks {
 
@@ -85,7 +88,7 @@ public final class Sinks {
             @Nonnull String sinkName,
             @Nonnull ProcessorMetaSupplier metaSupplier
     ) {
-        return new SinkImpl<>(sinkName, metaSupplier);
+        return new SinkImpl<>(sinkName, metaSupplier, false, null);
     }
 
     /**
@@ -101,7 +104,7 @@ public final class Sinks {
      */
     @Nonnull
     public static <K, V> Sink<Entry<K, V>> map(@Nonnull String mapName) {
-        return fromProcessor("mapSink(" + mapName + ')', writeMapP(mapName));
+        return new SinkImpl<>("mapSink(" + mapName + ')', writeMapP(mapName), false, entryKey());
     }
 
     /**
@@ -187,12 +190,12 @@ public final class Sinks {
     @Nonnull
     public static <T, K, V> Sink<T> mapWithMerging(
             @Nonnull String mapName,
-            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
-            @Nonnull DistributedFunction<? super T, ? extends V> toValueFn,
-            @Nonnull DistributedBinaryOperator<V> mergeFn
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends V> toValueFn,
+            @Nonnull BinaryOperatorEx<V> mergeFn
     ) {
-        return fromProcessor("mapWithMergingSink(" + mapName + ')',
-                mergeMapP(mapName, toKeyFn, toValueFn,  mergeFn));
+        return new SinkImpl<>("mapWithMergingSink(" + mapName + ')',
+                mergeMapP(mapName, toKeyFn, toValueFn,  mergeFn), false, toKeyFn);
     }
 
     /**
@@ -244,15 +247,15 @@ public final class Sinks {
     @Nonnull
     public static <T, K, V> Sink<T> mapWithMerging(
             @Nonnull IMap<? super K, ? super V> map,
-            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
-            @Nonnull DistributedFunction<? super T, ? extends V> toValueFn,
-            @Nonnull DistributedBinaryOperator<V> mergeFn
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends V> toValueFn,
+            @Nonnull BinaryOperatorEx<V> mergeFn
     ) {
         return mapWithMerging(map.getName(), toKeyFn, toValueFn, mergeFn);
     }
 
     /**
-     * Returns a sink equivalent to {@link #mapWithMerging(String, DistributedBinaryOperator)},
+     * Returns a sink equivalent to {@link #mapWithMerging(String, BinaryOperatorEx)},
      * but for a map in a remote Hazelcast cluster identified by the supplied
      * {@code ClientConfig}.
      * <p>
@@ -262,35 +265,34 @@ public final class Sinks {
     public static <T, K, V> Sink<T> remoteMapWithMerging(
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
-            @Nonnull DistributedFunction<? super T, ? extends V> toValueFn,
-            @Nonnull DistributedBinaryOperator<V> mergeFn
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends V> toValueFn,
+            @Nonnull BinaryOperatorEx<V> mergeFn
     ) {
         return fromProcessor("remoteMapWithMergingSink(" + mapName + ')',
                 mergeRemoteMapP(mapName, clientConfig, toKeyFn, toValueFn, mergeFn));
     }
 
     /**
-     * Convenience for {@link #mapWithMerging(String, DistributedFunction, DistributedFunction,
-     * DistributedBinaryOperator)} with {@link Entry} as input item.
+     * Convenience for {@link #mapWithMerging(String, FunctionEx, FunctionEx,
+     * BinaryOperatorEx)} with {@link Entry} as input item.
      */
     @Nonnull
     public static <K, V> Sink<Entry<K, V>> mapWithMerging(
             @Nonnull String mapName,
-            @Nonnull DistributedBinaryOperator<? super V> mergeFn
+            @Nonnull BinaryOperatorEx<V> mergeFn
     ) {
-        return fromProcessor("mapWithMergingSink(" + mapName + ')',
-                mergeMapP(mapName, Entry::getKey, entryValue(), mergeFn));
+        return Sinks.<Entry<K, V>, K, V>mapWithMerging(mapName, entryKey(), entryValue(), mergeFn);
     }
 
     /**
-     * Convenience for {@link #mapWithMerging(IMap, DistributedFunction, DistributedFunction,
-     * DistributedBinaryOperator)} with {@link Entry} as input item.
+     * Convenience for {@link #mapWithMerging(IMap, FunctionEx, FunctionEx,
+     * BinaryOperatorEx)} with {@link Entry} as input item.
      */
     @Nonnull
-    public static <K, V, V_IN extends V> Sink<Entry<K, V_IN>> mapWithMerging(
+    public static <K, V> Sink<Entry<K, V>> mapWithMerging(
             @Nonnull IMap<? super K, V> map,
-            @Nonnull DistributedBinaryOperator<V> mergeFn
+            @Nonnull BinaryOperatorEx<V> mergeFn
     ) {
         return mapWithMerging(map.getName(), mergeFn);
     }
@@ -303,7 +305,7 @@ public final class Sinks {
     public static <K, V> Sink<Entry<K, V>> remoteMapWithMerging(
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull DistributedBinaryOperator<V> mergeFn
+            @Nonnull BinaryOperatorEx<V> mergeFn
     ) {
         return fromProcessor("remoteMapWithMergingSink(" + mapName + ')',
                 mergeRemoteMapP(mapName, clientConfig, Entry::getKey, entryValue(), mergeFn));
@@ -349,10 +351,11 @@ public final class Sinks {
     @Nonnull
     public static <T, K, V> Sink<T> mapWithUpdating(
             @Nonnull String mapName,
-            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
-            @Nonnull DistributedBiFunction<? super V, ? super T, ? extends V> updateFn
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull BiFunctionEx<? super V, ? super T, ? extends V> updateFn
     ) {
-        return fromProcessor("mapWithUpdatingSink(" + mapName + ')', updateMapP(mapName, toKeyFn, updateFn));
+        return new SinkImpl<>("mapWithUpdatingSink(" + mapName + ')',
+                updateMapP(mapName, toKeyFn, updateFn), false, toKeyFn);
     }
 
     /**
@@ -399,8 +402,8 @@ public final class Sinks {
     @Nonnull
     public static <T, K, V> Sink<T> mapWithUpdating(
             @Nonnull IMap<? super K, ? super V> map,
-            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
-            @Nonnull DistributedBiFunction<? super V, ? super T, ? extends V> updateFn
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull BiFunctionEx<? super V, ? super T, ? extends V> updateFn
     ) {
         return mapWithUpdating(map.getName(), toKeyFn, updateFn);
     }
@@ -416,36 +419,33 @@ public final class Sinks {
     public static <T, K, V> Sink<T> remoteMapWithUpdating(
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
-            @Nonnull DistributedBiFunction<? super V, ? super T, ? extends V> updateFn
-
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull BiFunctionEx<? super V, ? super T, ? extends V> updateFn
     ) {
         return fromProcessor("remoteMapWithUpdatingSink(" + mapName + ')',
                 updateRemoteMapP(mapName, clientConfig, toKeyFn, updateFn));
     }
 
     /**
-     * Convenience for {@link #mapWithUpdating(String, DistributedFunction,
-     * DistributedBiFunction)} with {@link Entry} as the input item.
+     * Convenience for {@link #mapWithUpdating(String, FunctionEx,
+     * BiFunctionEx)} with {@link Entry} as the input item.
      */
     @Nonnull
     public static <K, V, E extends Entry<K, V>> Sink<E> mapWithUpdating(
             @Nonnull String mapName,
-            @Nonnull DistributedBiFunction<? super V, ? super E, ? extends V> updateFn
+            @Nonnull BiFunctionEx<? super V, ? super E, ? extends V> updateFn
     ) {
-        //noinspection Convert2MethodRef (provokes a javac 9 bug)
-        return fromProcessor("mapWithUpdatingSink(" + mapName + ')',
-                updateMapP(mapName, (Entry<K, V> e) -> e.getKey(), updateFn));
+        return mapWithUpdating(mapName, entryKey(), updateFn);
     }
 
     /**
-     * Convenience for {@link #mapWithUpdating(IMap, DistributedFunction,
-     * DistributedBiFunction)} with {@link Entry} as the input item.
+     * Convenience for {@link #mapWithUpdating(IMap, FunctionEx,
+     * BiFunctionEx)} with {@link Entry} as the input item.
      */
     @Nonnull
     public static <K, V, E extends Entry<K, V>> Sink<E> mapWithUpdating(
             @Nonnull IMap<? super K, ? super V> map,
-            @Nonnull DistributedBiFunction<? super V, ? super E, ? extends V> updateFn
+            @Nonnull BiFunctionEx<? super V, ? super E, ? extends V> updateFn
     ) {
         return mapWithUpdating(map.getName(), updateFn);
     }
@@ -458,8 +458,7 @@ public final class Sinks {
     public static <K, V, E extends Entry<K, V>> Sink<E> remoteMapWithUpdating(
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull DistributedBiFunction<? super V, ? super E, ? extends V> updateFn
-
+            @Nonnull BiFunctionEx<? super V, ? super E, ? extends V> updateFn
     ) {
         //noinspection Convert2MethodRef (provokes a javac 9 bug)
         return fromProcessor("remoteMapWithUpdatingSink(" + mapName + ')',
@@ -505,11 +504,10 @@ public final class Sinks {
      * @param <V> value type
      */
     @Nonnull
-    public static <E, K, V> Sink<E> mapWithEntryProcessor(
+    public static <E, K, V, R> Sink<E> mapWithEntryProcessor(
             @Nonnull String mapName,
-            @Nonnull DistributedFunction<? super E, ? extends K> toKeyFn,
-            @Nonnull DistributedFunction<? super E, ? extends EntryProcessor<K, V>> toEntryProcessorFn
-
+            @Nonnull FunctionEx<? super E, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super E, ? extends EntryProcessor<K, V, R>> toEntryProcessorFn
     ) {
         return fromProcessor("mapWithEntryProcessorSink(" + mapName + ')',
                 updateMapP(mapName, toKeyFn, toEntryProcessorFn));
@@ -558,11 +556,10 @@ public final class Sinks {
      * @param <V>                value type
      */
     @Nonnull
-    public static <T, K, V> Sink<T> mapWithEntryProcessor(
+    public static <T, K, V, R> Sink<T> mapWithEntryProcessor(
             @Nonnull IMap<? super K, ? super V> map,
-            @Nonnull DistributedFunction<? super T, ? extends K> toKeyFn,
-            @Nonnull DistributedFunction<? super T, ? extends EntryProcessor<K, V>> toEntryProcessorFn
-
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends EntryProcessor<K, V, R>> toEntryProcessorFn
     ) {
         return mapWithEntryProcessor(map.getName(), toKeyFn, toEntryProcessorFn);
     }
@@ -573,12 +570,11 @@ public final class Sinks {
      * ClientConfig}.
      */
     @Nonnull
-    public static <E, K, V> Sink<E> remoteMapWithEntryProcessor(
+    public static <E, K, V, R> Sink<E> remoteMapWithEntryProcessor(
             @Nonnull String mapName,
             @Nonnull ClientConfig clientConfig,
-            @Nonnull DistributedFunction<? super E, ? extends K> toKeyFn,
-            @Nonnull DistributedFunction<? super E, ? extends EntryProcessor<K, V>> toEntryProcessorFn
-
+            @Nonnull FunctionEx<? super E, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super E, ? extends EntryProcessor<K, V, R>> toEntryProcessorFn
     ) {
         return fromProcessor("remoteMapWithEntryProcessorSink(" + mapName + ')',
                 updateRemoteMapP(mapName, clientConfig, toKeyFn, toEntryProcessorFn));
@@ -597,7 +593,8 @@ public final class Sinks {
      */
     @Nonnull
     public static <T extends Entry> Sink<T> cache(@Nonnull String cacheName) {
-        return fromProcessor("cacheSink(" + cacheName + ')', writeCacheP(cacheName));
+        //noinspection Convert2MethodRef (provokes a javac 9 bug)
+        return new SinkImpl<>("cacheSink(" + cacheName + ')', writeCacheP(cacheName), false, en -> en.getKey());
     }
 
     /**
@@ -688,27 +685,27 @@ public final class Sinks {
     public static <T> Sink<T> socket(
             @Nonnull String host,
             int port,
-            @Nonnull DistributedFunction<? super T, ? extends String> toStringFn,
+            @Nonnull FunctionEx<? super T, ? extends String> toStringFn,
             @Nonnull Charset charset
     ) {
         return fromProcessor("socketSink(" + host + ':' + port + ')', writeSocketP(host, port, toStringFn, charset));
     }
 
     /**
-     * Convenience for {@link #socket(String, int, DistributedFunction,
+     * Convenience for {@link #socket(String, int, FunctionEx,
      * Charset)} with UTF-8 as the charset.
      */
     @Nonnull
     public static <T> Sink<T> socket(
             @Nonnull String host,
             int port,
-            @Nonnull DistributedFunction<? super T, ? extends String> toStringFn
+            @Nonnull FunctionEx<? super T, ? extends String> toStringFn
     ) {
         return socket(host, port, toStringFn, UTF_8);
     }
 
     /**
-     * Convenience for {@link #socket(String, int, DistributedFunction,
+     * Convenience for {@link #socket(String, int, FunctionEx,
      * Charset)} with {@code Object.toString} as the conversion function and
      * UTF-8 as the charset.
      */
@@ -767,12 +764,12 @@ public final class Sinks {
      * @param <T> stream item type
      */
     @Nonnull
-    public static <T> Sink<T> logger(@Nonnull DistributedFunction<? super T, String> toStringFn) {
+    public static <T> Sink<T> logger(@Nonnull FunctionEx<? super T, String> toStringFn) {
         return fromProcessor("loggerSink", writeLoggerP(toStringFn));
     }
 
     /**
-     * Convenience for {@link #logger(DistributedFunction)} with {@code
+     * Convenience for {@link #logger(FunctionEx)} with {@code
      * Object.toString()} as the {@code toStringFn}.
      */
     @Nonnull
@@ -789,7 +786,7 @@ public final class Sinks {
     }
 
     /**
-     * Convenience for {@link #jmsQueueBuilder(DistributedSupplier)}. Creates a
+     * Convenience for {@link #jmsQueueBuilder(SupplierEx)}. Creates a
      * connection without any authentication parameters and uses non-transacted
      * sessions with {@code Session.AUTO_ACKNOWLEDGE} mode. If a received item
      * is not an instance of {@code javax.jms.Message}, the sink wraps {@code
@@ -800,7 +797,7 @@ public final class Sinks {
      */
     @Nonnull
     public static <T> Sink<T> jmsQueue(
-            @Nonnull DistributedSupplier<ConnectionFactory> factorySupplier,
+            @Nonnull SupplierEx<ConnectionFactory> factorySupplier,
             @Nonnull String name
     ) {
         return Sinks.<T>jmsQueueBuilder(factorySupplier)
@@ -828,12 +825,12 @@ public final class Sinks {
      * @param <T> type of the items the sink accepts
      */
     @Nonnull
-    public static <T> JmsSinkBuilder<T> jmsQueueBuilder(@Nonnull DistributedSupplier<ConnectionFactory> factorySupplier) {
+    public static <T> JmsSinkBuilder<T> jmsQueueBuilder(@Nonnull SupplierEx<ConnectionFactory> factorySupplier) {
         return new JmsSinkBuilder<>(factorySupplier, false);
     }
 
     /**
-     * Convenience for {@link #jmsTopicBuilder(DistributedSupplier)}. Creates a
+     * Convenience for {@link #jmsTopicBuilder(SupplierEx)}. Creates a
      * connection without any authentication parameters and uses non-transacted
      * sessions with {@code Session.AUTO_ACKNOWLEDGE} mode. If a received item
      * is not an instance of {@code javax.jms.Message}, the sink wraps {@code
@@ -844,7 +841,7 @@ public final class Sinks {
      */
     @Nonnull
     public static <T> Sink<T> jmsTopic(
-            @Nonnull DistributedSupplier<ConnectionFactory> factorySupplier,
+            @Nonnull SupplierEx<ConnectionFactory> factorySupplier,
             @Nonnull String name
     ) {
         return Sinks.<T>jmsTopicBuilder(factorySupplier)
@@ -872,13 +869,13 @@ public final class Sinks {
      * @param <T> type of the items the sink accepts
      */
     @Nonnull
-    public static <T> JmsSinkBuilder<T> jmsTopicBuilder(@Nonnull DistributedSupplier<ConnectionFactory> factorySupplier) {
+    public static <T> JmsSinkBuilder<T> jmsTopicBuilder(@Nonnull SupplierEx<ConnectionFactory> factorySupplier) {
         return new JmsSinkBuilder<>(factorySupplier, true);
     }
 
     /**
      * Returns a sink that connects to the specified database using the given
-     * {@code connectionSupplier}, prepares a statement using the given {@code
+     * {@code newConnectionFn}, prepares a statement using the given {@code
      * updateQuery} and inserts/updates the items.
      * <p>
      * The {@code updateQuery} should contain a parametrized query. The {@code
@@ -891,7 +888,7 @@ public final class Sinks {
      * disabled on the connection.
      * <p>
      * Example:<pre>{@code
-     *     p.drainTo(Sinks.jdbc(
+     *     p.writeTo(Sinks.jdbc(
      *             "REPLACE into table (id, name) values(?, ?)",
      *             () -> return DriverManager.getConnection("jdbc:..."),
      *             (stmt, item) -> {
@@ -913,7 +910,7 @@ public final class Sinks {
      * <em>insert-or-update</em> statement that can tolerate duplicate writes.
      *
      * @param updateQuery the SQL query which will do the insert/update
-     * @param connectionSupplier the supplier of database connection
+     * @param newConnectionFn the supplier of database connection
      * @param bindFn the function to set the parameters of the statement for
      *                 each item received
      * @param <T> type of the items the sink accepts
@@ -921,23 +918,23 @@ public final class Sinks {
     @Nonnull
     public static <T> Sink<T> jdbc(
             @Nonnull String updateQuery,
-            @Nonnull DistributedSupplier<Connection> connectionSupplier,
-            @Nonnull DistributedBiConsumer<PreparedStatement, T> bindFn
+            @Nonnull SupplierEx<Connection> newConnectionFn,
+            @Nonnull BiConsumerEx<PreparedStatement, T> bindFn
     ) {
         return Sinks.fromProcessor("jdbcSink",
-                SinkProcessors.writeJdbcP(updateQuery, connectionSupplier, bindFn));
+                SinkProcessors.writeJdbcP(updateQuery, newConnectionFn, bindFn));
     }
 
     /**
-     * Convenience for {@link Sinks#jdbc(String, DistributedSupplier,
-     * DistributedBiConsumer)}. The connection will be created from {@code
+     * Convenience for {@link Sinks#jdbc(String, SupplierEx,
+     * BiConsumerEx)}. The connection will be created from {@code
      * connectionUrl}.
      */
     @Nonnull
     public static <T> Sink<T> jdbc(
             @Nonnull String updateQuery,
             @Nonnull String connectionUrl,
-            @Nonnull DistributedBiConsumer<PreparedStatement, T> bindFn
+            @Nonnull BiConsumerEx<PreparedStatement, T> bindFn
     ) {
         return Sinks.jdbc(updateQuery, () -> DriverManager.getConnection(connectionUrl), bindFn);
     }

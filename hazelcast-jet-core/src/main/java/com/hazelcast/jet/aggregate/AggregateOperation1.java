@@ -16,8 +16,8 @@
 
 package com.hazelcast.jet.aggregate;
 
-import com.hazelcast.jet.function.DistributedBiConsumer;
-import com.hazelcast.jet.function.DistributedFunction;
+import com.hazelcast.function.BiConsumerEx;
+import com.hazelcast.function.FunctionEx;
 
 import javax.annotation.Nonnull;
 import java.util.stream.Collector;
@@ -33,6 +33,8 @@ import java.util.stream.Collector;
  * @param <T> the type of the stream item
  * @param <A> the type of the accumulator
  * @param <R> the type of the aggregation result
+ *
+ * @since 3.0
  */
 public interface AggregateOperation1<T, A, R> extends AggregateOperation<A, R> {
 
@@ -41,7 +43,7 @@ public interface AggregateOperation1<T, A, R> extends AggregateOperation<A, R> {
      * item.
      */
     @Nonnull
-    DistributedBiConsumer<? super A, ? super T> accumulateFn();
+    BiConsumerEx<? super A, ? super T> accumulateFn();
 
     /**
      * Returns a copy of this aggregate operation, but with the {@code
@@ -49,7 +51,7 @@ public interface AggregateOperation1<T, A, R> extends AggregateOperation<A, R> {
      */
     @Nonnull
     <NEW_T> AggregateOperation1<NEW_T, A, R> withAccumulateFn(
-            DistributedBiConsumer<? super A, ? super NEW_T> accumulateFn
+            BiConsumerEx<? super A, ? super NEW_T> accumulateFn
     );
 
     // Narrows the return type
@@ -58,25 +60,14 @@ public interface AggregateOperation1<T, A, R> extends AggregateOperation<A, R> {
 
     // Narrows the return type
     @Nonnull @Override
-    <R_NEW> AggregateOperation1<T, A, R_NEW> andThen(DistributedFunction<? super R, ? extends R_NEW> thenFn);
+    <R_NEW> AggregateOperation1<T, A, R_NEW> andThen(FunctionEx<? super R, ? extends R_NEW> thenFn);
 
     /**
-     * Adapts this aggregate operation to a collector which can be passed to
-     * {@link java.util.stream.Stream#collect(Collector)}.
+     * @deprecated see {@linkplain AggregateOperations#toCollector(AggregateOperation1)}
      */
     @Nonnull
+    @Deprecated
     default Collector<T, A, R> toCollector() {
-        DistributedBiConsumer<? super A, ? super A> combineFn = combineFn();
-        if (combineFn == null) {
-            throw new IllegalArgumentException("This aggregate operation doesn't implement combineFn()");
-        }
-        return Collector.of(
-                createFn(),
-                (acc, t) -> accumulateFn().accept(acc, t),
-                (l, r) -> {
-                    combineFn.accept(l, r);
-                    return l;
-                },
-                a -> finishFn().apply(a));
+        return AggregateOperations.toCollector(this);
     }
 }

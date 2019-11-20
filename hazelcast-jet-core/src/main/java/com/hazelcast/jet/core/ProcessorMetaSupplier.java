@@ -16,12 +16,13 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.cluster.Address;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.JobConfig;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.nio.Address;
 import com.hazelcast.partition.strategy.StringPartitioningStrategy;
 
 import javax.annotation.Nonnull;
@@ -30,7 +31,7 @@ import java.io.Serializable;
 import java.util.List;
 import java.util.function.Function;
 
-import static com.hazelcast.util.UuidUtil.newUnsecureUuidString;
+import static com.hazelcast.internal.util.UuidUtil.newUnsecureUuidString;
 import static java.util.Collections.singletonList;
 
 /**
@@ -56,6 +57,8 @@ import static java.util.Collections.singletonList;
  * and partitioning services. It can use the information from these services to
  * precisely parameterize each {@code Processor} instance that will be created on
  * each member.
+ *
+ * @since 3.0
  */
 @FunctionalInterface
 public interface ProcessorMetaSupplier extends Serializable {
@@ -117,11 +120,11 @@ public interface ProcessorMetaSupplier extends Serializable {
      * Factory method that wraps the given {@code ProcessorSupplier} and
      * returns the same instance for each given {@code Address}.
      *
-     * @param procSupplier the processor supplier
      * @param preferredLocalParallelism the value to return from {@link #preferredLocalParallelism()}
+     * @param procSupplier the processor supplier
      */
     @Nonnull
-    static ProcessorMetaSupplier of(@Nonnull ProcessorSupplier procSupplier, int preferredLocalParallelism) {
+    static ProcessorMetaSupplier of(int preferredLocalParallelism, @Nonnull ProcessorSupplier procSupplier) {
         return of((Address x) -> procSupplier, preferredLocalParallelism);
     }
 
@@ -132,36 +135,36 @@ public interface ProcessorMetaSupplier extends Serializable {
      */
     @Nonnull
     static ProcessorMetaSupplier of(@Nonnull ProcessorSupplier procSupplier) {
-        return of(procSupplier, Vertex.LOCAL_PARALLELISM_USE_DEFAULT);
+        return of(Vertex.LOCAL_PARALLELISM_USE_DEFAULT, procSupplier);
     }
 
     /**
      * Factory method that wraps the given {@code Supplier<Processor>}
      * and uses it as the supplier of all {@code Processor} instances.
      * Specifically, returns a meta-supplier that will always return the
-     * result of calling {@link ProcessorSupplier#of(DistributedSupplier)}.
+     * result of calling {@link ProcessorSupplier#of(SupplierEx)}.
      *
      * @param procSupplier              the supplier of processors
      * @param preferredLocalParallelism the value to return from {@link #preferredLocalParallelism()}
      */
     @Nonnull
     static ProcessorMetaSupplier of(
-            @Nonnull DistributedSupplier<? extends Processor> procSupplier,
+            @Nonnull SupplierEx<? extends Processor> procSupplier,
             int preferredLocalParallelism
     ) {
-        return of(ProcessorSupplier.of(procSupplier), preferredLocalParallelism);
+        return of(preferredLocalParallelism, ProcessorSupplier.of(procSupplier));
     }
 
     /**
      * Factory method that wraps the given {@code Supplier<Processor>}
      * and uses it as the supplier of all {@code Processor} instances.
      * Specifically, returns a meta-supplier that will always return the
-     * result of calling {@link ProcessorSupplier#of(DistributedSupplier)}.
+     * result of calling {@link ProcessorSupplier#of(SupplierEx)}.
      * The {@link #preferredLocalParallelism()} of the meta-supplier will be
      * {@link Vertex#LOCAL_PARALLELISM_USE_DEFAULT}.
      */
     @Nonnull
-    static ProcessorMetaSupplier of(@Nonnull DistributedSupplier<? extends Processor> procSupplier) {
+    static ProcessorMetaSupplier of(@Nonnull SupplierEx<? extends Processor> procSupplier) {
         return of(procSupplier, Vertex.LOCAL_PARALLELISM_USE_DEFAULT);
     }
 
@@ -175,7 +178,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      */
     @Nonnull
     static ProcessorMetaSupplier of(
-            @Nonnull DistributedFunction<? super Address, ? extends ProcessorSupplier> addressToSupplier,
+            @Nonnull FunctionEx<? super Address, ? extends ProcessorSupplier> addressToSupplier,
             int preferredLocalParallelism
     ) {
         Vertex.checkLocalParallelism(preferredLocalParallelism);
@@ -200,7 +203,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      */
     @Nonnull
     static ProcessorMetaSupplier of(
-            @Nonnull DistributedFunction<? super Address, ? extends ProcessorSupplier> addressToSupplier
+            @Nonnull FunctionEx<? super Address, ? extends ProcessorSupplier> addressToSupplier
     ) {
         return of(addressToSupplier, Vertex.LOCAL_PARALLELISM_USE_DEFAULT);
     }
@@ -216,19 +219,19 @@ public interface ProcessorMetaSupplier extends Serializable {
      */
     @Nonnull
     static ProcessorMetaSupplier preferLocalParallelismOne(@Nonnull ProcessorSupplier supplier) {
-        return of(supplier, 1);
+        return of(1, supplier);
     }
 
     /**
      * Variant of {@link #preferLocalParallelismOne(ProcessorSupplier)} where
-     * the supplied {@code DistributedSupplier<Processor>} will be
+     * the supplied {@code SupplierEx<Processor>} will be
      * wrapped into a {@link ProcessorSupplier}.
      */
     @Nonnull
     static ProcessorMetaSupplier preferLocalParallelismOne(
-            @Nonnull DistributedSupplier<? extends Processor> procSupplier
+            @Nonnull SupplierEx<? extends Processor> procSupplier
     ) {
-        return of(ProcessorSupplier.of(procSupplier), 1);
+        return of(1, ProcessorSupplier.of(procSupplier));
     }
 
     /**
@@ -272,8 +275,8 @@ public interface ProcessorMetaSupplier extends Serializable {
             public void init(@Nonnull Context context) {
                 if (context.localParallelism() != 1) {
                     throw new IllegalArgumentException(
-                            "Non-distributed vertex had parallelism of " + context.localParallelism()
-                                    + ", should be 1");
+                            "Local parallelism of " + context.localParallelism() + " was requested for a vertex that "
+                                    + "supports only total parallelism of 1. Local parallelism should be 1.");
                 }
                 String key = StringPartitioningStrategy.getPartitionKey(partitionKey);
                 ownerAddress = context.jetInstance().getHazelcastInstance().getPartitionService()
@@ -290,10 +293,15 @@ public interface ProcessorMetaSupplier extends Serializable {
                             protected boolean tryProcess(int ordinal, @Nonnull Object item) {
                                 throw new IllegalStateException(
                                         "This vertex has a total parallelism of one and as such only"
-                                                + " expects input on one node. Edge configuration must be adjusted to"
-                                                + " make sure that only the expected node receives any input."
+                                                + " expects input on a specific node. Edge configuration must be adjusted"
+                                                + " to make sure that only the expected node receives any input."
                                                 + " Unexpected input received from ordinal " + ordinal + ": " + item
                                 );
+                            }
+
+                            @Override
+                            protected void restoreFromSnapshot(@Nonnull Object key, @Nonnull Object value) {
+                                // state might be broadcast to all instances - ignore it in the no-op instances
                             }
                         });
             }
@@ -308,6 +316,8 @@ public interface ProcessorMetaSupplier extends Serializable {
     /**
      * Context passed to the meta-supplier at init time on the member that
      * received a job request from the client.
+     *
+     * @since 3.0
      */
     interface Context {
 
@@ -372,6 +382,17 @@ public interface ProcessorMetaSupplier extends Serializable {
          */
         @Nonnull
         ILogger logger();
-    }
 
+        /**
+         * Returns true, if snapshots will be saved for this job.
+         */
+        default boolean snapshottingEnabled() {
+            return processingGuarantee() != ProcessingGuarantee.NONE;
+        }
+
+        /**
+         * Returns the guarantee for current job.
+         */
+        ProcessingGuarantee processingGuarantee();
+    }
 }

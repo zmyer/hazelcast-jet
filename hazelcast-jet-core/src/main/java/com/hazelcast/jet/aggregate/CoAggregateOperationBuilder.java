@@ -16,11 +16,12 @@
 
 package com.hazelcast.jet.aggregate;
 
+import com.hazelcast.function.BiConsumerEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.internal.util.Preconditions;
 import com.hazelcast.jet.datamodel.ItemsByTag;
 import com.hazelcast.jet.datamodel.Tag;
-import com.hazelcast.jet.function.DistributedBiConsumer;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.util.Preconditions;
+import com.hazelcast.jet.pipeline.StageWithKeyAndWindow;
 
 import javax.annotation.Nonnull;
 import java.util.HashMap;
@@ -30,7 +31,7 @@ import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.stream.Stream;
 
-import static com.hazelcast.jet.function.DistributedFunction.identity;
+import static com.hazelcast.function.FunctionEx.identity;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static java.util.Arrays.stream;
 import static java.util.Comparator.comparing;
@@ -42,6 +43,8 @@ import static java.util.stream.IntStream.range;
  * accepts multiple inputs. To obtain it, call {@link
  * AggregateOperations#coAggregateOperationBuilder()}. and refer to that
  * method's Javadoc for further details.
+ *
+ * @since 3.0
  */
 public class CoAggregateOperationBuilder {
 
@@ -53,8 +56,8 @@ public class CoAggregateOperationBuilder {
      * Registers the given aggregate operation with the tag corresponding to an
      * input to the co-aggregating operation being built. If you are preparing
      * an operation to pass to an {@linkplain
-     * com.hazelcast.jet.pipeline.StageWithWindow#aggregateBuilder() aggregate
-     * builder}, you must use the tags you obtained from it.
+     * StageWithKeyAndWindow#aggregateBuilder() aggregate builder}, you must
+     * use the tags you obtained from it.
      * <p>
      * Returns the tag you'll use to retrieve the results of aggregating this
      * input.
@@ -93,7 +96,7 @@ public class CoAggregateOperationBuilder {
     @Nonnull
     @SuppressWarnings({"unchecked", "ConstantConditions"})
     public <R> AggregateOperation<Object[], R> build(
-            @Nonnull DistributedFunction<? super ItemsByTag, ? extends R> exportFinishFn
+            @Nonnull FunctionEx<? super ItemsByTag, ? extends R> exportFinishFn
     ) {
         checkSerializable(exportFinishFn, "exportFinishFn");
         Tag[] tags = opsByTag.keySet().stream().sorted().toArray(Tag[]::new);
@@ -106,14 +109,14 @@ public class CoAggregateOperationBuilder {
         Stream<Entry<Tag, AggregateOperation1>> sorted = opsByTag.entrySet().stream()
                                                                  .sorted(comparing(Entry::getKey));
         List<AggregateOperation1> ops = sorted.map(Entry::getValue).collect(toList());
-        DistributedBiConsumer[] combineFns =
-                ops.stream().map(AggregateOperation::combineFn).toArray(DistributedBiConsumer[]::new);
-        DistributedBiConsumer[] deductFns =
-                ops.stream().map(AggregateOperation::deductFn).toArray(DistributedBiConsumer[]::new);
-        DistributedFunction[] exportFns =
-                ops.stream().map(AggregateOperation::exportFn).toArray(DistributedFunction[]::new);
-        DistributedFunction[] finishFns =
-                ops.stream().map(AggregateOperation::finishFn).toArray(DistributedFunction[]::new);
+        BiConsumerEx[] combineFns =
+                ops.stream().map(AggregateOperation::combineFn).toArray(BiConsumerEx[]::new);
+        BiConsumerEx[] deductFns =
+                ops.stream().map(AggregateOperation::deductFn).toArray(BiConsumerEx[]::new);
+        FunctionEx[] exportFns =
+                ops.stream().map(AggregateOperation::exportFn).toArray(FunctionEx[]::new);
+        FunctionEx[] finishFns =
+                ops.stream().map(AggregateOperation::finishFn).toArray(FunctionEx[]::new);
 
         AggregateOperationBuilder.VarArity<Object[], Void> b = AggregateOperation
                 .withCreate(() -> ops.stream().map(op -> op.createFn().get()).toArray())

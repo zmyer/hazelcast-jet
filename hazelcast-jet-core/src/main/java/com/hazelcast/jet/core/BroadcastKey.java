@@ -16,7 +16,7 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.util.Preconditions;
+import com.hazelcast.internal.util.Preconditions;
 
 import javax.annotation.Nonnull;
 import java.util.Objects;
@@ -27,6 +27,8 @@ import java.util.Objects;
  * when restoring the snapshot.
  *
  * @param <K> type of key
+ *
+ * @since 3.0
  */
 public final class BroadcastKey<K> {
 

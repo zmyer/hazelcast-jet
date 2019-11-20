@@ -16,15 +16,15 @@
 
 package com.hazelcast.jet.impl.connector;
 
+import com.hazelcast.function.BiConsumerEx;
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.ConsumerEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.processor.SinkProcessors;
-import com.hazelcast.jet.function.DistributedBiConsumer;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedConsumer;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedSupplier;
 
 import javax.annotation.Nonnull;
 import javax.jms.Connection;
@@ -36,6 +36,7 @@ import java.util.Collection;
 import java.util.stream.Stream;
 
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeBufferedP;
+import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static java.util.stream.Collectors.toList;
 
 /**
@@ -54,43 +55,50 @@ public final class WriteJmsP {
      * SinkProcessors#writeJmsTopicP} instead
      */
     public static <T> ProcessorMetaSupplier supplier(
-            DistributedSupplier<? extends Connection> connectionSupplier,
-            DistributedFunction<? super Connection, ? extends Session> sessionF,
-            DistributedBiFunction<? super Session, T, ? extends Message> messageFn,
-            DistributedBiConsumer<? super MessageProducer, ? super Message> sendFn,
-            DistributedConsumer<? super Session> flushFn,
+            SupplierEx<? extends Connection> newConnectionFn,
+            FunctionEx<? super Connection, ? extends Session> newSessionFn,
+            BiFunctionEx<? super Session, T, ? extends Message> messageFn,
+            BiConsumerEx<? super MessageProducer, ? super Message> sendFn,
+            ConsumerEx<? super Session> flushFn,
             String name,
             boolean isTopic
     ) {
+        checkSerializable(newConnectionFn, "newConnectionFn");
+        checkSerializable(newSessionFn, "newSessionFn");
+        checkSerializable(messageFn, "messageFn");
+        checkSerializable(sendFn, "sendFn");
+        checkSerializable(flushFn, "flushFn");
+
         return ProcessorMetaSupplier.of(
-                new Supplier<>(connectionSupplier, sessionF, messageFn, sendFn, flushFn, name, isTopic),
-                PREFERRED_LOCAL_PARALLELISM);
+            PREFERRED_LOCAL_PARALLELISM,
+            new Supplier<>(newConnectionFn, newSessionFn, messageFn, sendFn, flushFn, name, isTopic)
+        );
     }
 
     private static final class Supplier<T> implements ProcessorSupplier {
 
         static final long serialVersionUID = 1L;
 
-        private final DistributedSupplier<? extends Connection> connectionSupplier;
-        private final DistributedFunction<? super Connection, ? extends Session> sessionF;
+        private final SupplierEx<? extends Connection> newConnectionFn;
+        private final FunctionEx<? super Connection, ? extends Session> newSessionFn;
         private final String name;
         private final boolean isTopic;
-        private final DistributedBiFunction<? super Session, ? super T, ? extends Message> messageFn;
-        private final DistributedBiConsumer<? super MessageProducer, ? super Message> sendFn;
-        private final DistributedConsumer<? super Session> flushFn;
+        private final BiFunctionEx<? super Session, ? super T, ? extends Message> messageFn;
+        private final BiConsumerEx<? super MessageProducer, ? super Message> sendFn;
+        private final ConsumerEx<? super Session> flushFn;
 
         private transient Connection connection;
 
-        private Supplier(DistributedSupplier<? extends Connection> connectionSupplier,
-                         DistributedFunction<? super Connection, ? extends Session> sessionF,
-                         DistributedBiFunction<? super Session, ? super T, ? extends Message> messageFn,
-                         DistributedBiConsumer<? super MessageProducer, ? super Message> sendFn,
-                         DistributedConsumer<? super Session> flushFn,
+        private Supplier(SupplierEx<? extends Connection> newConnectionFn,
+                         FunctionEx<? super Connection, ? extends Session> newSessionFn,
+                         BiFunctionEx<? super Session, ? super T, ? extends Message> messageFn,
+                         BiConsumerEx<? super MessageProducer, ? super Message> sendFn,
+                         ConsumerEx<? super Session> flushFn,
                          String name,
                          boolean isTopic
         ) {
-            this.connectionSupplier = connectionSupplier;
-            this.sessionF = sessionF;
+            this.newConnectionFn = newConnectionFn;
+            this.newSessionFn = newSessionFn;
             this.messageFn = messageFn;
             this.sendFn = sendFn;
             this.flushFn = flushFn;
@@ -100,29 +108,29 @@ public final class WriteJmsP {
 
         @Override
         public void init(@Nonnull Context ignored) throws Exception {
-            connection = connectionSupplier.get();
+            connection = newConnectionFn.get();
             connection.start();
         }
 
         @Nonnull
         @Override
         public Collection<? extends Processor> get(int count) {
-            DistributedFunction<Processor.Context, JmsContext> createFn = jet -> {
-                Session session = sessionF.apply(connection);
+            FunctionEx<Processor.Context, JmsContext> createFn = jet -> {
+                Session session = newSessionFn.apply(connection);
                 Destination destination = isTopic ? session.createTopic(name) : session.createQueue(name);
                 MessageProducer producer = session.createProducer(destination);
                 return new JmsContext(session, producer);
             };
-            DistributedBiConsumer<JmsContext, T> onReceiveFn = (jmsContext, item) -> {
+            BiConsumerEx<JmsContext, T> onReceiveFn = (jmsContext, item) -> {
                 Message message = messageFn.apply(jmsContext.session, item);
                 sendFn.accept(jmsContext.producer, message);
             };
-            DistributedConsumer<JmsContext> flushF = jmsContext -> flushFn.accept(jmsContext.session);
-            DistributedConsumer<JmsContext> destroyFn = jmsContext -> {
+            ConsumerEx<JmsContext> flushF = jmsContext -> flushFn.accept(jmsContext.session);
+            ConsumerEx<JmsContext> destroyFn = jmsContext -> {
                 jmsContext.producer.close();
                 jmsContext.session.close();
             };
-            DistributedSupplier<Processor> supplier = writeBufferedP(createFn, onReceiveFn, flushF, destroyFn);
+            SupplierEx<Processor> supplier = writeBufferedP(createFn, onReceiveFn, flushF, destroyFn);
 
             return Stream.generate(supplier).limit(count).collect(toList());
         }

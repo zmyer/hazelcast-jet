@@ -16,7 +16,7 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.logging.ILogger;
 
 import javax.annotation.Nonnull;
@@ -30,6 +30,8 @@ import static java.util.stream.Collectors.toList;
 /**
  * Factory of {@link Processor} instances. Part of the initialization
  * chain as explained on {@link ProcessorMetaSupplier}.
+ *
+ * @since 3.0
  */
 @FunctionalInterface
 public interface ProcessorSupplier extends Serializable {
@@ -45,7 +47,7 @@ public interface ProcessorSupplier extends Serializable {
      * {@link Processor} that will be used during the execution of the Jet job.
      *
      * @param count the number of processor this method is required to create
-     *              and return
+     *              and return. It is equal to {@link Context#localParallelism()}.
      */
     @Nonnull
     Collection<? extends Processor> get(int count);
@@ -79,12 +81,14 @@ public interface ProcessorSupplier extends Serializable {
      * {@code Supplier<Processor>} to create all {@code Processor} instances.
      */
     @Nonnull
-    static ProcessorSupplier of(@Nonnull DistributedSupplier<? extends Processor> processorSupplier) {
+    static ProcessorSupplier of(@Nonnull SupplierEx<? extends Processor> processorSupplier) {
         return count -> Stream.generate(processorSupplier).limit(count).collect(toList());
     }
 
     /**
      * Context passed to the supplier in the {@link #init(Context) init()} call.
+     *
+     * @since 3.0
      */
     interface Context extends ProcessorMetaSupplier.Context {
 

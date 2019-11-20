@@ -40,11 +40,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
+import static com.hazelcast.internal.partition.IPartition.MAX_BACKUP_COUNT;
 import static com.hazelcast.jet.core.JobStatus.COMPLETED;
 import static com.hazelcast.jet.core.JobStatus.NOT_RUNNING;
 import static com.hazelcast.jet.core.JobStatus.RUNNING;
 import static com.hazelcast.jet.core.JobStatus.STARTING;
-import static com.hazelcast.spi.partition.IPartition.MAX_BACKUP_COUNT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -94,7 +94,7 @@ public class SplitBrainTest extends JetSplitBrainTestSupport {
 
             assertTrueEventually(() -> {
                 JetService service = getJetService(firstSubCluster[0]);
-                assertEquals(COMPLETED, service.getJobCoordinationService().getJobStatus(jobId));
+                assertEquals(COMPLETED, service.getJobCoordinationService().getJobStatus(jobId).get());
             });
 
             JetService service2 = getJetService(secondSubCluster[0]);
@@ -102,11 +102,11 @@ public class SplitBrainTest extends JetSplitBrainTestSupport {
             assertTrueEventually(() -> {
                 MasterContext masterContext = service2.getJobCoordinationService().getMasterContext(jobId);
                 assertNotNull(masterContext);
-                minorityJobFutureRef[0] = masterContext.jobCompletionFuture();
+                minorityJobFutureRef[0] = masterContext.jobContext().jobCompletionFuture();
             });
 
             assertTrueAllTheTime(() -> {
-                assertStatusNotRunningOrStarting(service2.getJobCoordinationService().getJobStatus(jobId));
+                assertStatusNotRunningOrStarting(service2.getJobCoordinationService().getJobStatus(jobId).get());
             }, 20);
         };
 
@@ -163,8 +163,8 @@ public class SplitBrainTest extends JetSplitBrainTestSupport {
             assertTrueAllTheTime(() -> {
                 JetService service1 = getJetService(firstSubCluster[0]);
                 JetService service2 = getJetService(secondSubCluster[0]);
-                JobStatus status1 = service1.getJobCoordinationService().getJobStatus(jobId);
-                JobStatus status2 = service2.getJobCoordinationService().getJobStatus(jobId);
+                JobStatus status1 = service1.getJobCoordinationService().getJobStatus(jobId).get();
+                JobStatus status2 = service2.getJobCoordinationService().getJobStatus(jobId).get();
                 assertStatusNotRunningOrStarting(status1);
                 assertStatusNotRunningOrStarting(status2);
             }, 20);
@@ -206,8 +206,8 @@ public class SplitBrainTest extends JetSplitBrainTestSupport {
             assertTrueEventually(() -> {
                 JetService service1 = getJetService(firstSubCluster[0]);
                 JetService service2 = getJetService(secondSubCluster[0]);
-                assertEquals(COMPLETED, service1.getJobCoordinationService().getJobStatus(jobId));
-                assertEquals(COMPLETED, service2.getJobCoordinationService().getJobStatus(jobId));
+                assertEquals(COMPLETED, service1.getJobCoordinationService().getJobStatus(jobId).get());
+                assertEquals(COMPLETED, service2.getJobCoordinationService().getJobStatus(jobId).get());
             });
         };
 
@@ -299,20 +299,16 @@ public class SplitBrainTest extends JetSplitBrainTestSupport {
 
         NoOutputSourceP.executionStarted = new CountDownLatch(clusterSize * PARALLELISM);
         MockPS processorSupplier = new MockPS(NoOutputSourceP::new, clusterSize);
-        DAG dag = new DAG().vertex(new Vertex("test", processorSupplier));
+        DAG dag = new DAG().vertex(new Vertex("test", processorSupplier).localParallelism(PARALLELISM));
         Job job = instances[0].newJob(dag, new JobConfig().setSplitBrainProtection(true));
         assertOpenEventually(NoOutputSourceP.executionStarted);
 
         for (int i = 1; i < clusterSize; i++) {
             instances[i].shutdown();
         }
-
         NoOutputSourceP.proceedLatch.countDown();
-
         assertJobStatusEventually(job, NOT_RUNNING, 10);
-
         createJetMember(jetConfig);
-
         assertTrueAllTheTime(() -> assertStatusNotRunningOrStarting(job.getStatus()), 5);
     }
 

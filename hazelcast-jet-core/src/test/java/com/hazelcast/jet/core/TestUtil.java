@@ -16,12 +16,14 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Job;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.impl.util.ThrottleWrappedP;
 import com.hazelcast.jet.impl.util.WrappingProcessorMetaSupplier;
 
 import javax.annotation.Nonnull;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
@@ -61,12 +63,14 @@ public final class TestUtil {
         }
 
         if (!found) {
-            assertEquals("expected exception not found in causes chain", expected, caught);
+            StringWriter caughtStr = new StringWriter();
+            caught.printStackTrace(new PrintWriter(caughtStr));
+            assertEquals("expected exception not found in causes chain", expected.toString(), caughtStr.toString());
         }
     }
 
     @Nonnull
-    public static ProcessorMetaSupplier throttle(@Nonnull DistributedSupplier<Processor> wrapped, long itemsPerSecond) {
+    public static ProcessorMetaSupplier throttle(@Nonnull SupplierEx<Processor> wrapped, long itemsPerSecond) {
         return new WrappingProcessorMetaSupplier(ProcessorMetaSupplier.of(wrapped), p -> new ThrottleWrappedP(p,
                 itemsPerSecond));
     }

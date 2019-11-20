@@ -16,20 +16,21 @@
 
 package com.hazelcast.jet.core.test;
 
+import com.hazelcast.cluster.Address;
 import com.hazelcast.config.NetworkConfig;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.instance.BuildInfoProvider;
+import com.hazelcast.internal.util.concurrent.BackoffIdleStrategy;
+import com.hazelcast.internal.util.concurrent.IdleStrategy;
 import com.hazelcast.jet.JetInstance;
+import com.hazelcast.jet.config.EdgeConfig;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.Processor.Context;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.Watermark;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.logging.LoggingServiceImpl;
-import com.hazelcast.nio.Address;
-import com.hazelcast.util.concurrent.BackoffIdleStrategy;
-import com.hazelcast.util.concurrent.IdleStrategy;
+import com.hazelcast.logging.impl.LoggingServiceImpl;
 
 import javax.annotation.Nonnull;
 import java.net.UnknownHostException;
@@ -40,20 +41,24 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.SortedMap;
 import java.util.TreeMap;
+import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static com.hazelcast.function.FunctionEx.identity;
+import static com.hazelcast.internal.util.Preconditions.checkNotNegative;
 import static com.hazelcast.jet.core.test.JetAssert.assertEquals;
 import static com.hazelcast.jet.core.test.JetAssert.assertFalse;
 import static com.hazelcast.jet.core.test.JetAssert.assertTrue;
-import static com.hazelcast.jet.function.DistributedFunction.identity;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
+import static com.hazelcast.jet.impl.util.Util.subtractClamped;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.singletonList;
 import static java.util.concurrent.TimeUnit.MICROSECONDS;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.stream.Collectors.toMap;
 
 /**
@@ -73,9 +78,10 @@ import static java.util.stream.Collectors.toMap;
  *
  *     <li>every time the inbox gets empty does snapshot or snapshot+restore
  *
- *     <li>{@link #disableCompleteCall() optionally} calls {@link Processor#complete()}
- *     until it returns {@code true} or calls it until {@link #disableRunUntilCompleted(long)
- *     specified timeout} elapses (for streaming sources)
+ *     <li>{@linkplain #disableCompleteCall() optionally} calls {@link
+ *     Processor#complete()} until it returns {@code true} or until the
+ *     {@linkplain #runUntilOutputMatches output matches} (for streaming
+ *     sources)
  *
  *     <li>does snapshot or snapshot+restore each time the {@code complete()}
  *     method returned {@code false} and made a progress
@@ -148,6 +154,8 @@ import static java.util.stream.Collectors.toMap;
  *            .input(asList("foo", "bar"))       // default is `emptyList()`
  *            .expectOutput(asList("FOO", "BAR"));
  * }</pre>
+ *
+ * @since 3.0
  */
 public final class TestSupport {
 
@@ -194,15 +202,19 @@ public final class TestSupport {
     private ProcessorMetaSupplier metaSupplier;
     private ProcessorSupplier supplier;
     private List<List<?>> inputs = emptyList();
-    private List<List<?>> expectedOutputs = emptyList();
     private int[] priorities = {};
     private boolean assertProgress = true;
     private boolean doSnapshots = true;
     private boolean logInputOutput = true;
     private boolean callComplete = true;
+    private int outputOrdinalCount;
+
     private JetInstance jetInstance;
     private long cooperativeTimeout = COOPERATIVE_TIME_LIMIT_MS_FAIL;
-    private long runUntilCompletedTimeout;
+    private long runUntilOutputMatchesTimeoutMillis = -1;
+    private long runUntilOutputMatchesExtraTimeMillis;
+
+    private BiConsumer<TestMode, List<List<Object>>> assertOutputFn;
 
     private BiPredicate<? super List<?>, ? super List<?>> outputChecker = Objects::equals;
 
@@ -213,7 +225,7 @@ public final class TestSupport {
     /**
      * @param supplier a processor supplier create processor instances
      */
-    public static TestSupport verifyProcessor(@Nonnull DistributedSupplier<Processor> supplier) {
+    public static TestSupport verifyProcessor(@Nonnull SupplierEx<Processor> supplier) {
         return new TestSupport(ProcessorMetaSupplier.of(supplier));
     }
 
@@ -312,28 +324,46 @@ public final class TestSupport {
      * @throws AssertionError if some assertion does not hold
      */
     public void expectOutputs(@Nonnull List<List<?>> expectedOutputs) {
+        assertOutput(
+            expectedOutputs.size(), (mode, actual) -> assertExpectedOutput(mode, expectedOutputs, actual)
+        );
+    }
+
+    /**
+     * Runs the test with the specified custom assertion.
+     * <p>
+     * The consumer takes a list of collected output and the current test mode which
+     * can be used in the assertion message.
+     *
+     * @param outputOrdinalCount how many output ordinals should be created
+     * @param assertFn an assertion function which takes the current mode and the collected output
+     */
+    public void assertOutput(int outputOrdinalCount, BiConsumer<TestMode, List<List<Object>>> assertFn) {
+        assertOutputFn = assertFn;
+        this.outputOrdinalCount = outputOrdinalCount;
         try {
             TestProcessorMetaSupplierContext metaSupplierContext = new TestProcessorMetaSupplierContext();
             if (jetInstance != null) {
                 metaSupplierContext.setJetInstance(jetInstance);
             }
             metaSupplier.init(metaSupplierContext);
-            supplier = metaSupplier.get(singletonList(LOCAL_ADDRESS)).apply(LOCAL_ADDRESS);
+            Address address = jetInstance != null
+                    ? jetInstance.getHazelcastInstance().getCluster().getLocalMember().getAddress() : LOCAL_ADDRESS;
+            supplier = metaSupplier.get(singletonList(address)).apply(address);
             TestProcessorSupplierContext supplierContext = new TestProcessorSupplierContext();
             if (jetInstance != null) {
                 supplierContext.setJetInstance(jetInstance);
             }
             supplier.init(supplierContext);
-            this.expectedOutputs = expectedOutputs;
-            runTest(false, 0, 1);
+            runTest(new TestMode(false, 0, 1));
             if (inputs.stream().mapToInt(List::size).sum() > 0) {
                 // only run this version if there is an input
-                runTest(false, 0, Integer.MAX_VALUE);
+                runTest(new TestMode(false, 0, EdgeConfig.DEFAULT_QUEUE_SIZE));
             }
             if (doSnapshots) {
-                runTest(true, 1, 1);
-                runTest(true, 2, 1);
-                runTest(true, Integer.MAX_VALUE, 1);
+                runTest(new TestMode(true, 1, 1));
+                runTest(new TestMode(true, 2, 1));
+                runTest(new TestMode(true, Integer.MAX_VALUE, 1));
             }
             supplier.close(null);
         } catch (Exception e) {
@@ -354,28 +384,29 @@ public final class TestSupport {
 
     /**
      * Normally, the {@code complete()} method is run repeatedly until it
-     * returns {@code true}. But in infinite source processors the method never
-     * returns {@code true}. To be able test such processors, this method
-     * allows you to disable the "run until completed" behavior and instead run
-     * the {@code complete()} for a specified time.
+     * returns {@code true}. This is suitable for processors processing the
+     * input or for batch sources. However, if you test a streaming source, the
+     * {@code complete()} method never returns {@code true}. To be able to test
+     * such processors, this method allows you to change the behavior to run
+     * {@code complete()} until the output matches.
      * <p>
-     * If the timeout > 0, the {@code complete()} method is called repeatedly
-     * until the timeout elapses. After that, the output is compared using the
-     * {@link #outputChecker(BiPredicate) output checker}. The {@code
-     * complete()} method is also not allowed to return {@code true} in this
-     * case.
+     * The {@code extraTimeMillis} parameter specifies an extra time to call
+     * {@code complete()} after the output matches. It can be used to ensure
+     * that no more items are produced after the output matches.
      * <p>
-     * If the timeout is <= 0 (the default), {@code complete()} method is
-     * called until it returns {@code true}, after which the output is checked.
-     * <p>
-     * Has no effect if {@code complete()} call is {@link #disableCompleteCall()
-     * disabled}.
+     * Has no effect if calling {@code complete()} is {@linkplain
+     * #disableCompleteCall() disabled}.
      *
-     * @param timeoutMillis how long to wait until outputs match
+     * @param timeoutMillis maximum time to wait for the output to match
+     * @param extraTimeMillis for how long to call {@code complete()}
+     *                       after the output matches
      * @return {@code this} instance for fluent API
      */
-    public TestSupport disableRunUntilCompleted(long timeoutMillis) {
-        this.runUntilCompletedTimeout = timeoutMillis;
+    public TestSupport runUntilOutputMatches(long timeoutMillis, long extraTimeMillis) {
+        checkNotNegative(timeoutMillis, "timeoutMillis must be >= 0");
+        checkNotNegative(extraTimeMillis, "extraTimeMillis must be >= 0");
+        this.runUntilOutputMatchesTimeoutMillis = timeoutMillis;
+        this.runUntilOutputMatchesExtraTimeMillis = extraTimeMillis;
         return this;
     }
 
@@ -454,30 +485,17 @@ public final class TestSupport {
         return this;
     }
 
-    private static String modeDescription(boolean doSnapshots, int doRestoreEvery, int inboxLimit) {
-        String sInboxSize = inboxLimit == Integer.MAX_VALUE ? "unlimited" : String.valueOf(inboxLimit);
-        if (!doSnapshots && doRestoreEvery == 0) {
-            return "snapshots disabled, inboxLimit=" + sInboxSize;
-        } else if (doSnapshots && doRestoreEvery == 1) {
-            assert inboxLimit == 1;
-            return "snapshots enabled, restoring every snapshot";
-        } else if (doSnapshots && doRestoreEvery == 2) {
-            assert inboxLimit == 1;
-            return "snapshots enabled, restoring every other snapshot";
-        } else if (doSnapshots && doRestoreEvery == Integer.MAX_VALUE) {
-            return "snapshots enabled, never restoring them, inboxLimit=" + sInboxSize;
-        } else {
-            throw new IllegalArgumentException("Unknown mode, doSnapshots=" + doSnapshots + ", doRestoreEvery="
-                    + doRestoreEvery);
-        }
-    }
+    private void runTest(TestMode testMode) throws Exception {
+        assert testMode.isSnapshotsEnabled() || testMode.snapshotRestoreInterval() == 0
+            : "Illegal combination: don't do snapshots, but do restore";
 
-    private void runTest(boolean doSnapshots, int doRestoreEvery, int inboxLimit) throws Exception {
-        assert doSnapshots || doRestoreEvery == 0 : "Illegal combination: don't do snapshots, but do restore";
+        boolean doSnapshots = testMode.doSnapshots;
+        int doRestoreEvery = testMode.restoreInterval;
+
         IdleStrategy idler = new BackoffIdleStrategy(0, 0, MICROSECONDS.toNanos(1),
                 MILLISECONDS.toNanos(1));
         int idleCount = 0;
-        System.out.println("### Running the test, mode=" + modeDescription(doSnapshots, doRestoreEvery, inboxLimit));
+        System.out.println("### Running the test, mode=" + testMode.toString());
 
         TestInbox inbox = new TestInbox();
         int inboxOrdinal = -1;
@@ -486,9 +504,9 @@ public final class TestSupport {
 
         // we'll use 1-capacity outbox to test outbox rejection
         TestOutbox[] outbox = {createOutbox()};
-        List<List<Object>> actualOutputs = new ArrayList<>(expectedOutputs.size());
-        for (int i = 0; i < expectedOutputs.size(); i++) {
-            actualOutputs.add(new ArrayList());
+        List<List<Object>> actualOutputs = new ArrayList<>(outputOrdinalCount);
+        for (int i = 0; i < outputOrdinalCount; i++) {
+            actualOutputs.add(new ArrayList<>());
         }
 
         // create instance of your processor and call the init() method
@@ -507,7 +525,7 @@ public final class TestSupport {
                 inboxOrdinal = input.get(inputPosition).ordinal;
                 for (int added = 0;
                         inputPosition < input.size()
-                                && added < inboxLimit
+                                && added < testMode.inboxSize()
                                 && inboxOrdinal == input.get(inputPosition).ordinal
                                 && (added == 0 || !(input.get(inputPosition).item instanceof Watermark));
                         added++
@@ -523,10 +541,11 @@ public final class TestSupport {
             int lastInboxSize = inbox.size();
             String methodName;
             methodName = processInbox(inbox, inboxOrdinal, isCooperative, processor);
-            boolean madeProgress = inbox.size() < lastInboxSize || !outbox[0].queue(0).isEmpty();
+            boolean madeProgress = inbox.size() < lastInboxSize ||
+                (outbox[0].bucketCount() > 0 && !outbox[0].queue(0).isEmpty());
             assertTrue(methodName + "() call without progress", !assertProgress || madeProgress);
             idleCount = idle(idler, idleCount, madeProgress);
-            if (outbox[0].queue(0).size() == 1 && !inbox.isEmpty()) {
+            if (outbox[0].bucketCount() > 0 && outbox[0].queue(0).size() == 1 && !inbox.isEmpty()) {
                 // if the outbox is full, call the process() method again. Cooperative
                 // processor must be able to cope with this situation and not try to put
                 // more items to the outbox.
@@ -546,11 +565,12 @@ public final class TestSupport {
         // call the complete() method
         if (callComplete) {
             long completeStart = System.nanoTime();
+            long outputMatchedAt = Long.MAX_VALUE;
             boolean[] done = {false};
-            double elapsed;
             do {
-                checkTime("complete", isCooperative, () -> done[0] = processor[0].complete());
-                boolean madeProgress = done[0] || !outbox[0].queue(0).isEmpty();
+                doCall("complete", isCooperative, () -> done[0] = processor[0].complete());
+                boolean madeProgress = done[0] ||
+                    (outbox[0].bucketCount() > 0 && !outbox[0].queue(0).isEmpty());
                 assertTrue("complete() call without progress", !assertProgress || madeProgress);
                 outbox[0].drainQueuesAndReset(actualOutputs, logInputOutput);
                 if (outbox[0].hasUnfinishedItem()) {
@@ -562,24 +582,40 @@ public final class TestSupport {
                             doRestoreEvery, restoreCount);
                 }
                 idleCount = idle(idler, idleCount, madeProgress);
-                if (runUntilCompletedTimeout > 0) {
-                    elapsed = toMillis(System.nanoTime() - completeStart);
-                    if (elapsed > runUntilCompletedTimeout) {
+                long now = System.nanoTime();
+                if (runUntilOutputMatchesTimeoutMillis >= 0) {
+                    try {
+                        assertOutputFn.accept(testMode, actualOutputs);
+                        outputMatchedAt = Math.min(outputMatchedAt, now);
+                    } catch (AssertionError e) {
+                        if (outputMatchedAt < Long.MAX_VALUE) {
+                            throw new AssertionError("the output already matched, but doesn't match now", e);
+                        }
+                        // ignore the failure otherwise and continue calling complete()
+                    }
+                    long elapsedSinceStart = NANOSECONDS.toMillis(now - completeStart);
+                    long elapsedSinceMatch = NANOSECONDS.toMillis(subtractClamped(now, outputMatchedAt));
+                    if (elapsedSinceStart > runUntilOutputMatchesTimeoutMillis
+                            || elapsedSinceMatch > runUntilOutputMatchesExtraTimeMillis) {
                         break;
                     }
                 }
             } while (!done[0]);
-            assertTrue("complete returned true", !done[0] || runUntilCompletedTimeout <= 0);
+            assertTrue("complete returned true in a run-until-output-matches mode",
+                    !done[0] || runUntilOutputMatchesTimeoutMillis <= 0);
         }
 
         processor[0].close();
 
-        // assert the outbox
-        for (int i = 0; i < expectedOutputs.size(); i++) {
-            List<?> expectedOutput = expectedOutputs.get(i);
-            List<?> actualOutput = actualOutputs.get(i);
+        assertOutputFn.accept(testMode, actualOutputs);
+    }
+
+    private void assertExpectedOutput(TestMode mode, List<List<?>> expected , List<List<Object>> actual) {
+        for (int i = 0; i < expected.size(); i++) {
+            List<?> expectedOutput = expected.get(i);
+            List<?> actualOutput = actual.get(i);
             if (!outputChecker.test(expectedOutput, actualOutput)) {
-                assertEquals("processor output in mode \"" + modeDescription(doSnapshots, doRestoreEvery, inboxLimit)
+                assertEquals("processor output in mode \"" + mode
                         + "\" doesn't match", listToString(expectedOutput), listToString(actualOutput));
             }
         }
@@ -621,20 +657,20 @@ public final class TestSupport {
     }
 
     private TestOutbox createOutbox() {
-        return new TestOutbox(IntStream.generate(() -> 1).limit(expectedOutputs.size()).toArray(), 1);
+        return new TestOutbox(IntStream.generate(() -> 1).limit(outputOrdinalCount).toArray(), 1);
     }
 
     private String processInbox(TestInbox inbox, int inboxOrdinal, boolean isCooperative, Processor[] processor) {
         if (inbox.peek() instanceof Watermark) {
             Watermark wm = ((Watermark) inbox.peek());
-            checkTime("tryProcessWatermark", isCooperative, () -> {
+            doCall("tryProcessWatermark", isCooperative, () -> {
                 if (processor[0].tryProcessWatermark(wm)) {
                     inbox.remove();
                 }
             });
             return "tryProcessWatermark";
         } else {
-            checkTime("process", isCooperative, () -> processor[0].process(inboxOrdinal, inbox));
+            doCall("process", isCooperative, () -> processor[0].process(inboxOrdinal, inbox));
             return "process";
         }
     }
@@ -672,7 +708,7 @@ public final class TestSupport {
         boolean[] done = {false};
         boolean isCooperative = processor[0].isCooperative();
         do {
-            checkTime("saveSnapshot", isCooperative, () -> done[0] = processor[0].saveToSnapshot());
+            doCall("saveSnapshot", isCooperative, () -> done[0] = processor[0].saveToSnapshot());
             assertTrue("saveToSnapshot() call without progress",
                     !assertProgress || done[0] || !outbox[0].snapshotQueue().isEmpty()
                             || !outbox[0].queue(0).isEmpty());
@@ -694,7 +730,7 @@ public final class TestSupport {
 
         int lastInboxSize = snapshotInbox.queue().size();
         while (!snapshotInbox.isEmpty()) {
-            checkTime("restoreSnapshot", isCooperative,
+            doCall("restoreSnapshot", isCooperative,
                     () -> processor[0].restoreFromSnapshot(snapshotInbox));
             assertTrue("restoreFromSnapshot() call without progress",
                     !assertProgress
@@ -704,7 +740,7 @@ public final class TestSupport {
             lastInboxSize = snapshotInbox.queue().size();
         }
         do {
-            checkTime("finishSnapshotRestore", isCooperative,
+            doCall("finishSnapshotRestore", isCooperative,
                     () -> done[0] = processor[0].finishSnapshotRestore());
             assertTrue("finishSnapshotRestore() call without progress",
                     !assertProgress || done[0] || !outbox[0].queue(0).isEmpty());
@@ -712,7 +748,7 @@ public final class TestSupport {
         } while (!done[0]);
     }
 
-    private void checkTime(String methodName, boolean isCooperative, Runnable r) {
+    private void doCall(String methodName, boolean isCooperative, Runnable r) {
         long start = System.nanoTime();
         r.run();
         long elapsed = System.nanoTime() - start;
@@ -826,6 +862,66 @@ public final class TestSupport {
         ObjectWithOrdinal(int ordinal, Object item) {
             this.ordinal = ordinal;
             this.item = item;
+        }
+    }
+
+    /**
+     * Describes the current test mode.
+     */
+    public static final class TestMode {
+
+        private final boolean doSnapshots;
+        private final int restoreInterval;
+        private final int inboxLimit;
+
+        /**
+         * Construct a new instance.
+         */
+        private TestMode(boolean doSnapshots, int restoreInterval, int inboxLimit) {
+            this.doSnapshots = doSnapshots;
+            this.restoreInterval = restoreInterval;
+            this.inboxLimit = inboxLimit;
+        }
+
+        /**
+         * Are snapshots enabled.
+         */
+        public boolean isSnapshotsEnabled() {
+            return doSnapshots;
+        }
+
+        /**
+         * How often the snapshot is restored. 1 means restore every snapshot,
+         * 2 every other snapshot.
+         */
+        public int snapshotRestoreInterval() {
+            return restoreInterval;
+        }
+
+        /**
+         * Size limit of the inbox.
+         */
+        public int inboxSize() {
+            return inboxLimit;
+        }
+
+        @Override
+        public String toString() {
+            String sInboxSize = inboxLimit == Integer.MAX_VALUE ? "unlimited" : String.valueOf(inboxLimit);
+            if (!doSnapshots && restoreInterval == 0) {
+                return "snapshots disabled, inboxLimit=" + sInboxSize;
+            } else if (doSnapshots && restoreInterval == 1) {
+                assert inboxLimit == 1;
+                return "snapshots enabled, restoring every snapshot";
+            } else if (doSnapshots && restoreInterval == 2) {
+                assert inboxLimit == 1;
+                return "snapshots enabled, restoring every other snapshot";
+            } else if (doSnapshots && restoreInterval == Integer.MAX_VALUE) {
+                return "snapshots enabled, never restoring them, inboxLimit=" + sInboxSize;
+            } else {
+                throw new IllegalArgumentException("Unknown mode, doSnapshots=" + doSnapshots + ", restoreInterval="
+                    + restoreInterval + ", inboxLimit=" + inboxLimit);
+            }
         }
     }
 }

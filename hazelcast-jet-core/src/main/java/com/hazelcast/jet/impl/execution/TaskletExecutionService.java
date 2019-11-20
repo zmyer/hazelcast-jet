@@ -16,15 +16,22 @@
 
 package com.hazelcast.jet.impl.execution;
 
+import com.hazelcast.internal.metrics.MetricDescriptor;
+import com.hazelcast.internal.metrics.MetricsRegistry;
 import com.hazelcast.internal.metrics.Probe;
+import com.hazelcast.internal.util.concurrent.BackoffIdleStrategy;
+import com.hazelcast.internal.util.concurrent.IdleStrategy;
 import com.hazelcast.jet.JetException;
-import com.hazelcast.jet.impl.exception.ShutdownInProgressException;
+import com.hazelcast.jet.core.metrics.MetricTags;
+import com.hazelcast.jet.impl.metrics.MetricsImpl;
 import com.hazelcast.jet.impl.util.NonCompletableFuture;
 import com.hazelcast.jet.impl.util.ProgressState;
+import com.hazelcast.jet.impl.util.ProgressTracker;
+import com.hazelcast.jet.impl.util.Util;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.spi.impl.NodeEngineImpl;
-import com.hazelcast.util.concurrent.BackoffIdleStrategy;
-import com.hazelcast.util.concurrent.IdleStrategy;
+import com.hazelcast.spi.properties.HazelcastProperties;
+import com.hazelcast.spi.properties.HazelcastProperty;
 
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
@@ -42,7 +49,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Consumer;
 
+import static com.hazelcast.jet.core.JetProperties.JET_IDLE_COOPERATIVE_MAX_MICROSECONDS;
+import static com.hazelcast.jet.core.JetProperties.JET_IDLE_COOPERATIVE_MIN_MICROSECONDS;
+import static com.hazelcast.jet.core.JetProperties.JET_IDLE_NONCOOPERATIVE_MAX_MICROSECONDS;
+import static com.hazelcast.jet.core.JetProperties.JET_IDLE_NONCOOPERATIVE_MIN_MICROSECONDS;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.withTryCatch;
 import static com.hazelcast.jet.impl.util.LoggingUtil.logFinest;
@@ -51,20 +63,11 @@ import static com.hazelcast.jet.impl.util.Util.uncheckRun;
 import static java.lang.Thread.currentThread;
 import static java.util.Collections.emptyList;
 import static java.util.concurrent.Executors.newCachedThreadPool;
-import static java.util.concurrent.TimeUnit.MICROSECONDS;
-import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static java.util.regex.Matcher.quoteReplacement;
-import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.partitioningBy;
 import static java.util.stream.Collectors.toList;
 
 public class TaskletExecutionService {
-
-    private static final IdleStrategy IDLER_COOPERATIVE =
-            new BackoffIdleStrategy(0, 0, MICROSECONDS.toNanos(1), MILLISECONDS.toNanos(1));
-    private static final IdleStrategy IDLER_NON_COOPERATIVE =
-            new BackoffIdleStrategy(0, 0, MICROSECONDS.toNanos(1), MILLISECONDS.toNanos(5));
 
     private final ExecutorService blockingTaskletExecutor = newCachedThreadPool(new BlockingTaskThreadFactory());
     private final CooperativeWorker[] cooperativeWorkers;
@@ -72,42 +75,49 @@ public class TaskletExecutionService {
     private final String hzInstanceName;
     private final ILogger logger;
     private int cooperativeThreadIndex;
-    @Probe
+    @Probe(name = "blockingWorkerCount")
     private final AtomicInteger blockingWorkerCount = new AtomicInteger();
-
-    // tri-state boolean:
-    // - null: not shut down
-    // - FALSE: shut down forcefully: break the execution loop, don't wait for tasklets to finish
-    // - TRUE: shut down gracefully: run normally, don't accept more tasklets
-    private final AtomicReference<Boolean> gracefulShutdown = new AtomicReference<>(null);
+    private volatile boolean isShutdown;
     private final Object lock = new Object();
+    private volatile IdleStrategy idlerCooperative;
+    private volatile IdleStrategy idlerNonCooperative;
 
-    public TaskletExecutionService(NodeEngineImpl nodeEngine, int threadCount) {
+    public TaskletExecutionService(NodeEngineImpl nodeEngine, int threadCount, HazelcastProperties properties) {
         this.hzInstanceName = nodeEngine.getHazelcastInstance().getName();
         this.cooperativeWorkers = new CooperativeWorker[threadCount];
         this.cooperativeThreadPool = new Thread[threadCount];
         this.logger = nodeEngine.getLoggingService().getLogger(TaskletExecutionService.class);
 
-        nodeEngine.getMetricsRegistry().newProbeBuilder()
-                       .withTag("module", "jet")
-                       .scanAndRegister(this);
+        idlerCooperative = createIdler(
+            properties, JET_IDLE_COOPERATIVE_MIN_MICROSECONDS, JET_IDLE_COOPERATIVE_MAX_MICROSECONDS
+        );
+        idlerNonCooperative = createIdler(
+            properties, JET_IDLE_NONCOOPERATIVE_MIN_MICROSECONDS, JET_IDLE_NONCOOPERATIVE_MAX_MICROSECONDS
+        );
 
         Arrays.setAll(cooperativeWorkers, i -> new CooperativeWorker());
         Arrays.setAll(cooperativeThreadPool, i -> new Thread(cooperativeWorkers[i],
                 String.format("hz.%s.jet.cooperative.thread-%d", hzInstanceName, i)));
         Arrays.stream(cooperativeThreadPool).forEach(Thread::start);
+
+        // register metrics
+        MetricsRegistry registry = nodeEngine.getMetricsRegistry();
+        MetricDescriptor descriptor = registry.newMetricDescriptor()
+                                                     .withTag(MetricTags.MODULE, "jet");
+
+        registry.registerStaticMetrics(descriptor, this);
         for (int i = 0; i < cooperativeWorkers.length; i++) {
-            nodeEngine.getMetricsRegistry().newProbeBuilder()
-                           .withTag("module", "jet")
-                           .withTag("cooperativeWorker", String.valueOf(i))
-                           .scanAndRegister(cooperativeWorkers[i]);
+            registry.registerStaticMetrics(
+                    descriptor.withDiscriminator(MetricTags.COOPERATIVE_WORKER, String.valueOf(i)),
+                    cooperativeWorkers[i]
+            );
         }
     }
 
     /**
      * Submits the tasklets for execution and returns a future which gets
      * completed when the execution of all the tasklets has completed. If an
-     * exception occurrs or the execution gets cancelled, the future will be
+     * exception occurs or the execution gets cancelled, the future will be
      * completed exceptionally, but only after all the tasklets have finished
      * executing. The returned future does not support cancellation, instead
      * the supplied {@code cancellationFuture} should be used.
@@ -121,9 +131,6 @@ public class TaskletExecutionService {
             @Nonnull CompletableFuture<Void> cancellationFuture,
             @Nonnull ClassLoader jobClassLoader
     ) {
-        if (gracefulShutdown.get() != null) {
-            throw new ShutdownInProgressException();
-        }
         final ExecutionTracker executionTracker = new ExecutionTracker(tasklets.size(), cancellationFuture);
         try {
             final Map<Boolean, List<Tasklet>> byCooperation =
@@ -136,14 +143,9 @@ public class TaskletExecutionService {
         return executionTracker.future;
     }
 
-    public void shutdown(boolean graceful) {
-        if (gracefulShutdown.compareAndSet(null, graceful)) {
-            if (graceful) {
-                blockingTaskletExecutor.shutdown();
-            } else {
-                blockingTaskletExecutor.shutdownNow();
-            }
-        }
+    public void shutdown() {
+        isShutdown = true;
+        blockingTaskletExecutor.shutdownNow();
     }
 
     private void submitBlockingTasklets(ExecutionTracker executionTracker, ClassLoader jobClassLoader,
@@ -155,9 +157,9 @@ public class TaskletExecutionService {
                 .map(blockingTaskletExecutor::submit)
                 .collect(toList());
 
-        // do not return from this method until all workers have started. Otherwise
+        // Do not return from this method until all workers have started. Otherwise
         // on cancellation there is a race where the executor might not have started
-        // the worker yet. This would results in taskletDone() never being called for
+        // the worker yet. This would result in taskletDone() never being called for
         // a worker.
         uncheckRun(startedLatch::await);
     }
@@ -168,9 +170,8 @@ public class TaskletExecutionService {
         @SuppressWarnings("unchecked")
         final List<TaskletTracker>[] trackersByThread = new List[cooperativeWorkers.length];
         Arrays.setAll(trackersByThread, i -> new ArrayList());
-        for (Tasklet t : tasklets) {
-            t.init();
-        }
+        Util.doWithClassLoader(jobClassLoader, () ->
+                tasklets.forEach(Tasklet::init));
 
         // We synchronize so that no two jobs submit their tasklets in
         // parallel. If two jobs submit in parallel, the tasklets of one of
@@ -188,20 +189,11 @@ public class TaskletExecutionService {
         Arrays.stream(cooperativeThreadPool).forEach(LockSupport::unpark);
     }
 
-    private String trackersToString() {
-        return Arrays.stream(cooperativeWorkers)
-                     .flatMap(w -> w.trackers.stream())
-                     .map(Object::toString)
-                     .sorted()
-                     .collect(joining("\n"))
-                + "\n-----------------";
-    }
-
     /**
      * Blocks until all workers terminate (cooperative & blocking).
      */
     public void awaitWorkerTermination() {
-        assert gracefulShutdown.get() != null : "Not shut down";
+        assert isShutdown : "Not shut down";
         try {
             while (!blockingTaskletExecutor.awaitTermination(1, TimeUnit.MINUTES)) {
                 logger.warning("Blocking tasklet executor did not terminate in 1 minute");
@@ -212,6 +204,28 @@ public class TaskletExecutionService {
         } catch (InterruptedException e) {
             sneakyThrow(e);
         }
+    }
+
+    private BackoffIdleStrategy createIdler(
+        HazelcastProperties props, HazelcastProperty minProp, HazelcastProperty maxProp
+    ) {
+        int min = props.getInteger(minProp);
+        int max = props.getInteger(maxProp);
+        String minName = minProp.getName();
+        String maxName = maxProp.getName();
+        if (min >= max) {
+            logger.warning(
+                String.format(
+                    "The property %s must be set less than or equal to %s but current values are: %s=%d, %s=%d." +
+                        " Using minimum value as maximum instead.",
+                    minName, maxName, minName, min, maxName, max));
+            max = min;
+        }
+
+        logger.info(String.format("Creating idler with %s=%dµs,%s=%dµs", minName, min, maxName, max));
+        return new BackoffIdleStrategy(0, 0,
+            minProp.getTimeUnit().toNanos(min), maxProp.getTimeUnit().toNanos(max)
+        );
     }
 
     private final class BlockingWorker implements Runnable {
@@ -227,15 +241,13 @@ public class TaskletExecutionService {
         public void run() {
             final ClassLoader clBackup = currentThread().getContextClassLoader();
             final Tasklet t = tracker.tasklet;
-            final String oldName = currentThread().getName();
             currentThread().setContextClassLoader(tracker.jobClassLoader);
+            IdleStrategy idlerLocal = idlerNonCooperative;
+            MetricsImpl.Container userMetricsContextContainer = MetricsImpl.container();
 
-            // swap the thread name by replacing the ".thread-NN" part at the end
             try {
-                currentThread().setName(oldName.replaceAll(".thread-[0-9]+$", quoteReplacement("." + tracker.tasklet)));
-                assert !oldName.equals(currentThread().getName()) : "unexpected thread name pattern: " + oldName;
                 blockingWorkerCount.incrementAndGet();
-
+                userMetricsContextContainer.setContext(t.getMetricsContext());
                 startedLatch.countDown();
                 t.init();
                 long idleCount = 0;
@@ -245,18 +257,18 @@ public class TaskletExecutionService {
                     if (result.isMadeProgress()) {
                         idleCount = 0;
                     } else {
-                        IDLER_NON_COOPERATIVE.idle(++idleCount);
+                        idlerLocal.idle(++idleCount);
                     }
                 } while (!result.isDone()
                         && !tracker.executionTracker.executionCompletedExceptionally()
-                        && !Boolean.FALSE.equals(gracefulShutdown.get()));
+                        && !isShutdown);
             } catch (Throwable e) {
                 logger.warning("Exception in " + t, e);
                 tracker.executionTracker.exception(new JetException("Exception in " + t + ": " + e, e));
             } finally {
                 blockingWorkerCount.decrementAndGet();
+                userMetricsContextContainer.setContext(null);
                 currentThread().setContextClassLoader(clBackup);
-                currentThread().setName(oldName);
                 tracker.executionTracker.taskletDone();
             }
         }
@@ -266,9 +278,17 @@ public class TaskletExecutionService {
         private static final int COOPERATIVE_LOGGING_THRESHOLD = 5;
 
         @Probe(name = "taskletCount")
-        private final List<TaskletTracker> trackers;
-        @Probe
+        private final CopyOnWriteArrayList<TaskletTracker> trackers;
+        @Probe(name = "iterationCount")
         private final AtomicLong iterationCount = new AtomicLong();
+
+        private final ProgressTracker progressTracker = new ProgressTracker();
+        // prevent lambda allocation on each iteration
+        private final Consumer<TaskletTracker> runTasklet = this::runTasklet;
+
+        private boolean finestLogEnabled;
+        private Thread myThread;
+        private MetricsImpl.Container userMetricsContextContainer;
 
         CooperativeWorker() {
             this.trackers = new CopyOnWriteArrayList<>();
@@ -276,55 +296,58 @@ public class TaskletExecutionService {
 
         @Override
         public void run() {
-            final Thread thread = currentThread();
-            long idleCount = 0;
-            while (true) {
-                Boolean gracefulShutdownLocal = gracefulShutdown.get();
-                // exit condition
-                if (gracefulShutdownLocal != null && (!gracefulShutdownLocal || trackers.isEmpty())) {
-                    break;
-                }
-                boolean madeProgress = false;
-                for (TaskletTracker t : trackers) {
-                    long start = 0;
-                    if (logger.isFinestEnabled()) {
-                        start = System.nanoTime();
-                    }
-                    try {
-                        thread.setContextClassLoader(t.jobClassLoader);
-                        final ProgressState result = t.tasklet.call();
-                        if (result.isDone()) {
-                            dismissTasklet(t);
-                        } else {
-                            madeProgress |= result.isMadeProgress();
-                        }
-                    } catch (Throwable e) {
-                        logger.warning("Exception in " + t.tasklet, e);
-                        t.executionTracker.exception(new JetException("Exception in " + t.tasklet + ": " + e, e));
-                    }
-                    if (t.executionTracker.executionCompletedExceptionally()) {
-                        dismissTasklet(t);
-                    }
+            myThread = currentThread();
+            userMetricsContextContainer = MetricsImpl.container();
 
-                    if (logger.isFinestEnabled()) {
-                        long elapsedMs = NANOSECONDS.toMillis((System.nanoTime() - start));
-                        if (elapsedMs > COOPERATIVE_LOGGING_THRESHOLD) {
-                            logger.finest("Cooperative tasklet call of '" + t.tasklet + "' took more than "
-                                    + COOPERATIVE_LOGGING_THRESHOLD + " ms: " + elapsedMs + "ms");
-                        }
-                    }
-                }
+            IdleStrategy idlerLocal = idlerCooperative;
+            long idleCount = 0;
+
+            while (!isShutdown) {
+                finestLogEnabled = logger.isFinestEnabled();
+                progressTracker.reset();
+                // garbage-free iteration -- relies on implementation in COWArrayList that doesn't use an Iterator
+                trackers.forEach(runTasklet);
                 lazyIncrement(iterationCount);
-                if (madeProgress) {
+                if (progressTracker.isMadeProgress()) {
                     idleCount = 0;
                 } else {
-                    IDLER_COOPERATIVE.idle(++idleCount);
+                    idlerLocal.idle(++idleCount);
                 }
             }
-            // Best-effort attempt to release all tasklets. A tasklet can still be added
-            // to a dead worker through work stealing.
             trackers.forEach(t -> t.executionTracker.taskletDone());
             trackers.clear();
+        }
+
+        private void runTasklet(TaskletTracker t) {
+            long start = 0;
+            if (finestLogEnabled) {
+                start = System.nanoTime();
+            }
+            try {
+                myThread.setContextClassLoader(t.jobClassLoader);
+                userMetricsContextContainer.setContext(t.tasklet.getMetricsContext());
+                final ProgressState result = t.tasklet.call();
+                if (result.isDone()) {
+                    dismissTasklet(t);
+                }
+                progressTracker.mergeWith(result);
+            } catch (Throwable e) {
+                logger.warning("Exception in " + t.tasklet, e);
+                t.executionTracker.exception(new JetException("Exception in " + t.tasklet + ": " + e, e));
+            } finally {
+                userMetricsContextContainer.setContext(null);
+            }
+            if (t.executionTracker.executionCompletedExceptionally()) {
+                dismissTasklet(t);
+            }
+
+            if (finestLogEnabled) {
+                long elapsedMs = NANOSECONDS.toMillis((System.nanoTime() - start));
+                if (elapsedMs > COOPERATIVE_LOGGING_THRESHOLD) {
+                    logger.finest("Cooperative tasklet call of '" + t.tasklet + "' took more than "
+                            + COOPERATIVE_LOGGING_THRESHOLD + " ms: " + elapsedMs + "ms");
+                }
+            }
         }
 
         private void dismissTasklet(TaskletTracker t) {
@@ -381,7 +404,7 @@ public class TaskletExecutionService {
                     e = new IllegalStateException("cancellationFuture should be completed exceptionally");
                 }
                 exception(e);
-                blockingFutures.forEach(f -> f.cancel(true)); // CompletableFuture.cancel ignores the flag
+                blockingFutures.forEach(f -> f.cancel(true));
             }));
         }
 
@@ -404,5 +427,4 @@ public class TaskletExecutionService {
             return executionException.get() != null;
         }
     }
-
 }

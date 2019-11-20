@@ -33,7 +33,6 @@ public class SnapshotContext {
 
     private final ILogger logger;
 
-    private final long jobId;
     private final String jobNameAndExecutionId;
     private final ProcessingGuarantee guarantee;
 
@@ -103,10 +102,9 @@ public class SnapshotContext {
     private final AtomicLong totalChunks = new AtomicLong();
     private boolean isCancelled;
 
-    public SnapshotContext(ILogger logger, long jobId, String jobNameAndExecutionId, long activeSnapshotId,
+    public SnapshotContext(ILogger logger, String jobNameAndExecutionId, long activeSnapshotId,
                            ProcessingGuarantee guarantee
     ) {
-        this.jobId = jobId;
         this.jobNameAndExecutionId = jobNameAndExecutionId;
         this.activeSnapshotId = currentSnapshotId = activeSnapshotId;
         this.guarantee = guarantee;
@@ -157,8 +155,16 @@ public class SnapshotContext {
      */
     synchronized CompletableFuture<SnapshotOperationResult> startNewSnapshot(
             long snapshotId, String mapName, boolean isTerminal) {
+        if (snapshotId == currentSnapshotId) {
+            // This is possible when a SnapshotOperation is retried. We will throw because we
+            // don't know the result of the previous snapshot (it may have failed) and this is rare
+            // if not impossible.
+            throw new RuntimeException("new snapshotId equal to previous, operation possibly retried. Previous="
+                    + currentSnapshotId + ", new=" + snapshotId);
+        }
         assert snapshotId == currentSnapshotId + 1
-                : "new snapshotId not incremented by 1. Previous=" + currentSnapshotId + ", new=" + snapshotId;
+                : "New snapshotId for " + jobNameAndExecutionId + " not incremented by 1. " +
+                        "Previous=" + currentSnapshotId + ", new=" + snapshotId;
         assert currentSnapshotId == activeSnapshotId : "last snapshot was postponed but not started";
         assert numTasklets >= 0 : "numTasklets=" + numTasklets;
         if (isCancelled) {
@@ -274,7 +280,7 @@ public class SnapshotContext {
     }
 
     // public-visible for tests
-    public AtomicInteger getNumRemainingTasklets() {
+    AtomicInteger getNumRemainingTasklets() {
         return numRemainingTasklets;
     }
 }

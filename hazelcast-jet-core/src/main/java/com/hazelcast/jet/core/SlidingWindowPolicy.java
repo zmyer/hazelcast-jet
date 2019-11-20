@@ -16,16 +16,16 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.util.Preconditions;
+import com.hazelcast.internal.util.Preconditions;
 
 import java.io.Serializable;
 
+import static com.hazelcast.internal.util.Preconditions.checkNotNegative;
+import static com.hazelcast.internal.util.Preconditions.checkPositive;
+import static com.hazelcast.internal.util.Preconditions.checkTrue;
 import static com.hazelcast.jet.impl.util.Util.addClamped;
 import static com.hazelcast.jet.impl.util.Util.subtractClamped;
 import static com.hazelcast.jet.impl.util.Util.sumHadOverflow;
-import static com.hazelcast.util.Preconditions.checkNotNegative;
-import static com.hazelcast.util.Preconditions.checkPositive;
-import static com.hazelcast.util.Preconditions.checkTrue;
 import static java.lang.Math.floorMod;
 
 /**
@@ -43,6 +43,8 @@ import static java.lang.Math.floorMod;
  * A frame is labelled with its timestamp, which is the first timestamp
  * value beyond the range covered by the frame. That timestamp denotes the
  * exact moment on the event timeline where the frame was closed.
+ *
+ * @since 3.0
  */
 public class SlidingWindowPolicy implements Serializable {
     private static final long serialVersionUID = 1L;

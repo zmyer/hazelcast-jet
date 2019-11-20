@@ -43,40 +43,33 @@ import java.util.Set;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ADAPT_TO_JET_EVENT;
-import static com.hazelcast.jet.impl.pipeline.Planner.uniqueName;
+import static com.hazelcast.jet.impl.util.Util.addOrIncrementIndexInName;
 import static com.hazelcast.jet.impl.util.Util.escapeGraphviz;
 import static java.util.stream.Collectors.toList;
 
 public class PipelineImpl implements Pipeline {
 
-    private static final GeneralStage[] NO_STAGES = {};
     private final Map<Transform, List<Transform>> adjacencyMap = new LinkedHashMap<>();
 
     @Nonnull @Override
     @SuppressWarnings("unchecked")
-    public <T> BatchStage<T> drawFrom(@Nonnull BatchSource<? extends T> source) {
-        return new BatchStageImpl<>((BatchSourceTransform<? extends T>) source, this);
+    public <T> BatchStage<T> readFrom(@Nonnull BatchSource<? extends T> source) {
+        BatchSourceTransform<? extends T> xform = (BatchSourceTransform<? extends T>) source;
+        xform.onAssignToStage();
+        return new BatchStageImpl<>(xform, this);
     }
 
     @Nonnull @Override
     @SuppressWarnings("unchecked")
-    public <T> StreamSourceStage<T> drawFrom(@Nonnull StreamSource<? extends T> source) {
+    public <T> StreamSourceStage<T> readFrom(@Nonnull StreamSource<? extends T> source) {
         StreamSourceTransform<T> xform = (StreamSourceTransform<T>) source;
+        xform.onAssignToStage();
         return new StreamSourceStageImpl<>(xform, this);
     }
 
+    @Nonnull
     @Override
-    @SuppressWarnings("unchecked")
-    public <T> SinkStage drainTo(
-            @Nonnull Sink<? super T> sink,
-            @Nonnull GeneralStage<? extends T> stage0,
-            @Nonnull GeneralStage<? extends T> stage1
-    ) {
-        return drainTo(sink, stage0, stage1, (GeneralStage<? extends T>[]) NO_STAGES);
-    }
-
-    @Override
-    public <T> SinkStage drainTo(
+    public <T> SinkStage writeTo(
             @Nonnull Sink<? super T> sink,
             @Nonnull GeneralStage<? extends T> stage0,
             @Nonnull GeneralStage<? extends T> stage1,
@@ -122,20 +115,16 @@ public class PipelineImpl implements Pipeline {
 
     @Nonnull @Override
     public String toDotString() {
+        makeNamesUnique();
         Map<Transform, List<Transform>> adjMap = this.adjacencyMap();
         Map<Transform, String> transformNames = new HashMap<>();
-        Set<String> knownNames = new HashSet<>();
         final StringBuilder builder = new StringBuilder(256);
         builder.append("digraph Pipeline {\n");
         for (Entry<Transform, List<Transform>> entry : adjMap.entrySet()) {
             Transform src = entry.getKey();
-            String srcName = transformNames.computeIfAbsent(
-                    src, t -> uniqueName(knownNames, t.name())
-            );
+            String srcName = transformNames.computeIfAbsent(src, Transform::name);
             for (Transform dest : entry.getValue()) {
-                String destName = transformNames.computeIfAbsent(
-                        dest, t -> uniqueName(knownNames, t.name())
-                );
+                String destName = transformNames.computeIfAbsent(dest, Transform::name);
                 builder.append("\t")
                        .append("\"").append(escapeGraphviz(srcName)).append("\"")
                        .append(" -> ")
@@ -155,6 +144,16 @@ public class PipelineImpl implements Pipeline {
 
     void register(Transform stage, List<Transform> downstream) {
         List<Transform> prev = adjacencyMap.put(stage, downstream);
-        assert prev == null : "Double registering of a Stage with this Pipeline: " + stage;
+        assert prev == null : "Double registration of a Stage with this Pipeline: " + stage;
+    }
+
+    void makeNamesUnique() {
+        Set<String> usedNames = new HashSet<>();
+        for (Transform transform : adjacencyMap.keySet()) {
+            // replace the name with a unique one
+            while (!usedNames.add(transform.name())) {
+                transform.setName(addOrIncrementIndexInName(transform.name()));
+            }
+        }
     }
 }

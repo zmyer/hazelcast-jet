@@ -16,7 +16,8 @@
 
 package com.hazelcast.jet.impl.connector;
 
-import com.hazelcast.config.EventJournalConfig;
+import com.hazelcast.config.MapConfig;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.core.JetTestSupport;
@@ -24,9 +25,8 @@ import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.core.test.TestSupport;
-import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.map.EventJournalMapEvent;
 import com.hazelcast.map.impl.proxy.MapProxyImpl;
-import com.hazelcast.map.journal.EventJournalMapEvent;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Before;
 import org.junit.Test;
@@ -59,21 +59,24 @@ public class StreamEventJournalP_WmCoalescingTest extends JetTestSupport {
 
     private MapProxyImpl<Integer, Integer> map;
     private int[] partitionKeys;
+    private JetInstance instance;
 
     @Before
     public void setUp() {
         JetConfig config = new JetConfig();
 
-        EventJournalConfig journalConfig = new EventJournalConfig()
-                .setMapName("*")
-                .setCapacity(JOURNAL_CAPACITY)
-                .setEnabled(true);
+        String mapName = randomMapName();
+        MapConfig mapConfig = new MapConfig();
+        mapConfig.setName(mapName);
+        mapConfig.getEventJournalConfig()
+                 .setCapacity(JOURNAL_CAPACITY)
+                 .setEnabled(true);
 
         config.getHazelcastConfig().setProperty(PARTITION_COUNT.getName(), "2");
-        config.getHazelcastConfig().addEventJournalConfig(journalConfig);
-        JetInstance instance = this.createJetMember(config);
+        config.getHazelcastConfig().addMapConfig(mapConfig);
+        instance = this.createJetMember(config);
 
-        map = (MapProxyImpl<Integer, Integer>) instance.getHazelcastInstance().<Integer, Integer>getMap("test");
+        map = (MapProxyImpl<Integer, Integer>) instance.getHazelcastInstance().<Integer, Integer>getMap(mapName);
 
         partitionKeys = new int[2];
         for (int i = 1; IntStream.of(partitionKeys).anyMatch(val -> val == 0); i++) {
@@ -89,8 +92,9 @@ public class StreamEventJournalP_WmCoalescingTest extends JetTestSupport {
 
         TestSupport.verifyProcessor(createSupplier(asList(0, 1), 2000))
                    .disableProgressAssertion()
-                   .disableRunUntilCompleted(1000)
+                   .runUntilOutputMatches(60_000, 100)
                    .disableSnapshots()
+                   .jetInstance(instance)
                    .expectOutput(asList(wm(10), 10, 10));
     }
 
@@ -114,8 +118,9 @@ public class StreamEventJournalP_WmCoalescingTest extends JetTestSupport {
 
         TestSupport.verifyProcessor(createSupplier(asList(0, 1), 4000))
                    .disableProgressAssertion()
-                   .disableRunUntilCompleted(4000)
+                   .runUntilOutputMatches(60_000, 100)
                    .disableSnapshots()
+                   .jetInstance(instance)
                    .outputChecker((e, a) -> new HashSet<>(e).equals(new HashSet<>(a)))
                    .expectOutput(asList(11, wm(11)));
 
@@ -126,8 +131,9 @@ public class StreamEventJournalP_WmCoalescingTest extends JetTestSupport {
     public void when_allPartitionsIdle_then_idleMessageOutput() {
         TestSupport.verifyProcessor(createSupplier(asList(0, 1), 500))
                    .disableProgressAssertion()
-                   .disableRunUntilCompleted(1500)
+                   .runUntilOutputMatches(60_000, 100)
                    .disableSnapshots()
+                   .jetInstance(instance)
                    .expectOutput(singletonList(IDLE_MESSAGE));
     }
 
@@ -138,7 +144,7 @@ public class StreamEventJournalP_WmCoalescingTest extends JetTestSupport {
         Thread updatingThread = new Thread(() -> uncheckRun(() -> {
             // We will start after a delay so that the source will first become idle and then recover.
             latch.await();
-            for (;;) {
+            for (; ; ) {
                 map.put(partitionKeys[0], 12);
                 Thread.sleep(100);
             }
@@ -148,7 +154,7 @@ public class StreamEventJournalP_WmCoalescingTest extends JetTestSupport {
         Processor processor = createSupplier(asList(0, 1), 2000).get();
         TestOutbox outbox = new TestOutbox(1024);
         Queue<Object> outbox0 = outbox.queue(0);
-        processor.init(outbox, new TestProcessorContext());
+        processor.init(outbox, new TestProcessorContext().setJetInstance(instance));
 
         assertTrueEventually(() -> {
             processor.complete();
@@ -170,12 +176,13 @@ public class StreamEventJournalP_WmCoalescingTest extends JetTestSupport {
 
         TestSupport.verifyProcessor(createSupplier(singletonList(1), 2000))
                    .disableProgressAssertion()
-                   .disableRunUntilCompleted(4000)
+                   .runUntilOutputMatches(60_000, 100)
                    .disableSnapshots()
+                   .jetInstance(instance)
                    .expectOutput(asList(wm(13), 13, IDLE_MESSAGE));
     }
 
-    public DistributedSupplier<Processor> createSupplier(List<Integer> assignedPartitions, long idleTimeout) {
+    public SupplierEx<Processor> createSupplier(List<Integer> assignedPartitions, long idleTimeout) {
         return () -> new StreamEventJournalP<>(map, assignedPartitions, e -> true,
                 EventJournalMapEvent::getNewValue, START_FROM_OLDEST, false,
                 eventTimePolicy(Integer::intValue, limitingLag(0), 1, 0, idleTimeout));

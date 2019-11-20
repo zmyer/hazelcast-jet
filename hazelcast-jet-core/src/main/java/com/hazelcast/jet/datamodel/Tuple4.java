@@ -25,6 +25,8 @@ import java.util.Objects;
  * @param <E1> the type of the field 1
  * @param <E2> the type of the field 2
  * @param <E3> the type of the field 3
+ *
+ * @since 3.0
  */
 public final class Tuple4<E0, E1, E2, E3> {
     private E0 f0;
@@ -48,7 +50,6 @@ public final class Tuple4<E0, E1, E2, E3> {
     public static <E0, E1, E2, E3> Tuple4<E0, E1, E2, E3> tuple4(E0 f0, E1 f1, E2 f2, E3 f3) {
         return new Tuple4<>(f0, f1, f2, f3);
     }
-
 
     /**
      * Returns the value of the field 0.
@@ -101,6 +102,6 @@ public final class Tuple4<E0, E1, E2, E3> {
 
     @Override
     public String toString() {
-        return "Tuple5{" + f0 + ", " + f1 + ", " + f2 + ", " + f3 + '}';
+        return "(" + f0 + ", " + f1 + ", " + f2 + ", " + f3 + ')';
     }
 }

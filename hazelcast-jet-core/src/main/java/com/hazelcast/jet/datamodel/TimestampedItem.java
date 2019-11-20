@@ -16,36 +16,28 @@
 
 package com.hazelcast.jet.datamodel;
 
-import com.hazelcast.jet.function.WindowResultFunction;
-
-import javax.annotation.Nonnull;
-import java.io.Serializable;
 import java.util.Objects;
 
-import static com.hazelcast.jet.impl.util.Util.toLocalTime;
-
 /**
- * Represents a data item with the event timestamp added to it. Used in the
- * Pipeline API as the default data type to emit from global windowed
- * aggregation stages (those that aggregate all the data in a window, without
- * grouping).
+ * Mutable wrapper around an item that adds a timestamp. Useful for LRU
+ * caching.
  *
- * @param <T> type of the item
+ * @param <T>
  */
-public final class TimestampedItem<T> implements Serializable {
-    private final long timestamp;
-    private final T item;
+public class TimestampedItem<T> {
+    private long timestamp;
+    private T item;
 
     /**
-     * Constructs a timestamped item with the supplied field values.
+     * Creates a new timestamped item.
      */
-    public TimestampedItem(long timestamp, @Nonnull T item) {
+    public TimestampedItem(long timestamp, T item) {
         this.timestamp = timestamp;
         this.item = item;
     }
 
     /**
-     * Returns the timestamp associated with the item.
+     * Returns the timestamp.
      */
     public long timestamp() {
         return timestamp;
@@ -58,37 +50,46 @@ public final class TimestampedItem<T> implements Serializable {
         return item;
     }
 
-    @Override
-    public int hashCode() {
-        int hc = 17;
-        hc = 73 * hc + Long.hashCode(timestamp);
-        hc = 73 * hc + Objects.hashCode(item);
-        return hc;
+    /**
+     * Sets the timestamp.
+     *
+     * @return {@code this}
+     */
+    public TimestampedItem<T> setTimestamp(long timestamp) {
+        this.timestamp = timestamp;
+        return this;
+    }
+
+    /**
+     * Sets the item.
+     *
+     * @return {@code this}
+     */
+    public TimestampedItem<T> setItem(T item) {
+        this.item = item;
+        return this;
     }
 
     @Override
+    @SuppressWarnings("unchecked")
     public boolean equals(Object obj) {
-        final TimestampedItem that;
-        return this == obj
-                || obj instanceof TimestampedItem
-                && this.timestamp == (that = (TimestampedItem) obj).timestamp
+        TimestampedItem<T> that;
+        return obj != null
+                && this.getClass() == obj.getClass()
+                && this.timestamp == (that = (TimestampedItem<T>) obj).timestamp
                 && Objects.equals(this.item, that.item);
     }
 
     @Override
-    public String toString() {
-        return "{ts=" + toLocalTime(timestamp) + ", value='" + item + "'}";
+    public int hashCode() {
+        int hc = 17;
+        hc = 37 * hc + Long.hashCode(timestamp);
+        hc = 37 * hc + Objects.hashCode(item);
+        return hc;
     }
 
-
-    /**
-     * This method matches the shape of the functional interface {@link
-     * WindowResultFunction}.
-     * <p>
-     * Constructs a {@code TimestampedItem} using the window end time as the
-     * timestamp.
-     */
-    public static <V> TimestampedItem<V> fromWindowResult(long winStart, long winEnd, @Nonnull V value) {
-        return new TimestampedItem<>(winEnd, value);
+    @Override
+    public String toString() {
+        return "TimestampedItem{ts=" + timestamp + ", item=" + item + '}';
     }
 }

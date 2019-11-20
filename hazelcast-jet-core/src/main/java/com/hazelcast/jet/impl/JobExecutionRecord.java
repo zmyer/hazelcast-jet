@@ -16,11 +16,11 @@
 
 package com.hazelcast.jet.impl;
 
+import com.hazelcast.internal.util.Clock;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
-import com.hazelcast.util.Clock;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 
 import javax.annotation.Nullable;
@@ -51,6 +51,7 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
      */
     private final AtomicLong timestamp = new AtomicLong();
     private final AtomicInteger quorumSize = new AtomicInteger();
+    private volatile boolean executed;
     private volatile boolean suspended;
     private volatile long snapshotId = NO_SNAPSHOT;
     private volatile int dataMapIndex = -1;
@@ -97,6 +98,14 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
         this.suspended = suspended;
     }
 
+    public boolean executed() {
+        return executed;
+    }
+
+    public void markExecuted() {
+        executed = true;
+    }
+
     @SuppressWarnings("NonAtomicOperationOnVolatileField")
     @SuppressFBWarnings(value = "VO_VOLATILE_INCREMENT",
             justification = "all updates to ongoingSnapshotId are synchronized")
@@ -106,7 +115,9 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
         this.exportedSnapshotMapName = exportedSnapshotMapName;
     }
 
-    public SnapshotStats ongoingSnapshotDone(long numBytes, long numKeys, long numChunks, @Nullable String failureText) {
+    public SnapshotStats ongoingSnapshotDone(
+            long numBytes, long numKeys, long numChunks, @Nullable String failureText
+    ) {
         lastSnapshotFailure = failureText;
         SnapshotStats res = new SnapshotStats(
                 ongoingSnapshotId, ongoingSnapshotStartTime, Clock.currentTimeMillis(), numBytes, numKeys, numChunks
@@ -167,10 +178,11 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
     }
 
     /**
-     * Name of the export map. The value is not-null while the job is exporting
+     * Name of the exported map. The value is not-null while the job is exporting
      * a state snapshot. The value is null when writing a normal snapshot or
      * when no snapshot is in progress.
      */
+    @Nullable
     public String exportedSnapshotMapName() {
         return exportedSnapshotMapName;
     }
@@ -199,8 +211,9 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
 
     /**
      * Sets the timestamp to:
-     *   <pre>max(Clock.currentTimeMillis(), this.timestamp + 1);</pre>
-     * <p>
+     * <pre>
+     *     max(Clock.currentTimeMillis(), this.timestamp + 1);
+     * </pre>
      * In other words, after this call the timestamp is guaranteed to be
      * incremented by at least 1 and be no smaller than the current wall clock
      * time.
@@ -222,7 +235,7 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return JetInitDataSerializerHook.JOB_EXECUTION_RECORD;
     }
 
@@ -239,6 +252,7 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
         out.writeObject(snapshotStats);
         out.writeObject(exportedSnapshotMapName);
         out.writeBoolean(suspended);
+        out.writeBoolean(executed);
         out.writeLong(timestamp.get());
     }
 
@@ -254,6 +268,7 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
         snapshotStats = in.readObject();
         exportedSnapshotMapName = in.readObject();
         suspended = in.readBoolean();
+        executed = in.readBoolean();
         timestamp.set(in.readLong());
     }
 
@@ -264,6 +279,7 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
                 ", timestamp=" + toLocalTime(timestamp.get()) +
                 ", quorumSize=" + quorumSize +
                 ", suspended=" + suspended +
+                ", executed=" + executed +
                 ", dataMapIndex=" + dataMapIndex +
                 ", snapshotId=" + snapshotId +
                 ", ongoingSnapshotId=" + ongoingSnapshotId +
@@ -277,9 +293,7 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
 
         private long snapshotId;
 
-        /*
-         * Stats for current successful snapshot.
-         */
+        // stats for the current successful snapshot
         private long startTime;
         private long endTime;
         private long numBytes;
@@ -289,8 +303,7 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
         public SnapshotStats() {
         }
 
-        SnapshotStats(long snapshotId, long startTime, long endTime, long numBytes,
-                      long numKeys, long numChunks) {
+        SnapshotStats(long snapshotId, long startTime, long endTime, long numBytes, long numKeys, long numChunks) {
             this.snapshotId = snapshotId;
             this.startTime = startTime;
             this.endTime = endTime;
@@ -339,7 +352,7 @@ public class JobExecutionRecord implements IdentifiedDataSerializable {
         }
 
         @Override
-        public int getId() {
+        public int getClassId() {
             return JetInitDataSerializerHook.SNAPSHOT_STATS;
         }
 

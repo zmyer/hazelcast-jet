@@ -25,6 +25,7 @@ import java.util.Iterator;
 import java.util.Spliterator;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -33,8 +34,12 @@ import static java.util.Objects.requireNonNull;
 /**
  * Utility class with several {@link Traverser}s useful in {@link Processor}
  * implementations.
+ *
+ * @since 3.0
  */
 public final class Traversers {
+
+    private static final Traverser<Object> EMPTY_TRAVERSER = new EmptyTraverser<>();
 
     private Traversers() {
     }
@@ -42,9 +47,10 @@ public final class Traversers {
     /**
      * Returns a traverser that always returns {@code null}.
      */
+    @SuppressWarnings("unchecked")
     @Nonnull
     public static <T> Traverser<T> empty() {
-        return () -> null;
+        return (Traverser<T>) EMPTY_TRAVERSER;
     }
 
     /**
@@ -139,7 +145,8 @@ public final class Traversers {
     }
 
     /**
-     * Returns a traverser over the given array.
+     * Returns a traverser over the given array. Null elements in the array are
+     * skipped.
      */
     @Nonnull
     public static <T> Traverser<T> traverseArray(@Nonnull T[] array) {
@@ -147,7 +154,8 @@ public final class Traversers {
     }
 
     /**
-     * Returns a traverser over the supplied arguments (or item array).
+     * Returns a traverser over the supplied arguments (or item array). Null
+     * items are skipped.
      *
      * @param items the items to traverse over
      * @param <T> type of the items
@@ -190,7 +198,7 @@ public final class Traversers {
     }
 
     private static class ArrayTraverser<T> implements Traverser<T> {
-        private int i;
+        private int index;
         private final T[] array;
 
         ArrayTraverser(@Nonnull T[] array) {
@@ -199,7 +207,17 @@ public final class Traversers {
 
         @Override
         public T next() {
-            return i >= 0 && i < array.length ? requireNonNull(array[i++], "Array contains a null element") : null;
+            while (index < array.length) {
+                try {
+                    T t = array[index];
+                    if (t != null) {
+                        return t;
+                    }
+                } finally {
+                    index++;
+                }
+            }
+            return null;
         }
     }
 
@@ -230,8 +248,47 @@ public final class Traversers {
         }
     }
 
-    private static class SingletonTraverser<T> implements Traverser<T> {
-        private Object item;
+    private static final class EmptyTraverser<T> implements Traverser<T> {
+        @Override
+        public T next() {
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        @Nonnull @Override
+        public <R> Traverser<R> map(@Nonnull Function<? super T, ? extends R> mapFn) {
+            return (Traverser<R>) this;
+        }
+
+        @SuppressWarnings("unchecked")
+        @Nonnull @Override
+        public <R> Traverser<R> flatMap(@Nonnull Function<? super T, ? extends Traverser<R>> flatMapFn) {
+            return (Traverser<R>) this;
+        }
+
+        @Nonnull @Override
+        public Traverser<T> filter(@Nonnull Predicate<? super T> filterFn) {
+            return this;
+        }
+
+        @Nonnull @Override
+        public Traverser<T> takeWhile(@Nonnull Predicate<? super T> predicate) {
+            return this;
+        }
+
+        @Nonnull @Override
+        public Traverser<T> dropWhile(@Nonnull Predicate<? super T> predicate) {
+            return this;
+        }
+
+        @Nonnull @Override
+        public Traverser<T> peek(@Nonnull Consumer<? super T> action) {
+            return this;
+        }
+    }
+
+    private static final class SingletonTraverser<T> implements Traverser<T> {
+        private T item;
 
         SingletonTraverser(@Nonnull T item) {
             this.item = item;
@@ -240,7 +297,7 @@ public final class Traversers {
         @Override
         public T next() {
             try {
-                return (T) item;
+                return item;
             } finally {
                 item = null;
             }
@@ -249,10 +306,12 @@ public final class Traversers {
         @Nonnull @Override
         // an optimized version to map in-place
         public <R> Traverser<R> map(@Nonnull Function<? super T, ? extends R> mapFn) {
+            @SuppressWarnings("unchecked")
+            SingletonTraverser<R> newThis = (SingletonTraverser<R>) this;
             if (item != null) {
-                item = mapFn.apply((T) item);
+                newThis.item = mapFn.apply(item);
             }
-            return (Traverser<R>) this;
+            return newThis;
         }
     }
 }

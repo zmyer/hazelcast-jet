@@ -17,16 +17,19 @@
 package com.hazelcast.jet.config;
 
 import com.hazelcast.config.MapConfig;
+import com.hazelcast.jet.Job;
 
 import javax.annotation.Nonnull;
 
-import static com.hazelcast.util.Preconditions.checkBackupCount;
-import static com.hazelcast.util.Preconditions.checkNotNegative;
-import static com.hazelcast.util.Preconditions.checkPositive;
+import static com.hazelcast.internal.util.Preconditions.checkBackupCount;
+import static com.hazelcast.internal.util.Preconditions.checkNotNegative;
+import static com.hazelcast.internal.util.Preconditions.checkPositive;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * General configuration options pertaining to a Jet instance.
+ *
+ * @since 3.0
  */
 public class InstanceConfig {
 
@@ -46,6 +49,7 @@ public class InstanceConfig {
     private int flowControlPeriodMs = DEFAULT_FLOW_CONTROL_PERIOD_MS;
     private int backupCount = DEFAULT_BACKUP_COUNT;
     private long scaleUpDelayMillis = SCALE_UP_DELAY_MILLIS_DEFAULT;
+    private boolean losslessRestartEnabled;
 
     /**
      * Sets the number of threads each cluster member will use to execute Jet
@@ -63,7 +67,7 @@ public class InstanceConfig {
      * Returns the number of cooperative execution threads.
      */
     public int getCooperativeThreadCount() {
-        return  cooperativeThreadCount;
+        return cooperativeThreadCount;
     }
 
     /**
@@ -135,5 +139,41 @@ public class InstanceConfig {
      */
     public long getScaleUpDelayMillis() {
         return scaleUpDelayMillis;
+    }
+
+    /**
+     * Returns if lossless restart is enabled, see {@link
+     * #setLosslessRestartEnabled(boolean)}.
+     */
+    public boolean isLosslessRestartEnabled() {
+        return losslessRestartEnabled;
+    }
+
+    /**
+     * Sets whether lossless job restart is enabled for the node. With lossless
+     * restart you can restart the whole cluster without losing the jobs and
+     * their state. The feature is implemented on top of the Hot Restart
+     * feature of Hazelcast IMDG which persists the data to disk.
+     * <p>
+     * If enabled, you have to also configure Hot Restart:
+     * <pre>{@code
+     *    JetConfig jetConfig = new JetConfig();
+     *    jetConfig.getInstanceConfig().setLosslessRestartEnabled(true);
+     *    jetConfig.getHazelcastConfig().getHotRestartPersistenceConfig()
+     *        .setEnabled(true)
+     *        .setBaseDir(new File("/mnt/hot-restart"))
+     *        .setParallelism(2);
+     * }</pre>
+     * <p>
+     * Note: the snapshots exported using {@link Job#exportSnapshot}
+     * will also have Hot Restart storage enabled.
+     * <p>
+     * Feature is disabled by default. If you enable this option in open-source
+     * Hazelcast Jet, the member will fail to start, you need Jet Enterprise to
+     * run it and obtain a license from Hazelcast.
+     */
+    public InstanceConfig setLosslessRestartEnabled(boolean enabled) {
+        this.losslessRestartEnabled = enabled;
+        return this;
     }
 }

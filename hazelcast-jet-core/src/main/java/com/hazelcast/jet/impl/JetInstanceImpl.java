@@ -16,23 +16,22 @@
 
 package com.hazelcast.jet.impl;
 
-import com.hazelcast.instance.HazelcastInstanceImpl;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.instance.impl.HazelcastInstanceImpl;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.impl.operation.GetJobIdsByNameOperation;
 import com.hazelcast.jet.impl.operation.GetJobIdsOperation;
-import com.hazelcast.jet.impl.util.Util;
+import com.hazelcast.jet.impl.util.ImdgUtil;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.map.impl.MapService;
-import com.hazelcast.nio.Address;
-import com.hazelcast.spi.NodeEngine;
+import com.hazelcast.spi.impl.NodeEngine;
 import com.hazelcast.spi.impl.NodeEngineImpl;
 
 import javax.annotation.Nonnull;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.Future;
 
 import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
@@ -59,7 +58,7 @@ public class JetInstanceImpl extends AbstractJetInstance {
     @Nonnull @Override
     public List<Job> getJobs() {
         Address masterAddress = nodeEngine.getMasterAddress();
-        Future<Set<Long>> future = nodeEngine
+        Future<List<Long>> future = nodeEngine
                 .getOperationService()
                 .createInvocationBuilder(JetService.SERVICE_NAME, new GetJobIdsOperation(), masterAddress)
                 .invoke();
@@ -118,7 +117,7 @@ public class JetInstanceImpl extends AbstractJetInstance {
      */
     @Override
     public boolean existsDistributedObject(@Nonnull String serviceName, @Nonnull String objectName) {
-        return Util.existsDistributedObject(nodeEngine, serviceName, objectName);
+        return ImdgUtil.existsDistributedObject(nodeEngine, serviceName, objectName);
     }
 
     @Override

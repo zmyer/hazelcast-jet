@@ -20,7 +20,7 @@ import com.hazelcast.jet.config.EdgeConfig;
 import com.hazelcast.jet.core.Edge;
 import com.hazelcast.jet.core.Edge.RoutingPolicy;
 import com.hazelcast.jet.core.Partitioner;
-import com.hazelcast.jet.impl.MasterContext;
+import com.hazelcast.jet.impl.MasterJobContext;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
@@ -44,7 +44,6 @@ public class EdgeDef implements IdentifiedDataSerializable {
     private transient VertexDef sourceVertex;
     private transient VertexDef destVertex;
 
-
     EdgeDef() {
     }
 
@@ -63,7 +62,7 @@ public class EdgeDef implements IdentifiedDataSerializable {
         final VertexDef farVertex = vMap.get(oppositeVertexId);
         this.sourceVertex = isOutbound ? nearVertex : farVertex;
         this.destVertex = isOutbound ? farVertex : nearVertex;
-        this.id = sourceVertex.vertexId() + ":" + destVertex.vertexId();
+        this.id = sourceVertex.vertexId() + "-" + sourceOrdinal + ':' + destVertex.vertexId() + '-' + destOrdinal;
     }
 
     public RoutingPolicy routingPolicy() {
@@ -99,7 +98,7 @@ public class EdgeDef implements IdentifiedDataSerializable {
     }
 
     boolean isSnapshotRestoreEdge() {
-        return priority == MasterContext.SNAPSHOT_RESTORE_EDGE_PRIORITY;
+        return priority == MasterJobContext.SNAPSHOT_RESTORE_EDGE_PRIORITY;
     }
 
     boolean isDistributed() {
@@ -119,7 +118,7 @@ public class EdgeDef implements IdentifiedDataSerializable {
     }
 
     @Override
-    public int getId() {
+    public int getClassId() {
         return JetInitDataSerializerHook.EDGE_DEF;
     }
 
@@ -148,6 +147,7 @@ public class EdgeDef implements IdentifiedDataSerializable {
     }
 
     @Override public String toString() {
-        return String.format("%s(%d) -> %s(%d)", sourceVertex.name(), sourceOrdinal, destVertex.name(), destOrdinal);
+        return String.format("%s(%d) -> %s(%d)", sourceVertex == null ? "null" : sourceVertex.name(), sourceOrdinal,
+                destVertex == null ? "null" : destVertex.name(), destOrdinal);
     }
 }

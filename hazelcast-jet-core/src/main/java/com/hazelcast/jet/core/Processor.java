@@ -17,7 +17,6 @@
 package com.hazelcast.jet.core;
 
 import com.hazelcast.jet.JetException;
-import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.logging.ILogger;
 
 import javax.annotation.Nonnull;
@@ -44,6 +43,8 @@ import javax.annotation.Nonnull;
  * <p>
  * See the {@link #isCooperative()} for important restrictions to how the
  * processor should work.
+ *
+ * @since 3.0
  */
 public interface Processor {
 
@@ -57,9 +58,12 @@ public interface Processor {
      * A cooperative processor should also not attempt any blocking operations,
      * such as I/O operations, waiting for locks/semaphores or sleep
      * operations. Violations of this rule will manifest as less than 100% CPU
-     * usage under maximum load. The processor must also return as soon as the
-     * outbox rejects an item (that is when the {@link Outbox#offer(Object)
-     * offer()} method returns {@code false}).
+     * usage under maximum load (note that this is possible for other reasons too,
+     * for example if the network is the bottleneck or if {@linkplain
+     * JetProperties#JET_IDLE_COOPERATIVE_MAX_MICROSECONDS parking time} is too high).
+     * The processor must also return as soon as the outbox rejects an item
+     * (that is when the {@link Outbox#offer(Object) offer()} method returns
+     * {@code false}).
      * <p>
      * If this processor declares itself cooperative, it will share a thread
      * with other cooperative processors. Otherwise it will run in a dedicated
@@ -150,10 +154,6 @@ public interface Processor {
      * If the call returns {@code false}, it will be called again before
      * proceeding to call any other method. Default implementation returns
      * {@code true}.
-     * <p>
-     * If this method tried to offer to the outbox and the offer call returned
-     * false, this method must also return false and retry to offer in the
-     * next call.
      */
     default boolean tryProcess() {
         return true;
@@ -273,6 +273,8 @@ public interface Processor {
     /**
      * Context passed to the processor in the
      * {@link #init(Outbox, Context) init()} call.
+     *
+     * @since 3.0
      */
     interface Context extends ProcessorSupplier.Context {
 
@@ -294,20 +296,12 @@ public interface Processor {
          * Returns the index of the processor among all the processors created for
          * this vertex on all nodes: it's a unique cluster-wide index.
          * <p>
-         * The value is in the range {@code [0...totalParallelism-1]}.
+         * The value is in the range {@code [0...totalParallelism-1]}. For
+         * example if there are 2 members in the cluster and {@linkplain
+         * #localParallelism() local parallelism} is 4, the processors on the
+         * 1st cluster member will have indexes 0..3 and on the second member
+         * they will have indexes 4..7.
          */
         int globalProcessorIndex();
-
-        /**
-         * Returns true, if snapshots will be saved for this job.
-         */
-        default boolean snapshottingEnabled() {
-            return processingGuarantee() != ProcessingGuarantee.NONE;
-        }
-
-        /**
-         * Returns the guarantee for current job.
-         */
-        ProcessingGuarantee processingGuarantee();
     }
 }

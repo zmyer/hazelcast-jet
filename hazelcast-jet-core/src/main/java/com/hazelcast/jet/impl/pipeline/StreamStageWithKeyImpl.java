@@ -16,16 +16,15 @@
 
 package com.hazelcast.jet.impl.pipeline;
 
+import com.hazelcast.function.BiPredicateEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
-import com.hazelcast.jet.aggregate.AggregateOperation1;
-import com.hazelcast.jet.core.ProcessorSupplier;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedTriFunction;
-import com.hazelcast.jet.function.DistributedTriPredicate;
-import com.hazelcast.jet.pipeline.ContextFactory;
-import com.hazelcast.jet.pipeline.GeneralStage;
+import com.hazelcast.jet.core.ProcessorMetaSupplier;
+import com.hazelcast.jet.function.TriFunction;
+import com.hazelcast.jet.function.TriPredicate;
+import com.hazelcast.jet.pipeline.ServiceFactory;
 import com.hazelcast.jet.pipeline.StreamStage;
 import com.hazelcast.jet.pipeline.StreamStageWithKey;
 import com.hazelcast.jet.pipeline.WindowDefinition;
@@ -37,7 +36,7 @@ public class StreamStageWithKeyImpl<T, K> extends StageWithGroupingBase<T, K> im
 
     StreamStageWithKeyImpl(
             @Nonnull StreamStageImpl<T> computeStage,
-            @Nonnull DistributedFunction<? super T, ? extends K> keyFn
+            @Nonnull FunctionEx<? super T, ? extends K> keyFn
     ) {
         super(computeStage, keyFn);
     }
@@ -48,66 +47,103 @@ public class StreamStageWithKeyImpl<T, K> extends StageWithGroupingBase<T, K> im
     }
 
     @Nonnull @Override
-    public <C, R> StreamStage<R> mapUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedTriFunction<? super C, ? super K, ? super T, ? extends R> mapFn
+    public <S, R> StreamStage<R> mapStateful(
+            long ttl,
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends R> mapFn,
+            @Nonnull TriFunction<? super S, ? super K, ? super Long, ? extends R> onEvictFn
     ) {
-        return attachMapUsingContext(contextFactory, mapFn);
+        return attachMapStateful(ttl, createFn, mapFn, onEvictFn);
     }
 
     @Nonnull @Override
-    public <C, R> StreamStage<R> mapUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedTriFunction<? super C, ? super K, ? super T, CompletableFuture<R>> mapAsyncFn
+    public <S, R> StreamStage<R> mapStateful(
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends R> mapFn
     ) {
-        return attachTransformUsingContextAsync("map", contextFactory,
-                (c, k, t) -> mapAsyncFn.apply(c, k, t).thenApply(Traversers::singleton));
+        return attachMapStateful(0, createFn, mapFn, null);
     }
 
     @Nonnull @Override
-    public <C> StreamStage<T> filterUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedTriPredicate<? super C, ? super K, ? super T> filterFn
+    public <S> StreamStage<T> filterStateful(
+            long ttl,
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull BiPredicateEx<? super S, ? super T> filterFn
     ) {
-        return attachFilterUsingContext(contextFactory, filterFn);
+        return attachMapStateful(ttl, createFn, (s, k, t) -> filterFn.test(s, t) ? t : null, null);
     }
 
     @Nonnull @Override
-    public <C> StreamStage<T> filterUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedTriFunction<? super C, ? super K, ? super T, CompletableFuture<Boolean>> filterAsyncFn
+    public <S, R> StreamStage<R> flatMapStateful(
+            long ttl,
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends Traverser<R>> flatMapFn,
+            @Nonnull TriFunction<? super S, ? super K, ? super Long, ? extends Traverser<R>> onEvictFn
     ) {
-        return attachTransformUsingContextAsync("filter", contextFactory,
-                (c, k, t) -> filterAsyncFn.apply(c, k, t).thenApply(passed -> passed ? Traversers.singleton(t) : null));
+        return attachFlatMapStateful(ttl, createFn, flatMapFn, onEvictFn);
     }
 
     @Nonnull @Override
-    public <C, R> StreamStage<R> flatMapUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedTriFunction<? super C, ? super K, ? super T, ? extends Traverser<? extends R>> flatMapFn
+    public <S, R> StreamStage<R> flatMapStateful(
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends Traverser<R>> flatMapFn
     ) {
-        return attachFlatMapUsingContext(contextFactory, flatMapFn);
+        return attachFlatMapStateful(0, createFn, flatMapFn, null);
     }
 
     @Nonnull @Override
-    public <C, R> StreamStage<R> flatMapUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedTriFunction<? super C, ? super K, ? super T, CompletableFuture<Traverser<R>>>
+    public <S, R> StreamStage<R> mapUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends R> mapFn
+    ) {
+        return attachMapUsingService(serviceFactory, mapFn);
+    }
+
+    @Nonnull @Override
+    public <S, R> StreamStage<R> mapUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, CompletableFuture<R>> mapAsyncFn
+    ) {
+        return attachTransformUsingServiceAsync("map", serviceFactory,
+                (s, k, t) -> mapAsyncFn.apply(s, k, t).thenApply(Traversers::singleton));
+    }
+
+    @Nonnull @Override
+    public <S> StreamStage<T> filterUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull TriPredicate<? super S, ? super K, ? super T> filterFn
+    ) {
+        return attachFilterUsingService(serviceFactory, filterFn);
+    }
+
+    @Nonnull @Override
+    public <S> StreamStage<T> filterUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, CompletableFuture<Boolean>> filterAsyncFn
+    ) {
+        return attachTransformUsingServiceAsync("filter", serviceFactory,
+                (s, k, t) -> filterAsyncFn.apply(s, k, t).thenApply(passed -> passed ? Traversers.singleton(t) : null));
+    }
+
+    @Nonnull @Override
+    public <S, R> StreamStage<R> flatMapUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends Traverser<R>> flatMapFn
+    ) {
+        return attachFlatMapUsingService(serviceFactory, flatMapFn);
+    }
+
+    @Nonnull @Override
+    public <S, R> StreamStage<R> flatMapUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull TriFunction<? super S, ? super K, ? super T, CompletableFuture<Traverser<R>>>
                     flatMapAsyncFn
     ) {
-        return attachTransformUsingContextAsync("flatMap", contextFactory, flatMapAsyncFn);
+        return attachTransformUsingServiceAsync("flatMap", serviceFactory, flatMapAsyncFn);
     }
 
     @Nonnull @Override
-    public <R, OUT> StreamStage<OUT> rollingAggregate(
-            @Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp,
-            @Nonnull DistributedBiFunction<? super K, ? super R, ? extends OUT> mapToOutputFn
-    ) {
-        return computeStage.attachRollingAggregate(keyFn(), aggrOp, mapToOutputFn);
-    }
-
-    @Nonnull @Override
-    public <R> GeneralStage<R> customTransform(@Nonnull String stageName, @Nonnull ProcessorSupplier procSupplier) {
+    public <R> StreamStage<R> customTransform(@Nonnull String stageName, @Nonnull ProcessorMetaSupplier procSupplier) {
         return computeStage.attachPartitionedCustomTransform(stageName, procSupplier, keyFn());
     }
 }

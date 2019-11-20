@@ -16,17 +16,19 @@
 
 package com.hazelcast.jet.pipeline;
 
-import com.hazelcast.core.IMap;
-import com.hazelcast.core.ReplicatedMap;
+import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.BiPredicateEx;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.PredicateEx;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.core.Processor;
-import com.hazelcast.jet.function.DistributedBiFunction;
-import com.hazelcast.jet.function.DistributedBiPredicate;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.function.DistributedPredicate;
-import com.hazelcast.jet.function.DistributedSupplier;
-import com.hazelcast.jet.function.DistributedTriFunction;
+import com.hazelcast.jet.core.ProcessorMetaSupplier;
+import com.hazelcast.jet.core.ProcessorSupplier;
+import com.hazelcast.jet.function.TriFunction;
+import com.hazelcast.map.IMap;
+import com.hazelcast.replicatedmap.ReplicatedMap;
 
 import javax.annotation.Nonnull;
 import java.util.concurrent.CompletableFuture;
@@ -38,6 +40,8 @@ import java.util.concurrent.CompletableFuture;
  * downstream stages.
  *
  * @param <T> the type of items coming out of this stage
+ *
+ * @since 3.0
  */
 public interface StreamStage<T> extends GeneralStage<T> {
 
@@ -62,93 +66,117 @@ public interface StreamStage<T> extends GeneralStage<T> {
     StreamStage<T> merge(@Nonnull StreamStage<? extends T> other);
 
     @Nonnull @Override
-    <K> StreamStageWithKey<T, K> groupingKey(@Nonnull DistributedFunction<? super T, ? extends K> keyFn);
+    <K> StreamStageWithKey<T, K> groupingKey(@Nonnull FunctionEx<? super T, ? extends K> keyFn);
 
     @Nonnull @Override
-    <R> StreamStage<R> map(@Nonnull DistributedFunction<? super T, ? extends R> mapFn);
+    <R> StreamStage<R> map(@Nonnull FunctionEx<? super T, ? extends R> mapFn);
 
     @Nonnull @Override
-    StreamStage<T> filter(@Nonnull DistributedPredicate<T> filterFn);
+    StreamStage<T> filter(@Nonnull PredicateEx<T> filterFn);
 
     @Nonnull @Override
-    <R> StreamStage<R> flatMap(@Nonnull DistributedFunction<? super T, ? extends Traverser<? extends R>> flatMapFn);
+    <R> StreamStage<R> flatMap(@Nonnull FunctionEx<? super T, ? extends Traverser<R>> flatMapFn);
 
     @Nonnull @Override
-    <C, R> StreamStage<R> mapUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends R> mapFn
+    <S, R> StreamStage<R> mapStateful(
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
     );
 
     @Nonnull @Override
-    <C, R> StreamStage<R> mapUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
-    );
+    <S> StreamStage<T> filterStateful(
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull BiPredicateEx<? super S, ? super T> filterFn);
 
     @Nonnull @Override
-    <C> StreamStage<T> filterUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiPredicate<? super C, ? super T> filterFn
-    );
+    <S, R> StreamStage<R> flatMapStateful(
+            @Nonnull SupplierEx<? extends S> createFn,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<R>> flatMapFn);
 
     @Nonnull @Override
-    <C> StreamStage<T> filterUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
-    );
-
-    @Nonnull @Override
-    <C, R> StreamStage<R> flatMapUsingContext(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends Traverser<R>> flatMapFn
-    );
-
-    @Nonnull @Override
-    <C, R> StreamStage<R> flatMapUsingContextAsync(
-            @Nonnull ContextFactory<C> contextFactory,
-            @Nonnull DistributedBiFunction<? super C, ? super T, ? extends CompletableFuture<Traverser<R>>> flatMapAsyncFn
-    );
-
-    @Override @Nonnull
-    default <K, V, R> StreamStage<R> mapUsingReplicatedMap(
-            @Nonnull String mapName,
-            @Nonnull DistributedBiFunction<? super ReplicatedMap<K, V>, ? super T, ? extends R> mapFn
+    default <A, R> StreamStage<R> rollingAggregate(
+            @Nonnull AggregateOperation1<? super T, A, ? extends R> aggrOp
     ) {
-        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(mapName, mapFn);
+        return (StreamStage<R>) GeneralStage.super.<A, R>rollingAggregate(aggrOp);
     }
 
-    @Override @Nonnull
+    @Nonnull @Override
+    <S, R> StreamStage<R> mapUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
+    );
+
+    @Nonnull @Override
+    <S, R> StreamStage<R> mapUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
+    );
+
+    @Nonnull @Override
+    <S> StreamStage<T> filterUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiPredicateEx<? super S, ? super T> filterFn
+    );
+
+    @Nonnull @Override
+    <S> StreamStage<T> filterUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
+    );
+
+    @Nonnull @Override
+    <S, R> StreamStage<R> flatMapUsingService(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<R>> flatMapFn
+    );
+
+    @Nonnull @Override
+    <S, R> StreamStage<R> flatMapUsingServiceAsync(
+            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Traverser<R>>> flatMapAsyncFn
+    );
+
+    @Nonnull @Override
+    default <K, V, R> StreamStage<R> mapUsingReplicatedMap(
+            @Nonnull String mapName,
+            @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
+            @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
+    ) {
+        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(mapName, lookupKeyFn, mapFn);
+    }
+
+    @Nonnull @Override
     default <K, V, R> StreamStage<R> mapUsingReplicatedMap(
             @Nonnull ReplicatedMap<K, V> replicatedMap,
-            @Nonnull DistributedBiFunction<? super ReplicatedMap<K, V>, ? super T, ? extends R> mapFn
+            @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
+            @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
     ) {
-        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(replicatedMap, mapFn);
-    }
-
-    @Override @Nonnull
-    default <K, V, R> StreamStage<R> mapUsingIMapAsync(
-            @Nonnull String mapName,
-            @Nonnull DistributedBiFunction<? super IMap<K, V>, ? super T, ? extends CompletableFuture<R>> mapFn
-    ) {
-        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingIMapAsync(mapName, mapFn);
-    }
-
-    @Override @Nonnull
-    default <K, V, R> StreamStage<R> mapUsingIMapAsync(
-            @Nonnull IMap<K, V> iMap,
-            @Nonnull DistributedBiFunction<? super IMap<K, V>, ? super T, ? extends CompletableFuture<R>> mapFn
-    ) {
-        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingIMapAsync(iMap, mapFn);
+        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingReplicatedMap(replicatedMap, lookupKeyFn, mapFn);
     }
 
     @Nonnull @Override
-    <R> StreamStage<R> rollingAggregate(@Nonnull AggregateOperation1<? super T, ?, ? extends R> aggrOp);
+    default <K, V, R> StreamStage<R> mapUsingIMap(
+            @Nonnull String mapName,
+            @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
+            @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
+    ) {
+        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingIMap(mapName, lookupKeyFn, mapFn);
+    }
+
+    @Nonnull @Override
+    default <K, V, R> StreamStage<R> mapUsingIMap(
+            @Nonnull IMap<K, V> iMap,
+            @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
+            @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
+    ) {
+        return (StreamStage<R>) GeneralStage.super.<K, V, R>mapUsingIMap(iMap, lookupKeyFn, mapFn);
+    }
 
     @Nonnull @Override
     <K, T1_IN, T1, R> StreamStage<R> hashJoin(
             @Nonnull BatchStage<T1_IN> stage1,
             @Nonnull JoinClause<K, ? super T, ? super T1_IN, ? extends T1> joinClause1,
-            @Nonnull DistributedBiFunction<T, T1, R> mapToOutputFn
+            @Nonnull BiFunctionEx<T, T1, R> mapToOutputFn
     );
 
     @Nonnull @Override
@@ -157,7 +185,7 @@ public interface StreamStage<T> extends GeneralStage<T> {
             @Nonnull JoinClause<K1, ? super T, ? super T1_IN, ? extends T1> joinClause1,
             @Nonnull BatchStage<T2_IN> stage2,
             @Nonnull JoinClause<K2, ? super T, ? super T2_IN, ? extends T2> joinClause2,
-            @Nonnull DistributedTriFunction<T, T1, T2, R> mapToOutputFn
+            @Nonnull TriFunction<T, T1, T2, R> mapToOutputFn
     );
 
     @Nonnull @Override
@@ -172,18 +200,74 @@ public interface StreamStage<T> extends GeneralStage<T> {
 
     @Nonnull @Override
     StreamStage<T> peek(
-            @Nonnull DistributedPredicate<? super T> shouldLogFn,
-            @Nonnull DistributedFunction<? super T, ? extends CharSequence> toStringFn);
+            @Nonnull PredicateEx<? super T> shouldLogFn,
+            @Nonnull FunctionEx<? super T, ? extends CharSequence> toStringFn);
 
     @Nonnull @Override
-    default StreamStage<T> peek(@Nonnull DistributedFunction<? super T, ? extends CharSequence> toStringFn) {
+    default StreamStage<T> peek(@Nonnull FunctionEx<? super T, ? extends CharSequence> toStringFn) {
         return (StreamStage<T>) GeneralStage.super.peek(toStringFn);
     }
 
     @Nonnull @Override
-    <R> StreamStage<R> customTransform(
-            @Nonnull String stageName,
-            @Nonnull DistributedSupplier<Processor> procSupplier);
+    default <R> StreamStage<R> customTransform(@Nonnull String stageName,
+                                               @Nonnull SupplierEx<Processor> procSupplier) {
+        return customTransform(stageName, ProcessorMetaSupplier.of(procSupplier));
+    }
+
+    @Nonnull @Override
+    default <R> StreamStage<R> customTransform(@Nonnull String stageName, @Nonnull ProcessorSupplier procSupplier) {
+        return customTransform(stageName, ProcessorMetaSupplier.of(procSupplier));
+    }
+
+    @Nonnull @Override
+    <R> StreamStage<R> customTransform(@Nonnull String stageName, @Nonnull ProcessorMetaSupplier procSupplier);
+
+    /**
+     * Transforms {@code this} stage using the provided {@code transformFn} and
+     * returns the transformed stage. It allows you to extract common pipeline
+     * transformations into a method and then call that method without
+     * interrupting the chained pipeline expression.
+     * <p>
+     * For example, say you have this code:
+     *
+     * <pre>{@code
+     * StreamStage<String> input = pipeline.readFrom(textSource);
+     * StreamStage<String> cleanedUp = input
+     *         .map(String::toLowerCase)
+     *         .filter(s -> s.startsWith("success"));
+     * }</pre>
+     *
+     * You can capture the {@code map} and {@code filter} steps into a common
+     * "cleanup" transformation:
+     *
+     * <pre>{@code
+     * StreamStage<String> cleanUp(StreamStage<String> input) {
+     *      return input.map(String::toLowerCase)
+     *                  .filter(s -> s.startsWith("success"));
+     * }
+     * }</pre>
+     *
+     * Now you can insert this transformation as just another step in your
+     * pipeline:
+     *
+     * <pre>{@code
+     * StreamStage<String> tokens = pipeline
+     *     .readFrom(textSource)
+     *     .apply(this::cleanUp)
+     *     .flatMap(line -> traverseArray(line.split("\\W+")));
+     * }</pre>
+     *
+     * @param transformFn function to transform this stage into another stage
+     * @param <R> type of the returned stage
+     *
+     * @since 3.1
+     */
+    @Nonnull
+    default <R> StreamStage<R> apply(
+            @Nonnull FunctionEx<? super StreamStage<T>, ? extends StreamStage<R>> transformFn
+    ) {
+        return transformFn.apply(this);
+    }
 
     @Nonnull @Override
     StreamStage<T> setLocalParallelism(int localParallelism);

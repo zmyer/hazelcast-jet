@@ -16,12 +16,15 @@
 
 package com.hazelcast.jet.core.test;
 
+import com.hazelcast.cluster.Address;
+import com.hazelcast.cluster.Cluster;
+import com.hazelcast.cluster.Member;
+import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.TestProcessors.MockP;
-import com.hazelcast.nio.Address;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -42,6 +45,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @RunWith(HazelcastParallelClassRunner.class)
 public class TestSupportTest {
@@ -87,7 +91,7 @@ public class TestSupportTest {
 
     @Test
     public void test_processorMetaSupplierHasJetInstance() {
-        JetInstance jetInstance = mock(JetInstance.class);
+        JetInstance jetInstance = mockJetInstance();
         boolean[] called = {false};
 
         verifyProcessor(
@@ -112,7 +116,8 @@ public class TestSupportTest {
 
     @Test
     public void test_processorSupplierHasJetInstance() {
-        JetInstance jetInstance = mock(JetInstance.class);
+        JetInstance jetInstance = mockJetInstance();
+
         boolean[] called = {false};
 
         verifyProcessor(
@@ -134,5 +139,17 @@ public class TestSupportTest {
                 .expectOutput(emptyList());
 
         assertTrue(called[0]);
+    }
+
+    private JetInstance mockJetInstance() {
+        JetInstance jetInstance = mock(JetInstance.class);
+        HazelcastInstance hzInstance = mock(HazelcastInstance.class);
+        Cluster cluster = mock(Cluster.class);
+        Member localMember = mock(Member.class);
+
+        when(jetInstance.getHazelcastInstance()).thenReturn(hzInstance);
+        when(hzInstance.getCluster()).thenReturn(cluster);
+        when(cluster.getLocalMember()).thenReturn(localMember);
+        return jetInstance;
     }
 }

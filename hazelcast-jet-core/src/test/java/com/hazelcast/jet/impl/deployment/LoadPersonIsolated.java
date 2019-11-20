@@ -17,23 +17,40 @@
 package com.hazelcast.jet.impl.deployment;
 
 import com.hazelcast.jet.core.AbstractProcessor;
-import com.hazelcast.jet.core.Processor;
-import com.hazelcast.jet.core.ProcessorMetaSupplier;
-import com.hazelcast.jet.core.ProcessorSupplier;
-import com.hazelcast.nio.Address;
-import java.util.Collection;
-import java.util.List;
-import java.util.function.Function;
-import java.util.stream.Stream;
+
 import javax.annotation.Nonnull;
 
-import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.fail;
 
-public class LoadPersonIsolated extends AbstractProcessor {
+class LoadPersonIsolated extends AbstractProcessor {
+    static volatile AssertionError assertionErrorInClose;
+    private final boolean shouldComplete;
+
+    LoadPersonIsolated(boolean shouldComplete) {
+        this.shouldComplete = shouldComplete;
+    }
+
+    @Override
+    protected void init(@Nonnull Context context) {
+        checkLoadClass();
+    }
 
     @Override
     public boolean complete() {
+        checkLoadClass();
+        return shouldComplete;
+    }
+
+    @Override
+    public void close() {
+        try {
+            checkLoadClass();
+        } catch (AssertionError e) {
+            assertionErrorInClose = e;
+        }
+    }
+
+    private void checkLoadClass() {
         ClassLoader cl = Thread.currentThread().getContextClassLoader();
         try {
             cl.loadClass("com.sample.pojo.person.Person$Appereance");
@@ -44,29 +61,6 @@ public class LoadPersonIsolated extends AbstractProcessor {
             cl.loadClass("com.sample.pojo.car.Car");
             fail();
         } catch (ClassNotFoundException ignored) {
-        }
-        return true;
-    }
-
-    static class LoadPersonIsolatedSupplier implements ProcessorSupplier {
-
-        private static final long serialVersionUID = 9124364032142382663L;
-
-        @Nonnull
-        @Override
-        public Collection<? extends Processor> get(int count) {
-            return Stream.generate(LoadPersonIsolated::new).limit(count).collect(toList());
-        }
-    }
-
-    static class LoadPersonIsolatedMetaSupplier implements ProcessorMetaSupplier {
-
-        private static final long serialVersionUID = -2678527620814378262L;
-
-        @Nonnull
-        @Override
-        public Function<Address, ProcessorSupplier> get(@Nonnull List<Address> addresses) {
-            return (Address x) -> new LoadPersonIsolatedSupplier();
         }
     }
 }

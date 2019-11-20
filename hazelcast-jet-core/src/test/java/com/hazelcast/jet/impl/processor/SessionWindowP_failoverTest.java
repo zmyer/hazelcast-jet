@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.impl.processor;
 
+import com.hazelcast.function.ToLongFunctionEx;
 import com.hazelcast.jet.accumulator.LongAccumulator;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.config.ProcessingGuarantee;
@@ -24,11 +25,10 @@ import com.hazelcast.jet.core.Outbox;
 import com.hazelcast.jet.core.Processor.Context;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
-import com.hazelcast.jet.datamodel.WindowResult;
-import com.hazelcast.jet.function.DistributedToLongFunction;
+import com.hazelcast.jet.datamodel.KeyedWindowResult;
 import com.hazelcast.jet.impl.processor.SessionWindowP.Keys;
 import com.hazelcast.test.HazelcastParallelClassRunner;
-import com.hazelcast.test.annotation.ParallelTest;
+import com.hazelcast.test.annotation.ParallelJVMTest;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -37,15 +37,15 @@ import org.junit.runner.RunWith;
 
 import java.util.Map.Entry;
 
+import static com.hazelcast.function.Functions.entryKey;
 import static com.hazelcast.jet.aggregate.AggregateOperations.counting;
 import static com.hazelcast.jet.config.ProcessingGuarantee.AT_LEAST_ONCE;
 import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
-import static com.hazelcast.jet.function.DistributedFunctions.entryKey;
 import static java.util.Collections.singletonList;
 import static org.junit.Assert.assertEquals;
 
 @RunWith(HazelcastParallelClassRunner.class)
-@Category(ParallelTest.class)
+@Category(ParallelJVMTest.class)
 public class SessionWindowP_failoverTest {
 
     @Rule
@@ -57,10 +57,11 @@ public class SessionWindowP_failoverTest {
         AggregateOperation1<Object, LongAccumulator, Long> aggrOp = counting();
         p = new SessionWindowP<>(
                 5000,
-                singletonList((DistributedToLongFunction<Entry<?, Long>>) Entry::getValue),
+                0L,
+                singletonList((ToLongFunctionEx<Entry<?, Long>>) Entry::getValue),
                 singletonList(entryKey()),
                 aggrOp,
-                WindowResult::new);
+                KeyedWindowResult::new);
 
         Outbox outbox = new TestOutbox(128);
         Context context = new TestProcessorContext()

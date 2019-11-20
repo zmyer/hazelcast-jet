@@ -16,8 +16,8 @@
 
 package com.hazelcast.jet.impl.processor;
 
-import com.hazelcast.core.PartitionAware;
 import com.hazelcast.internal.metrics.Probe;
+import com.hazelcast.internal.util.collection.Long2ObjectHashMap;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
@@ -27,12 +27,13 @@ import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.BroadcastKey;
 import com.hazelcast.jet.core.SlidingWindowPolicy;
 import com.hazelcast.jet.core.Watermark;
+import com.hazelcast.jet.core.function.KeyedWindowResultFunction;
 import com.hazelcast.jet.core.processor.Processors;
-import com.hazelcast.jet.function.KeyedWindowResultFunction;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
+import com.hazelcast.partition.PartitionAware;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -45,24 +46,29 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
+import java.util.function.LongFunction;
 import java.util.function.ToLongFunction;
 import java.util.stream.LongStream;
+import java.util.stream.Stream;
 
+import static com.hazelcast.function.ComparatorEx.naturalOrder;
+import static com.hazelcast.internal.util.Preconditions.checkNotNegative;
+import static com.hazelcast.internal.util.Preconditions.checkTrue;
 import static com.hazelcast.jet.Traversers.traverseIterable;
 import static com.hazelcast.jet.Traversers.traverseStream;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
 import static com.hazelcast.jet.core.BroadcastKey.broadcastKey;
-import static com.hazelcast.jet.function.DistributedComparator.naturalOrder;
 import static com.hazelcast.jet.impl.util.LoggingUtil.logFine;
+import static com.hazelcast.jet.impl.util.LoggingUtil.logFinest;
 import static com.hazelcast.jet.impl.util.Util.lazyAdd;
 import static com.hazelcast.jet.impl.util.Util.lazyIncrement;
 import static com.hazelcast.jet.impl.util.Util.logLateEvent;
-import static com.hazelcast.util.Preconditions.checkTrue;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.util.Collections.emptyMap;
 import static java.util.Objects.requireNonNull;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 
 /**
  * Handles various setups of sliding and tumbling window aggregation.
@@ -74,8 +80,11 @@ import static java.util.Objects.requireNonNull;
 public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
 
     // package-visible for testing
-    final Map<Long, Map<K, A>> tsToKeyToAcc = new HashMap<>();
+    final Long2ObjectHashMap<Map<K, A>> tsToKeyToAcc = new Long2ObjectHashMap<>();
     Map<K, A> slidingWindow;
+    // Holds the sliding window while emitting early window results. We reuse the
+    // slidingWindow field for early results so the code can be simpler.
+    Map<K, A> slidingWindowBackup;
     long nextWinToEmit = Long.MIN_VALUE;
 
     @Nonnull
@@ -85,41 +94,44 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
     @Nonnull
     private final List<Function<Object, ? extends K>> keyFns;
     @Nonnull
-    private final AggregateOperation<A, R> aggrOp;
+    private final AggregateOperation<A, ? extends R> aggrOp;
     @Nonnull
-    private final KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn;
+    private final A emptyAcc;
+    @Nonnull
+    private final KeyedWindowResultFunction<? super K, ? super R, ? extends OUT> mapToOutputFn;
     @Nullable
     private final BiConsumer<? super A, ? super A> combineFn;
     private final boolean isLastStage;
-
     @Nonnull
     private final FlatMapper<Watermark, ?> wmFlatMapper;
-
-    @Probe
-    private AtomicLong lateEventsDropped = new AtomicLong();
-    @Probe
-    private AtomicLong totalFrames = new AtomicLong();
-    @Probe
-    private AtomicLong totalKeysInFrames = new AtomicLong();
-
-    @Nonnull
-    private final A emptyAcc;
-    private Traverser<Object> flushTraverser;
-    private Traverser<Entry> snapshotTraverser;
-
-    // This field tracks the upper bound for the keyset of tsToKeyToAcc.
-    // It serves as an optimization that avoids a full scan over the
-    // entire keyset.
-    private long topTs = Long.MIN_VALUE;
-
-    // value to be used temporarily during snapshot restore
-    private long minRestoredNextWinToEmit = Long.MAX_VALUE;
-    private long minRestoredFrameTs = Long.MAX_VALUE;
     private ProcessingGuarantee processingGuarantee;
 
     // extracted lambdas to reduce GC litter
-    private Function<Long, Map<K, A>> createMapPerTsFunction;
-    private Function<K, A> createAccFunction;
+    private final LongFunction<Map<K, A>> createMapPerTsFunction;
+    private final Function<K, A> createAccFunction;
+
+    @Probe(name = "lateEventsDropped")
+    private final AtomicLong lateEventsDropped = new AtomicLong();
+    @Probe(name = "totalFrames")
+    private final AtomicLong totalFrames = new AtomicLong();
+    @Probe(name = "totalKeysInFrames")
+    private final AtomicLong totalKeysInFrames = new AtomicLong();
+
+    // Fields for early results emission
+    private final long earlyResultsPeriod;
+    private long lastTimeEarlyResultsEmitted;
+    private Traverser<? extends OUT> earlyWinTraverser;
+
+    private Traverser<Object> flushTraverser;
+    private Traverser<Entry> snapshotTraverser;
+
+    // Tracks the upper bound for the keyset of tsToKeyToAcc. Serves as an
+    // optimization that avoids a full scan over the entire keyset.
+    private long topTs = Long.MIN_VALUE;
+
+    // values used temporarily during snapshot restore
+    private long minRestoredNextWinToEmit = Long.MAX_VALUE;
+    private long minRestoredFrameTs = Long.MAX_VALUE;
     private boolean badFrameRestored;
 
     @SuppressWarnings("unchecked")
@@ -127,8 +139,9 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
             @Nonnull List<? extends Function<?, ? extends K>> keyFns,
             @Nonnull List<? extends ToLongFunction<?>> frameTimestampFns,
             @Nonnull SlidingWindowPolicy winPolicy,
-            @Nonnull AggregateOperation<A, R> aggrOp,
-            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn,
+            long earlyResultsPeriod,
+            @Nonnull AggregateOperation<A, ? extends R> aggrOp,
+            @Nonnull KeyedWindowResultFunction<? super K, ? super R, ? extends OUT> mapToOutputFn,
             boolean isLastStage
     ) {
         checkTrue(keyFns.size() == aggrOp.arity(), keyFns.size() + " key functions " +
@@ -136,9 +149,11 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
         if (!winPolicy.isTumbling()) {
             requireNonNull(aggrOp.combineFn(), "AggregateOperation.combineFn is required for sliding windows");
         }
+        checkNotNegative(earlyResultsPeriod, "earlyResultsPeriod must be zero or positive");
         this.winPolicy = winPolicy;
         this.frameTimestampFns = (List<ToLongFunction<Object>>) frameTimestampFns;
         this.keyFns = (List<Function<Object, ? extends K>>) keyFns;
+        this.earlyResultsPeriod = earlyResultsPeriod;
         this.aggrOp = aggrOp;
         this.combineFn = aggrOp.combineFn();
         this.mapToOutputFn = mapToOutputFn;
@@ -149,12 +164,11 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
                         .onFirstNull(() -> nextWinToEmit = winPolicy.higherFrameTs(wm.timestamp()))
         );
         this.emptyAcc = aggrOp.createFn().get();
-
-        createMapPerTsFunction = x -> {
+        this.createMapPerTsFunction = x -> {
             lazyIncrement(totalFrames);
             return new HashMap<>();
         };
-        createAccFunction = k -> {
+        this.createAccFunction = k -> {
             lazyIncrement(totalKeysInFrames);
             return aggrOp.createFn().get();
         };
@@ -163,11 +177,53 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
     @Override
     protected void init(@Nonnull Context context) {
         processingGuarantee = context.processingGuarantee();
+        lastTimeEarlyResultsEmitted = NANOSECONDS.toMillis(System.nanoTime());
+    }
+
+    @Override
+    public boolean tryProcess() {
+        if (earlyResultsPeriod == 0 || topTs == Long.MIN_VALUE) {
+            return true;
+        }
+        if (earlyWinTraverser != null) {
+            return emitFromTraverser(earlyWinTraverser);
+        }
+        long now = NANOSECONDS.toMillis(System.nanoTime());
+        if (now < lastTimeEarlyResultsEmitted + earlyResultsPeriod) {
+            return true;
+        }
+        long rangeStart = startingWindowTs(Long.MAX_VALUE);
+        if (rangeStart == Long.MIN_VALUE) {
+            // There's no data to emit
+            return true;
+        }
+        lastTimeEarlyResultsEmitted = now;
+        slidingWindowBackup = slidingWindow;
+        slidingWindow = null;
+        Stream<Long> earlyWinRange = range(
+                rangeStart,
+                topTs + winPolicy.windowSize() - winPolicy.frameSize(),
+                winPolicy.frameSize())
+            .boxed();
+        earlyWinTraverser = traverseStream(earlyWinRange)
+                .flatMap(winEnd -> traverseIterable(computeWindow(winEnd).entrySet())
+                        .map(e -> mapToOutputFn.apply(
+                                winEnd - winPolicy.windowSize(),
+                                winEnd,
+                                e.getKey(),
+                                aggrOp.exportFn().apply(e.getValue()),
+                                true))
+                        .onFirstNull(() -> completeEarlyWindow(winEnd)))
+                .onFirstNull(() -> {
+                    slidingWindow = slidingWindowBackup;
+                    slidingWindowBackup = null;
+                    earlyWinTraverser = null;
+                });
+        return emitFromTraverser(earlyWinTraverser);
     }
 
     @Override
     protected boolean tryProcess(int ordinal, @Nonnull Object item) {
-        @SuppressWarnings("unchecked")
         final long frameTs = frameTimestampFns.get(ordinal).applyAsLong(item);
         assert frameTs == winPolicy.floorFrameTs(frameTs) : "getFrameTsFn returned an invalid frame timestamp";
 
@@ -212,7 +268,7 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
                     )
                     .append(entry(broadcastKey(Keys.NEXT_WIN_TO_EMIT), nextWinToEmit))
                     .onFirstNull(() -> {
-                        logFine(getLogger(), "Saved nextWinToEmit: %s", nextWinToEmit);
+                        logFinest(getLogger(), "Saved nextWinToEmit: %s", nextWinToEmit);
                         snapshotTraverser = null;
                     });
         }
@@ -237,14 +293,15 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
             return;
         }
         SnapshotKey k = (SnapshotKey) key;
-        // align frame timestamp to our frame - they can be misaligned if slide step was changed in updated DAG
+        // align frame timestamp to our frame - they can be misaligned
+        // if the slide step was changed in the updated DAG
         long higherFrameTs = winPolicy.higherFrameTs(k.timestamp - 1);
         if (higherFrameTs != k.timestamp) {
             if (!badFrameRestored) {
                 badFrameRestored = true;
                 getLogger().warning("Frames in the state do not match the current frame size: they were likely " +
-                        "saved for different window slide step or different offset. The window results will probably be " +
-                        "incorrect until all restored frames are emitted.");
+                        "saved for a different window slide step or a different offset. The window results will " +
+                        "probably be incorrect until all restored frames are emitted.");
             }
         }
         minRestoredFrameTs = Math.min(higherFrameTs, minRestoredFrameTs);
@@ -294,33 +351,40 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
     }
 
     private Traverser<Object> windowTraverserAndEvictor(long wm) {
-        long rangeStart;
-        if (nextWinToEmit != Long.MIN_VALUE) {
-            rangeStart = nextWinToEmit;
-        } else {
-            if (tsToKeyToAcc.isEmpty()) {
-                // no item was observed, but initialize nextWinToEmit to the next window
-                return Traversers.empty();
-            }
-            // This is the first watermark we are acting upon. Find the lowest frame
-            // timestamp that can be emitted: at most the top existing timestamp lower
-            // than wm, but even lower than that if there are older frames on record.
-            // The above guarantees that the sliding window can be correctly
-            // initialized using the "add leading/deduct trailing" approach because we
-            // start from a window that covers at most one existing frame -- the lowest
-            // one on record.
-            long bottomTs = tsToKeyToAcc
-                    .keySet().stream()
-                    .min(naturalOrder())
-                    .orElseThrow(() -> new AssertionError("Failed to find the min key in a non-empty map"));
-            rangeStart = min(bottomTs, winPolicy.floorFrameTs(wm));
+        long rangeStart = startingWindowTs(wm);
+        if (rangeStart == Long.MIN_VALUE) {
+            // we have no data yet, but returning an empty traverser will cause the
+            // wmFlatMapper to initialize nextWinToEmit to the next window
+            return Traversers.empty();
         }
         return traverseStream(range(rangeStart, wm, winPolicy.frameSize()).boxed())
                 .flatMap(winEnd -> traverseIterable(computeWindow(winEnd).entrySet())
-                        .map(e -> mapToOutputFn.apply(
+                        .<Object>map(e -> mapToOutputFn.apply(
                                 winEnd - winPolicy.windowSize(), winEnd,
-                                e.getKey(), aggrOp.finishFn().apply(e.getValue())))
+                                e.getKey(), aggrOp.finishFn().apply(e.getValue()),
+                                false))
                         .onFirstNull(() -> completeWindow(winEnd)));
+    }
+
+    private long startingWindowTs(long wm) {
+        if (nextWinToEmit != Long.MIN_VALUE) {
+            return nextWinToEmit;
+        }
+        if (tsToKeyToAcc.isEmpty()) {
+            return Long.MIN_VALUE;
+        }
+        // We haven't yet processed a watermark so nextWinToEmit is not initialized.
+        // Find the lowest frame timestamp that can be emitted: at most the top
+        // existing timestamp lower than wm, but even lower than that if there are
+        // older frames on record. The above guarantees that the sliding window can
+        // be correctly initialized using the "add leading/deduct trailing" approach
+        // because we start from a window that covers at most one existing frame --
+        // the lowest one on record.
+        long bottomTs = tsToKeyToAcc
+                .keySet().stream()
+                .min(naturalOrder())
+                .orElseThrow(() -> new AssertionError("Failed to find the min key in a non-empty map"));
+        return min(bottomTs, winPolicy.floorFrameTs(wm));
     }
 
     private Map<K, A> computeWindow(long frameTs) {
@@ -369,8 +433,8 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
     }
 
     private void completeWindow(long frameTs) {
-        long frameToEvict = frameTs - winPolicy.windowSize() + winPolicy.frameSize();
-        Map<K, A> evictedFrame = tsToKeyToAcc.remove(frameToEvict);
+        long tsOfFrameToEvict = frameTs - winPolicy.windowSize() + winPolicy.frameSize();
+        Map<K, A> evictedFrame = tsToKeyToAcc.remove(tsOfFrameToEvict);
         if (evictedFrame != null) {
             lazyAdd(totalKeysInFrames, -evictedFrame.size());
             lazyAdd(totalFrames, -1);
@@ -382,6 +446,16 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
         assert tsToKeyToAcc.values().stream().mapToInt(Map::size).sum() == totalKeysInFrames.get()
                 : "totalKeysInFrames mismatch, expected=" + tsToKeyToAcc.values().stream().mapToInt(Map::size).sum()
                 + ", actual=" + totalKeysInFrames.get();
+    }
+
+    private void completeEarlyWindow(long frameTs) {
+        if (winPolicy.isTumbling() || aggrOp.deductFn() == null) {
+            return;
+        }
+        Map<K, A> frameToDeduct = tsToKeyToAcc.get(frameTs - winPolicy.windowSize() + winPolicy.frameSize());
+        if (frameToDeduct != null) {
+            patchSlidingWindow(aggrOp.deductFn(), frameToDeduct);
+        }
     }
 
     private boolean flushBuffers() {
@@ -433,7 +507,7 @@ public class SlidingWindowP<K, A, R, OUT> extends AbstractProcessor {
         }
 
         @Override
-        public int getId() {
+        public int getClassId() {
             return JetInitDataSerializerHook.SLIDING_WINDOW_P_SNAPSHOT_KEY;
         }
 

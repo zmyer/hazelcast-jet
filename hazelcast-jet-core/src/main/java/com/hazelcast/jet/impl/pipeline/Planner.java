@@ -16,6 +16,10 @@
 
 package com.hazelcast.jet.impl.pipeline;
 
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.function.SupplierEx;
+import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.Edge;
 import com.hazelcast.jet.core.EventTimePolicy;
@@ -23,7 +27,8 @@ import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.Vertex;
-import com.hazelcast.jet.function.DistributedSupplier;
+import com.hazelcast.jet.impl.pipeline.transform.FlatMapTransform;
+import com.hazelcast.jet.impl.pipeline.transform.MapTransform;
 import com.hazelcast.jet.impl.pipeline.transform.SinkTransform;
 import com.hazelcast.jet.impl.pipeline.transform.StreamSourceTransform;
 import com.hazelcast.jet.impl.pipeline.transform.TimestampTransform;
@@ -34,18 +39,18 @@ import com.hazelcast.logging.ILogger;
 import com.hazelcast.logging.Logger;
 
 import javax.annotation.Nonnull;
+import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Set;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.ObjIntConsumer;
+import java.util.stream.Collectors;
 
 import static com.hazelcast.jet.core.Edge.from;
 import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
-import static com.hazelcast.jet.impl.TopologicalSorter.topologicalSort;
+import static com.hazelcast.jet.impl.TopologicalSorter.checkTopologicalSort;
 import static java.util.stream.Collectors.toList;
 
 @SuppressWarnings("unchecked")
@@ -58,21 +63,22 @@ public class Planner {
      * necessary, but improves debugging by avoiding too large gaps between WMs
      * and the user can better observe if input to WM coalescing is lagging.
      */
-    private static final int MAXIMUM_WATERMARK_GAP = 1_000;
+    private static final int MAXIMUM_WATERMARK_GAP = 1000;
 
     public final DAG dag = new DAG();
     public final Map<Transform, PlannerVertex> xform2vertex = new HashMap<>();
 
     private final PipelineImpl pipeline;
-    private final Set<String> vertexNames = new HashSet<>();
 
     Planner(PipelineImpl pipeline) {
         this.pipeline = pipeline;
     }
 
     DAG createDag() {
+        pipeline.makeNamesUnique();
         Map<Transform, List<Transform>> adjacencyMap = pipeline.adjacencyMap();
         validateNoLeakage(adjacencyMap);
+        checkTopologicalSort(adjacencyMap.entrySet());
 
         // Find the greatest common denominator of all frame lengths
         // appearing in the pipeline
@@ -81,6 +87,10 @@ public class Planner {
                                                  .filter(frameSize -> frameSize > 0)
                                                  .mapToLong(i -> i)
                                                  .toArray());
+        if (frameSizeGcd == 0) {
+            // even if there are no window aggregations, we want the watermarks for latency debugging
+            frameSizeGcd = MAXIMUM_WATERMARK_GAP;
+        }
         if (frameSizeGcd > MAXIMUM_WATERMARK_GAP) {
             frameSizeGcd = Util.gcd(frameSizeGcd, MAXIMUM_WATERMARK_GAP);
         }
@@ -99,11 +109,107 @@ public class Planner {
             }
         }
 
-        Iterable<Transform> sorted = topologicalSort(adjacencyMap, Object::toString);
-        for (Transform transform : sorted) {
+        // fuse subsequent map/filter/flatMap transforms into one
+        Map<Transform, List<Transform>> originalParents = new HashMap<>();
+        List<Transform> transforms = new ArrayList<>(adjacencyMap.keySet());
+        for (int i = 0; i < transforms.size(); i++) {
+            Transform transform = transforms.get(i);
+            List<Transform> chain = findFusableChain(transform, adjacencyMap);
+            if (chain == null) {
+                continue;
+            }
+            // remove transforms in the chain and replace the parent with a fused transform
+            transforms.removeAll(chain.subList(1, chain.size()));
+            Transform fused = fuseFlatMapTransforms(chain);
+            transforms.set(i, fused);
+            Transform lastInChain = chain.get(chain.size() - 1);
+            for (Transform downstream : adjacencyMap.get(lastInChain)) {
+                originalParents.put(downstream, new ArrayList<>(downstream.upstream()));
+                downstream.upstream().replaceAll(p -> p == lastInChain ? fused : p);
+            }
+        }
+
+        for (Transform transform : transforms) {
             transform.addToDag(this);
         }
+
+        // restore original parents
+        for (Entry<Transform, List<Transform>> en : originalParents.entrySet()) {
+            List<Transform> upstream = en.getKey().upstream();
+            for (int i = 0; i < upstream.size(); i++) {
+                en.getKey().upstream().set(i, en.getValue().get(i));
+            }
+        }
+
         return dag;
+    }
+
+    private static List<Transform> findFusableChain(Transform transform, Map<Transform, List<Transform>> adjacencyMap) {
+        ArrayList<Transform> chain = new ArrayList<>();
+        for (;;) {
+            if (transform instanceof MapTransform || transform instanceof FlatMapTransform) {
+                chain.add(transform);
+                List<Transform> downstreams = adjacencyMap.get(transform);
+                if (downstreams.size() == 1 && downstreams.get(0).localParallelism() == transform.localParallelism()) {
+                    transform = downstreams.get(0);
+                    continue;
+                }
+            }
+            break;
+        }
+        return chain.size() > 1 ? chain : null;
+    }
+
+    private static Transform fuseFlatMapTransforms(List<Transform> chain) {
+        assert chain.size() > 1 : "chain.size()=" + chain.size();
+        assert chain.get(0).upstream().size() == 1;
+
+        int lastFlatMap = 0;
+        FunctionEx<Object, Traverser> flatMapFn = null;
+        for (int i = 0; i < chain.size(); i++) {
+            if (chain.get(i) instanceof FlatMapTransform) {
+                FunctionEx<Object, Traverser> function = ((FlatMapTransform) chain.get(i)).flatMapFn();
+                FunctionEx<Object, Object> inputMapFn = mergeMapFunctions(chain.subList(lastFlatMap, i));
+                if (inputMapFn != null) {
+                    flatMapFn = flatMapFn == null
+                            ? (Object t) -> {
+                                Object mappedValue = inputMapFn.apply(t);
+                                return mappedValue != null ? function.apply(mappedValue) : Traversers.empty();
+                            }
+                            : flatMapFn.andThen(r -> r.map(inputMapFn).flatMap(function));
+                } else {
+                    flatMapFn = flatMapFn == null
+                            ? function::apply
+                            : flatMapFn.andThen(r -> r.flatMap(function));
+                }
+                lastFlatMap = i + 1;
+            }
+        }
+
+        FunctionEx trailingMapFn = mergeMapFunctions(chain.subList(lastFlatMap, chain.size()));
+        String name = chain.stream().map(Transform::name).collect(Collectors.joining(", ", "fused(", ")"));
+        if (flatMapFn == null) {
+            return new MapTransform(name, chain.get(0).upstream().get(0), trailingMapFn);
+        } else {
+            if (trailingMapFn != null) {
+                flatMapFn = flatMapFn.andThen(t -> t.map(trailingMapFn));
+            }
+            return new FlatMapTransform(name, chain.get(0).upstream().get(0), flatMapFn);
+        }
+    }
+
+    private static FunctionEx mergeMapFunctions(List<Transform> chain) {
+        if (chain.isEmpty()) {
+            return null;
+        }
+        List<FunctionEx> functions = chain.stream().map(t -> ((MapTransform) t).mapFn()).collect(toList());
+        return t -> {
+            Object result = t;
+            for (int i = 0; i < functions.size() && result != null; i++) {
+                result = functions.get(i).apply(result);
+            }
+            return result;
+        };
     }
 
     private static void validateNoLeakage(Map<Transform, List<Transform>> adjacencyMap) {
@@ -119,7 +225,7 @@ public class Planner {
     }
 
     public PlannerVertex addVertex(Transform transform, String name, int localParallelism,
-                                   DistributedSupplier<Processor> procSupplier) {
+                                   SupplierEx<Processor> procSupplier) {
         return addVertex(transform, name, localParallelism, ProcessorMetaSupplier.of(procSupplier));
     }
 
@@ -136,7 +242,7 @@ public class Planner {
         return pv;
     }
 
-    public void addEdges(Transform transform, Vertex toVertex, BiConsumer<Edge, Integer> configureEdgeFn) {
+    public void addEdges(Transform transform, Vertex toVertex, ObjIntConsumer<Edge> configureEdgeFn) {
         int destOrdinal = 0;
         for (Transform fromTransform : transform.upstream()) {
             PlannerVertex fromPv = xform2vertex.get(fromTransform);
@@ -153,36 +259,6 @@ public class Planner {
 
     public void addEdges(Transform transform, Vertex toVertex) {
         addEdges(transform, toVertex, e -> { });
-    }
-
-    /**
-     * Makes the proposed name unique in the DAG by adding an optional "-N"
-     * between the name and the suffix.
-     *
-     * @return unique name to be used for the vertex
-     */
-    @Nonnull
-    public String uniqueVertexName(@Nonnull String proposedName) {
-        return uniqueName(vertexNames, proposedName);
-    }
-
-    /**
-     * Returns a unique name for a proposed name given a set of previously known names
-     * by adding an optional "-N" between the name and the suffix.
-     *
-     * @return unique name to be used
-     */
-    @Nonnull
-    static String uniqueName(
-            @Nonnull Set<String> knownNames, @Nonnull String proposedName
-    ) {
-        for (int index = 1; ; index++) {
-            String candidate = proposedName
-                    + (index == 1 ? "" : "-" + index);
-            if (knownNames.add(candidate)) {
-                return candidate;
-            }
-        }
     }
 
     /**

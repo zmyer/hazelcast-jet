@@ -25,12 +25,13 @@ import javax.annotation.Nonnull;
 
 /**
  * {@link Processor.Context} implementation suitable to be used in tests.
+ *
+ * @since 3.0
  */
 public class TestProcessorContext extends TestProcessorSupplierContext implements Processor.Context {
 
     private int localProcessorIndex;
     private int globalProcessorIndex;
-    private ProcessingGuarantee processingGuarantee = ProcessingGuarantee.NONE;
 
     /**
      * Constructor with default values.
@@ -70,20 +71,6 @@ public class TestProcessorContext extends TestProcessorSupplierContext implement
         return this;
     }
 
-    @Override
-    public ProcessingGuarantee processingGuarantee() {
-        return processingGuarantee;
-    }
-
-    /**
-     * Sets the processing guarantee.
-     */
-    @Nonnull
-    public TestProcessorContext setProcessingGuarantee(ProcessingGuarantee processingGuarantee) {
-        this.processingGuarantee = processingGuarantee;
-        return this;
-    }
-
     @Nonnull @Override
     public TestProcessorContext setLogger(@Nonnull ILogger logger) {
         return (TestProcessorContext) super.setLogger(logger);
@@ -107,6 +94,11 @@ public class TestProcessorContext extends TestProcessorSupplierContext implement
     @Nonnull @Override
     public TestProcessorContext setVertexName(@Nonnull String vertexName) {
         return (TestProcessorContext) super.setVertexName(vertexName);
+    }
+
+    @Nonnull @Override
+    public TestProcessorContext setProcessingGuarantee(ProcessingGuarantee processingGuarantee) {
+        return (TestProcessorContext) super.setProcessingGuarantee(processingGuarantee);
     }
 
     @Override

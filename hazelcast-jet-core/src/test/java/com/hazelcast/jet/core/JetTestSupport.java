@@ -16,28 +16,28 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.cache.ICache;
 import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.collection.IList;
 import com.hazelcast.core.HazelcastInstance;
-import com.hazelcast.core.IList;
-import com.hazelcast.core.IMap;
-import com.hazelcast.instance.Node;
-import com.hazelcast.jet.ICacheJet;
-import com.hazelcast.jet.IListJet;
-import com.hazelcast.jet.IMapJet;
+import com.hazelcast.instance.impl.Node;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.JetTestInstanceFactory;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.impl.JetService;
+import com.hazelcast.jet.impl.JobExecutionRecord;
+import com.hazelcast.jet.impl.JobRepository;
 import com.hazelcast.jet.impl.util.Util.RunnableExc;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.logging.Logger;
-import com.hazelcast.nio.Address;
+import com.hazelcast.map.IMap;
 import com.hazelcast.spi.impl.NodeEngineImpl;
-import com.hazelcast.test.AssertTask;
 import com.hazelcast.test.HazelcastTestSupport;
 import org.junit.After;
 
+import javax.annotation.Nonnull;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -46,22 +46,33 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import org.junit.ClassRule;
+import org.junit.rules.Timeout;
 
 import static com.hazelcast.jet.Util.idToString;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 public abstract class JetTestSupport extends HazelcastTestSupport {
+
+    /**
+     * This is needed to finish tests which got stuck in @Before, @BeforeClass, @After or @AfterClass method.
+     */
+    @ClassRule
+    public static Timeout globalTimeout = Timeout.seconds(15 * 60);
 
     protected ILogger logger = Logger.getLogger(getClass());
     private JetTestInstanceFactory instanceFactory;
 
     @After
-    public void shutdownFactory() {
+    public void shutdownFactory() throws Exception {
         if (instanceFactory != null) {
-            instanceFactory.shutdownAll();
+            spawn(() -> instanceFactory.terminateAll())
+                    .get(1, TimeUnit.MINUTES);
         }
     }
 
@@ -102,11 +113,11 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         return instanceFactory.newMember(config, blockedAddress);
     }
 
-    protected static <K, V> IMapJet<K, V> getMap(JetInstance instance) {
+    protected static <K, V> IMap<K, V> getMap(JetInstance instance) {
         return instance.getMap(randomName());
     }
 
-    protected static <K, V> ICacheJet<K, V> getCache(JetInstance instance) {
+    protected static <K, V> ICache<K, V> getCache(JetInstance instance) {
         return instance.getCacheManager().getCache(randomName());
     }
 
@@ -121,7 +132,7 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         }
     }
 
-    protected static <E> IListJet<E> getList(JetInstance instance) {
+    protected static <E> IList<E> getList(JetInstance instance) {
         return instance.getList(randomName());
     }
 
@@ -150,20 +161,8 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
                 assertEquals("jobId=" + idToString(job.getId()), expected, job.getStatus()), timeoutSeconds);
     }
 
-    public static void assertTrueEventually(RunnableExc runnable) {
-        HazelcastTestSupport.assertTrueEventually(assertTask(runnable));
-    }
-
-    public static void assertTrueEventually(RunnableExc runnable, long timeoutSeconds) {
-        HazelcastTestSupport.assertTrueEventually(assertTask(runnable), timeoutSeconds);
-    }
-
-    public static void assertTrueAllTheTime(RunnableExc runnable, long durationSeconds) {
-        HazelcastTestSupport.assertTrueAllTheTime(assertTask(runnable), durationSeconds);
-    }
-
-    public static void assertTrueFiveSeconds(RunnableExc runnable) {
-        HazelcastTestSupport.assertTrueFiveSeconds(assertTask(runnable));
+    public static void assertClusterSizeEventually(int size, JetInstance jetInstance) {
+        HazelcastTestSupport.assertClusterSizeEventually(size, jetInstance.getHazelcastInstance());
     }
 
     public static JetService getJetService(JetInstance jetInstance) {
@@ -186,15 +185,6 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         return getNodeEngineImpl(hz(instance));
     }
 
-    private static AssertTask assertTask(RunnableExc runnable) {
-        return new AssertTask() {
-            @Override
-            public void run() throws Exception {
-                runnable.run();
-            }
-        };
-    }
-
     public Address nextAddress() {
         return instanceFactory.nextAddress();
     }
@@ -215,5 +205,77 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
 
     public static Watermark wm(long timestamp) {
         return new Watermark(timestamp);
+    }
+
+    public void waitForFirstSnapshot(JobRepository jr, long jobId, int timeoutSeconds, boolean allowEmptySnapshot) {
+        long[] snapshotId = {-1};
+        assertTrueEventually(() -> {
+            JobExecutionRecord record = jr.getJobExecutionRecord(jobId);
+            assertNotNull("null JobExecutionRecord", record);
+            assertTrue("No snapshot produced",
+                    record.dataMapIndex() >= 0 && record.snapshotId() >= 0);
+            assertTrue("stats are 0", allowEmptySnapshot || record.snapshotStats().numBytes() > 0);
+            snapshotId[0] = record.snapshotId();
+        }, timeoutSeconds);
+        logger.info("First snapshot found (id=" + snapshotId[0] + ")");
+    }
+
+    public void waitForNextSnapshot(JobRepository jr, long jobId, int timeoutSeconds) {
+        long originalSnapshotId = jr.getJobExecutionRecord(jobId).snapshotId();
+        // wait until there is at least one more snapshot
+        long[] snapshotId = {-1};
+        assertTrueEventually(() -> {
+            JobExecutionRecord record = jr.getJobExecutionRecord(jobId);
+            assertNotNull("jobExecutionRecord is null", record);
+            snapshotId[0] = record.snapshotId();
+            assertTrue("No more snapshots produced after restart in " + timeoutSeconds + " seconds",
+                    snapshotId[0] > originalSnapshotId);
+            assertTrue("stats are 0", record.snapshotStats().numBytes() > 0);
+        }, timeoutSeconds);
+        logger.info("Next snapshot found (id=" + snapshotId[0] + ", previous id=" + originalSnapshotId + ")");
+    }
+
+    /**
+     * Give this method a job and it will ensure it's no longer running. It
+     * will ignore if it's not running. If the cancellation fails, it will
+     * retry.
+     */
+    public void ditchJob(@Nonnull Job job, @Nonnull JetInstance... instancesToShutDown) {
+        int numAttempts;
+        for (numAttempts = 0; numAttempts < 10; numAttempts++) {
+            Exception cancellationFailure;
+            try {
+                job.cancel();
+                try {
+                    job.join();
+                } catch (Exception ignored) {
+                    // This can be CancellationException or any other job failure. We don't care,
+                    // we're supposed to rid the cluster of the job and that's what we have.
+                }
+                return;
+            } catch (Exception e) {
+                cancellationFailure = e;
+            }
+
+            sleepMillis(500);
+            JobStatus status = null;
+            try {
+                status = job.getStatus();
+                if (status == JobStatus.FAILED || status == JobStatus.COMPLETED) {
+                    return;
+                }
+            } catch (Exception e) {
+                logger.warning("Failure to read job status: " + e, e);
+            }
+            logger.warning("Failed to cancel the job and it is " + status + ", retrying. Failure: " + cancellationFailure,
+                    cancellationFailure);
+        }
+
+        // if we got here, 10 attempts to cancel the job have failed. Cluster is in bad shape probably, shut it down
+        logger.warning(numAttempts + " attempts to cancel the job failed"
+                + (instancesToShutDown.length > 0 ? ", shutting the cluster down" : ""));
+        for (JetInstance instance : instancesToShutDown) {
+            instance.getHazelcastInstance().getLifecycleService().terminate();
+        }
     }
 }

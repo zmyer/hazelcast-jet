@@ -18,6 +18,7 @@ package com.hazelcast.jet.core.test;
 
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.logging.Logger;
@@ -27,6 +28,8 @@ import javax.annotation.Nonnull;
 /**
  * {@link ProcessorMetaSupplier.Context} implementation suitable to be used
  * in tests.
+ *
+ * @since 3.0
  */
 public class TestProcessorMetaSupplierContext implements ProcessorMetaSupplier.Context {
 
@@ -39,6 +42,7 @@ public class TestProcessorMetaSupplierContext implements ProcessorMetaSupplier.C
     private int totalParallelism = 1;
     private int localParallelism = 1;
     private String vertexName = "testVertex";
+    private ProcessingGuarantee processingGuarantee;
 
     @Nonnull @Override
     public JetInstance jetInstance() {
@@ -160,5 +164,19 @@ public class TestProcessorMetaSupplierContext implements ProcessorMetaSupplier.C
 
     protected String loggerName() {
         return vertexName() + "#PMS";
+    }
+
+    @Override
+    public ProcessingGuarantee processingGuarantee() {
+        return processingGuarantee;
+    }
+
+    /**
+     * Sets the processing guarantee.
+     */
+    @Nonnull
+    public TestProcessorMetaSupplierContext setProcessingGuarantee(ProcessingGuarantee processingGuarantee) {
+        this.processingGuarantee = processingGuarantee;
+        return this;
     }
 }

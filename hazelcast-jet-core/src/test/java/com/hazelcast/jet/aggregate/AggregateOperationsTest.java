@@ -18,6 +18,7 @@ package com.hazelcast.jet.aggregate;
 
 import com.hazelcast.internal.serialization.InternalSerializationService;
 import com.hazelcast.internal.serialization.impl.DefaultSerializationServiceBuilder;
+import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.accumulator.DoubleAccumulator;
 import com.hazelcast.jet.accumulator.LinTrendAccumulator;
 import com.hazelcast.jet.accumulator.LongAccumulator;
@@ -27,7 +28,6 @@ import com.hazelcast.jet.accumulator.MutableReference;
 import com.hazelcast.jet.datamodel.ItemsByTag;
 import com.hazelcast.jet.datamodel.Tag;
 import com.hazelcast.jet.datamodel.Tuple2;
-import com.hazelcast.jet.function.DistributedFunctions;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Rule;
 import org.junit.Test;
@@ -46,6 +46,9 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
+import static com.hazelcast.function.ComparatorEx.naturalOrder;
+import static com.hazelcast.function.Functions.entryKey;
+import static com.hazelcast.function.Functions.entryValue;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.aggregate.AggregateOperations.allOf;
 import static com.hazelcast.jet.aggregate.AggregateOperations.allOfBuilder;
@@ -54,6 +57,8 @@ import static com.hazelcast.jet.aggregate.AggregateOperations.averagingLong;
 import static com.hazelcast.jet.aggregate.AggregateOperations.bottomN;
 import static com.hazelcast.jet.aggregate.AggregateOperations.concatenating;
 import static com.hazelcast.jet.aggregate.AggregateOperations.counting;
+import static com.hazelcast.jet.aggregate.AggregateOperations.filtering;
+import static com.hazelcast.jet.aggregate.AggregateOperations.flatMapping;
 import static com.hazelcast.jet.aggregate.AggregateOperations.groupingBy;
 import static com.hazelcast.jet.aggregate.AggregateOperations.linearTrend;
 import static com.hazelcast.jet.aggregate.AggregateOperations.mapping;
@@ -70,9 +75,6 @@ import static com.hazelcast.jet.aggregate.AggregateOperations.toSet;
 import static com.hazelcast.jet.aggregate.AggregateOperations.topN;
 import static com.hazelcast.jet.datamodel.Tuple2.tuple2;
 import static com.hazelcast.jet.datamodel.Tuple3.tuple3;
-import static com.hazelcast.jet.function.DistributedComparator.naturalOrder;
-import static com.hazelcast.jet.function.DistributedFunctions.entryKey;
-import static com.hazelcast.jet.function.DistributedFunctions.entryValue;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singleton;
 import static java.util.Collections.singletonList;
@@ -107,13 +109,13 @@ public class AggregateOperationsTest {
     }
 
     @Test
-    public void when_summingToLong() {
+    public void when_summingLong() {
         validateOp(summingLong(Long::longValue), LongAccumulator::get,
                 1L, 2L, 1L, 3L, 3L);
     }
 
     @Test
-    public void when_summingToDouble() {
+    public void when_summingDouble() {
         validateOp(summingDouble(Double::doubleValue), DoubleAccumulator::export,
                 0.5, 1.5, 0.5, 2.0, 2.0);
     }
@@ -328,7 +330,7 @@ public class AggregateOperationsTest {
         combined.put(2, 2);
 
         validateOpWithoutDeduct(
-                toMap(entryKey(), entryValue()),
+                toMap(Entry::getKey, Entry::getValue),
                 identity(), entry(1, 1), entry(2, 2),
                 acced, combined, combined);
     }
@@ -336,7 +338,7 @@ public class AggregateOperationsTest {
     @Test
     public void when_toMapDuplicateAccumulate_then_fail() {
         AggregateOperation1<Entry<Integer, Integer>, Map<Integer, Integer>, Map<Integer, Integer>> op =
-                toMap(entryKey(), entryValue());
+                toMap(Entry::getKey, Entry::getValue);
 
         Map<Integer, Integer> acc = op.createFn().get();
         op.accumulateFn().accept(acc, entry(1, 1));
@@ -348,7 +350,7 @@ public class AggregateOperationsTest {
     @Test
     public void when_toMapDuplicateCombine_then_fail() {
         AggregateOperation1<Entry<Integer, Integer>, Map<Integer, Integer>, Map<Integer, Integer>> op =
-                toMap(entryKey(), entryValue());
+                toMap(Entry::getKey, Entry::getValue);
 
         Map<Integer, Integer> acc1 = op.createFn().get();
         op.accumulateFn().accept(acc1, entry(1, 1));
@@ -368,7 +370,7 @@ public class AggregateOperationsTest {
         combined.put(1, 3);
 
         validateOpWithoutDeduct(
-                toMap(DistributedFunctions.<Integer, Integer>entryKey(), entryValue(), Integer::sum),
+                toMap(Entry::getKey, Entry::getValue, Integer::sum),
                 identity(), entry(1, 1), entry(1, 2),
                 acced, combined, combined);
     }
@@ -376,7 +378,7 @@ public class AggregateOperationsTest {
     @Test
     public void when_mappingWithoutDeduct() {
         validateOpWithoutDeduct(
-                mapping((Entry<?, Integer> e) -> e.getValue(), maxBy(naturalOrder())),
+                mapping(entryValue(), maxBy(naturalOrder())),
                 identity(),
                 entry("a", 1),
                 entry("b", 2),
@@ -389,7 +391,7 @@ public class AggregateOperationsTest {
     @Test
     public void when_mappingWithDeduct() {
         validateOp(
-                mapping((Entry<?, Long> e) -> e.getValue(), summingLong(i -> i)),
+                mapping(entryValue(), summingLong(i -> i)),
                 identity(),
                 entry("a", 1L),
                 entry("b", 2L),
@@ -402,13 +404,39 @@ public class AggregateOperationsTest {
     @Test
     public void when_mappingToNull_then_doNotAggregate() {
         validateOp(
-                mapping((Entry<?, Long> e) -> e.getValue(), summingLong(i -> i)),
+                mapping(entryValue(), summingLong(i -> i)),
                 identity(),
                 entry("a", null),
                 entry("b", 2L),
                 new LongAccumulator(0),
                 new LongAccumulator(2),
                 2L
+        );
+    }
+
+    @Test
+    public void when_filtering() {
+        validateOp(
+                filtering(i -> i > 1L, summingLong(i -> i)),
+                identity(),
+                1L,
+                2L,
+                new LongAccumulator(0),
+                new LongAccumulator(2),
+                2L
+        );
+    }
+
+    @Test
+    public void when_flatMapping() {
+        validateOp(
+                flatMapping(i -> Traversers.traverseItems(i + 10, i + 20), summingLong(i -> i)),
+                identity(),
+                1L,
+                2L,
+                new LongAccumulator(32), // 11 + 21
+                new LongAccumulator(66), // 11 + 21 + 12 + 22
+                66L
         );
     }
 
@@ -572,7 +600,7 @@ public class AggregateOperationsTest {
 
         Tuple2<Double, Integer> result = stream
                 .boxed()
-                .collect(allOf(averageOp, maxOp).toCollector());
+                .collect(AggregateOperations.toCollector(allOf(averageOp, maxOp)));
 
         assertEquals((Double) 499.5d, result.f0());
         assertEquals((Integer) 999, result.f1());

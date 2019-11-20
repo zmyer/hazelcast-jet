@@ -16,12 +16,12 @@
 
 package com.hazelcast.jet.server;
 
-import com.hazelcast.config.EventJournalConfig;
-import com.hazelcast.jet.IListJet;
-import com.hazelcast.jet.IMapJet;
+import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.cluster.Address;
+import com.hazelcast.collection.IList;
+import com.hazelcast.internal.nio.IOUtil;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
-import com.hazelcast.jet.JobStateSnapshot;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.JetTestSupport;
@@ -29,23 +29,33 @@ import com.hazelcast.jet.core.JobStatus;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.jet.pipeline.Sources;
+import com.hazelcast.map.IMap;
 import com.hazelcast.test.HazelcastParallelClassRunner;
+import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.function.Function;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.jet.pipeline.JournalInitialPosition.START_FROM_OLDEST;
 import static com.hazelcast.jet.server.JetCommandLine.runCommandLine;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 @RunWith(HazelcastParallelClassRunner.class)
 public class JetCommandLineTest extends JetTestSupport {
@@ -53,6 +63,10 @@ public class JetCommandLineTest extends JetTestSupport {
     private static final String SOURCE_NAME = "source";
     private static final String SINK_NAME = "sink";
     private static final int ITEM_COUNT = 1000;
+
+    private static Path testJobJarFile;
+    private static File xmlConfiguration;
+    private static File yamlConfiguration;
 
     @Rule
     public ExpectedException exception = ExpectedException.none();
@@ -63,19 +77,57 @@ public class JetCommandLineTest extends JetTestSupport {
     private PrintStream out;
     private PrintStream err;
     private JetInstance jet;
-    private IMapJet<Integer, Integer> sourceMap;
-    private IListJet<Integer> sinkList;
+    private IMap<Integer, Integer> sourceMap;
+    private IList<Integer> sinkList;
+    private JetInstance client;
+
+    @BeforeClass
+    public static void beforeClass() throws IOException {
+        testJobJarFile = Files.createTempFile("testjob-", ".jar");
+        IOUtil.copy(JetCommandLineTest.class.getResourceAsStream("testjob.jar"), testJobJarFile.toFile());
+        xmlConfiguration = new File(JetCommandLineTest.class.getResource("hazelcast-client-test.xml").getPath());
+        yamlConfiguration = new File(JetCommandLineTest.class.getResource("hazelcast-client-test.yaml").getPath());
+    }
+
+    @AfterClass
+    public static void afterClass() {
+        IOUtil.deleteQuietly(testJobJarFile.toFile());
+    }
 
     @Before
-    public void setup() {
+    public void before() {
         JetConfig cfg = new JetConfig();
-        cfg.getHazelcastConfig().addEventJournalConfig(new EventJournalConfig().setMapName(SOURCE_NAME));
+        cfg.getHazelcastConfig().getMapConfig(SOURCE_NAME).getEventJournalConfig().setEnabled(true);
+        String clusterName = randomName();
+        cfg.getHazelcastConfig().setClusterName(clusterName);
         jet = createJetMember(cfg);
+        ClientConfig clientConfig = new ClientConfig();
+        clientConfig.setClusterName(clusterName);
+        client = createJetClient(clientConfig);
         resetOut();
 
+        Address address = jet.getCluster().getLocalMember().getAddress();
+        System.setProperty("member", address.getHost() + ":" + address.getPort());
+        System.setProperty("group", clusterName);
         sourceMap = jet.getMap(SOURCE_NAME);
         IntStream.range(0, ITEM_COUNT).forEach(i -> sourceMap.put(i, i));
         sinkList = jet.getList(SINK_NAME);
+    }
+
+    @After
+    public void after() {
+        String stdOutput = captureOut();
+        if (stdOutput.length() > 0) {
+            System.out.println("--- Captured standard output");
+            System.out.println(stdOutput);
+            System.out.println("--- End of captured standard output");
+        }
+        String errOutput = captureErr();
+        if (errOutput.length() > 0) {
+            System.out.println("--- Captured error output");
+            System.out.println(errOutput);
+            System.out.println("--- End of captured error output");
+        }
     }
 
     @Test
@@ -89,6 +141,22 @@ public class JetCommandLineTest extends JetTestSupport {
         // Then
         String actual = captureOut();
         assertContains(actual, job.getName());
+        assertContains(actual, job.getIdString());
+        assertContains(actual, job.getStatus().toString());
+    }
+
+    @Test
+    public void test_listJobs_dirtyName() {
+        // Given
+        String jobName = "job\n\tname\u0000";
+        Job job = newJob(jobName);
+
+        // When
+        run("list-jobs");
+
+        // Then
+        String actual = captureOut();
+        assertContains(actual, jobName);
         assertContains(actual, job.getIdString());
         assertContains(actual, job.getStatus().toString());
     }
@@ -189,6 +257,7 @@ public class JetCommandLineTest extends JetTestSupport {
         Job job = newJob();
         assertJobStatusEventually(job, JobStatus.RUNNING);
         job.suspend();
+        assertJobStatusEventually(job, JobStatus.SUSPENDED);
 
         // When
         run("resume", job.getName());
@@ -203,6 +272,7 @@ public class JetCommandLineTest extends JetTestSupport {
         Job job = newJob();
         assertJobStatusEventually(job, JobStatus.RUNNING);
         job.suspend();
+        assertJobStatusEventually(job, JobStatus.SUSPENDED);
 
         // When
         run("resume", job.getIdString());
@@ -282,52 +352,6 @@ public class JetCommandLineTest extends JetTestSupport {
     }
 
     @Test
-    public void test_saveSnapshot_byJobName() {
-        // Given
-        Job job = newJob();
-        assertJobStatusEventually(job, JobStatus.RUNNING);
-
-        // When
-        run("save-snapshot", job.getName(), "my-snapshot");
-
-        // Then
-        JobStateSnapshot ss = jet.getJobStateSnapshot("my-snapshot");
-        assertNotNull("no snapshot was found", ss);
-        assertEquals(job.getName(), ss.jobName());
-    }
-
-    @Test
-    public void test_saveSnapshotAndCancel_byJobName() {
-        // Given
-        Job job = newJob();
-        assertJobStatusEventually(job, JobStatus.RUNNING);
-
-        // When
-        run("save-snapshot", "-C", job.getName(), "my-snapshot");
-
-        // Then
-        JobStateSnapshot ss = jet.getJobStateSnapshot("my-snapshot");
-        assertNotNull("no snapshot was found", ss);
-        assertEquals(job.getName(), ss.jobName());
-        assertJobStatusEventually(job, JobStatus.FAILED);
-    }
-
-    @Test
-    public void test_saveSnapshot_byJobId() {
-        // Given
-        Job job = newJob();
-        assertJobStatusEventually(job, JobStatus.RUNNING);
-
-        // When
-        run("save-snapshot", job.getIdString(), "my-snapshot");
-
-        // Then
-        JobStateSnapshot ss = jet.getJobStateSnapshot("my-snapshot");
-        assertNotNull("no snapshot was found", ss);
-        assertEquals(job.getName(), ss.jobName());
-    }
-
-    @Test
     public void test_saveSnapshot_invalidNameOrId() {
         // When
         // Then
@@ -350,34 +374,15 @@ public class JetCommandLineTest extends JetTestSupport {
     }
 
     @Test
-    public void test_deleteSnapshot_bySnapshotName() {
-        // Given
-        Job job = newJob();
-        assertJobStatusEventually(job, JobStatus.RUNNING);
-        JobStateSnapshot snapshot = job.exportSnapshot("my-snapshot");
-
-        // When
-        run("delete-snapshot", snapshot.name());
-
-        // Then
-        JobStateSnapshot ss = jet.getJobStateSnapshot(snapshot.name());
-        assertNull("Snapshot should have been deleted", ss);
-    }
-
-    @Test
     public void test_listSnapshots() {
         // Given
-        Job job = newJob();
-        assertJobStatusEventually(job, JobStatus.RUNNING);
-        JobStateSnapshot snapshot = job.exportSnapshot("my-snapshot");
-
         // When
         run("list-snapshots");
 
         // Then
         String actual = captureOut();
-        assertContains(actual, snapshot.name());
-        assertContains(actual, snapshot.jobName());
+        assertTrue("output should contain one line (the table header), but contains:\n" + actual,
+                actual.trim().indexOf('\n') < 0 && !actual.isEmpty());
     }
 
     @Test
@@ -387,7 +392,7 @@ public class JetCommandLineTest extends JetTestSupport {
 
         // Then
         String actual = captureOut();
-        assertContains(actual, jet.getCluster().getLocalMember().getUuid());
+        assertContains(actual, jet.getCluster().getLocalMember().getUuid().toString());
         assertContains(actual, "ACTIVE");
     }
 
@@ -415,6 +420,58 @@ public class JetCommandLineTest extends JetTestSupport {
         testVerbosity("-v", "suspend", "jobName");
     }
 
+    @Test
+    public void test_submit() {
+        run("submit", testJobJarFile.toString());
+        assertTrueEventually(() -> assertEquals(1, jet.getJobs().size()));
+        Job job = jet.getJobs().get(0);
+        assertJobStatusEventually(job, JobStatus.RUNNING);
+        assertNull(job.getName());
+    }
+
+    @Test
+    public void test_submit_clientShutdownWhenDone() {
+        run("submit", testJobJarFile.toString());
+        assertTrueEventually(() -> assertEquals(1, jet.getJobs().size()));
+        Job job = jet.getJobs().get(0);
+        assertJobStatusEventually(job, JobStatus.RUNNING);
+        assertFalse("Instance should be shut down", client.getHazelcastInstance().getLifecycleService().isRunning());
+    }
+
+    @Test
+    public void test_submit_nameUsed() {
+        run("submit", "-n", "fooName", testJobJarFile.toString());
+        assertTrueEventually(() -> assertEquals(1, jet.getJobs().size()), 5);
+        Job job = jet.getJobs().get(0);
+        assertEquals("fooName", job.getName());
+    }
+
+    @Test
+    public void test_submit_argsPassing() {
+        run("submit", testJobJarFile.toString(), "--jobOption", "fooValue");
+        // this list is created by the job in testjob.jar
+        IList<String> args = jet.getList("args");
+        assertTrueEventually(() -> assertContains(captureOut(), " with arguments [--jobOption, fooValue]"));
+    }
+
+    @Test
+    public void test_yaml_configuration() {
+        test_custom_configuration(yamlConfiguration.toString());
+    }
+
+    @Test
+    public void test_xml_configuration() {
+        test_custom_configuration(xmlConfiguration.toString());
+    }
+
+    private void test_custom_configuration(String configFile) {
+        run(this::createJetClient, "-f", configFile, "cluster");
+
+        String actual = captureOut();
+        assertContains(actual, jet.getCluster().getLocalMember().getUuid().toString());
+        assertContains(actual, "ACTIVE");
+    }
+
     private void testVerbosity(String... args) {
         System.out.println("Testing verbosity with parameters " + Arrays.toString(args));
         try {
@@ -426,20 +483,26 @@ public class JetCommandLineTest extends JetTestSupport {
     }
 
     private Job newJob() {
+        return newJob("job-infinite-pipeline");
+    }
+
+    private Job newJob(String jobName) {
         Pipeline p = Pipeline.create();
-        p.drawFrom(Sources.mapJournal(SOURCE_NAME, START_FROM_OLDEST))
-                .withoutTimestamps()
-                .drainTo(Sinks.list(SINK_NAME));
-        Job job = jet.newJob(p, new JobConfig().setName("job-infinite-pipeline"));
+        p.readFrom(Sources.mapJournal(SOURCE_NAME, START_FROM_OLDEST))
+         .withoutTimestamps()
+         .writeTo(Sinks.list(SINK_NAME));
+        Job job = jet.newJob(p, new JobConfig().setName(jobName));
         assertJobStatusEventually(job, JobStatus.RUNNING);
         return job;
     }
 
     private void run(String... args) {
-        runCommandLine(cfg -> createJetClient(), out, err, false, args);
+        runCommandLine(cfg -> client, out, err, false, args);
     }
 
-
+    private void run(Function<ClientConfig, JetInstance> clientFn, String... args) {
+        runCommandLine(clientFn, out, err, false, args);
+    }
 
     private void resetOut() {
         baosOut = new ByteArrayOutputStream();

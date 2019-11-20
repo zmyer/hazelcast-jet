@@ -16,7 +16,7 @@
 
 package com.hazelcast.jet.impl.connector;
 
-import com.hazelcast.config.EventJournalConfig;
+import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
@@ -30,10 +30,9 @@ import com.hazelcast.jet.core.test.TestInbox;
 import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.core.test.TestSupport;
-import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.pipeline.JournalInitialPosition;
+import com.hazelcast.map.EventJournalMapEvent;
 import com.hazelcast.map.impl.proxy.MapProxyImpl;
-import com.hazelcast.map.journal.EventJournalMapEvent;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Before;
 import org.junit.Test;
@@ -66,7 +65,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
     private static final int JOURNAL_CAPACITY = NUM_PARTITIONS * CAPACITY_PER_PARTITION;
 
     private MapProxyImpl<String, Integer> map;
-    private DistributedSupplier<Processor> supplier;
+    private SupplierEx<Processor> supplier;
     private JetInstance instance;
     private String key0;
     private String key1;
@@ -75,13 +74,11 @@ public class StreamEventJournalPTest extends JetTestSupport {
     public void setUp() {
         JetConfig config = new JetConfig();
 
-        EventJournalConfig journalConfig = new EventJournalConfig()
-                .setMapName("*")
-                .setCapacity(JOURNAL_CAPACITY)
-                .setEnabled(true);
 
         config.getHazelcastConfig().setProperty(PARTITION_COUNT.getName(), String.valueOf(NUM_PARTITIONS));
-        config.getHazelcastConfig().addEventJournalConfig(journalConfig);
+        config.getHazelcastConfig().getMapConfig("*")
+              .getEventJournalConfig().setEnabled(true)
+              .setCapacity(JOURNAL_CAPACITY);
         instance = this.createJetMember(config);
 
         map = (MapProxyImpl<String, Integer>) instance.getHazelcastInstance().<String, Integer>getMap("test");
@@ -102,8 +99,9 @@ public class StreamEventJournalPTest extends JetTestSupport {
 
         TestSupport.verifyProcessor(supplier)
                    .disableProgressAssertion() // no progress assertion because of async calls
-                   .disableRunUntilCompleted(1000) // processor would never complete otherwise
+                   .runUntilOutputMatches(60_000, 100)
                    .outputChecker(SAME_ITEMS_ANY_ORDER) // ordering is only per partition
+                   .jetInstance(instance)
                    .expectOutput(Arrays.asList(0, 1, 2, 3));
     }
 
@@ -113,7 +111,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
         List<Object> actual = new ArrayList<>();
         Processor p = supplier.get();
 
-        p.init(outbox, new TestProcessorContext());
+        p.init(outbox, new TestProcessorContext().setJetInstance(instance));
 
         fillJournal(CAPACITY_PER_PARTITION);
 
@@ -140,7 +138,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
     public void when_lostItems() throws Exception {
         TestOutbox outbox = new TestOutbox(new int[]{16}, 16);
         Processor p = supplier.get();
-        p.init(outbox, new TestProcessorContext());
+        p.init(outbox, new TestProcessorContext().setJetInstance(instance));
 
         // overflow the journal
         fillJournal(CAPACITY_PER_PARTITION + 1);
@@ -158,7 +156,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
     public void when_lostItems_afterRestore() throws Exception {
         TestOutbox outbox = new TestOutbox(new int[]{16}, 16);
         final Processor p = supplier.get();
-        p.init(outbox, new TestProcessorContext());
+        p.init(outbox, new TestProcessorContext().setJetInstance(instance));
         List<Object> output = new ArrayList<>();
 
         assertTrueEventually(() -> {
@@ -191,7 +189,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
         fillJournal(CAPACITY_PER_PARTITION + 1);
 
         // initial offsets will be 5, since capacity per partition is 5
-        p.init(outbox, new TestProcessorContext());
+        p.init(outbox, new TestProcessorContext().setJetInstance(instance));
 
         // clear partitions before doing any read, but after initializing offsets
         map.destroy();
@@ -251,7 +249,7 @@ public class StreamEventJournalPTest extends JetTestSupport {
         Processor p = supplier.get();
         TestOutbox newOutbox = new TestOutbox(new int[]{16}, 16);
         List<Object> output = new ArrayList<>();
-        p.init(newOutbox, new TestProcessorContext());
+        p.init(newOutbox, new TestProcessorContext().setJetInstance(instance));
         TestInbox inbox = new TestInbox();
 
         inbox.addAll(snapshotItems);

@@ -20,11 +20,13 @@ import com.hazelcast.jet.core.Edge;
 
 import java.io.Serializable;
 
-import static com.hazelcast.util.Preconditions.checkPositive;
+import static com.hazelcast.internal.util.Preconditions.checkPositive;
 
 /**
  * A configuration object for a DAG {@link Edge} that holds fine-tuning
  * parameters that influence its performance characteristics.
+ *
+ * @since 3.0
  */
 public class EdgeConfig implements Serializable {
 
