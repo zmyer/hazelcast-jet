@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package com.hazelcast.jet.impl.pipeline;
 
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.datamodel.Tag;
+import com.hazelcast.jet.impl.pipeline.transform.AbstractTransform;
 import com.hazelcast.jet.impl.pipeline.transform.AggregateTransform;
 import com.hazelcast.jet.impl.pipeline.transform.Transform;
 import com.hazelcast.jet.impl.pipeline.transform.WindowAggregateTransform;
@@ -32,14 +33,17 @@ import java.util.List;
 import static com.hazelcast.jet.datamodel.Tag.tag;
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ADAPT_TO_JET_EVENT;
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ensureJetEvents;
-import static java.util.stream.Collectors.toList;
+import static com.hazelcast.jet.impl.util.Util.toList;
 
 public class AggBuilder {
     @Nullable
     private final WindowDefinition wDef;
+
     @Nonnull
     private final PipelineImpl pipelineImpl;
+
     @Nonnull
+    @SuppressWarnings("rawtypes")
     private final List<GeneralStage> upstreamStages = new ArrayList<>();
 
     public <T0> AggBuilder(
@@ -52,7 +56,7 @@ public class AggBuilder {
     }
 
     @Nonnull
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public <E> Tag<E> add(@Nonnull GeneralStage<E> stage) {
         if (wDef != null) {
             ensureJetEvents((ComputeStageImplBase) stage, "This pipeline stage");
@@ -62,24 +66,21 @@ public class AggBuilder {
     }
 
     @Nonnull
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public <A, R, OUT, OUT_STAGE extends GeneralStage<OUT>> OUT_STAGE build(
             @Nonnull AggregateOperation<A, R> aggrOp,
             @Nonnull CreateOutStageFn<OUT, OUT_STAGE> createOutStageFn
     ) {
         AggregateOperation adaptedAggrOp = wDef != null ? ADAPT_TO_JET_EVENT.adaptAggregateOperation(aggrOp) : aggrOp;
-        List<Transform> upstreamTransforms = upstreamStages
-                .stream()
-                .map(s -> ((AbstractStage) s).transform)
-                .collect(toList());
-        final Transform transform;
+        List<Transform> upstreamTransforms = toList(upstreamStages, s -> ((AbstractStage) s).transform);
+        final AbstractTransform transform;
         if (wDef != null) {
             transform = new WindowAggregateTransform<>(upstreamTransforms, wDef, adaptedAggrOp);
         } else {
             transform = new AggregateTransform<>(upstreamTransforms, adaptedAggrOp);
         }
         OUT_STAGE attached = createOutStageFn.get(transform, ADAPT_TO_JET_EVENT, pipelineImpl);
-        pipelineImpl.connect(upstreamTransforms, transform);
+        pipelineImpl.connectGeneralStages(upstreamStages, transform);
         return attached;
     }
 

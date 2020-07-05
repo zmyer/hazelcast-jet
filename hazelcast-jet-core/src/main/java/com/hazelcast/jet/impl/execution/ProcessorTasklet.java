@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.impl.execution;
 
+import com.hazelcast.core.ManagedContext;
 import com.hazelcast.internal.metrics.MetricDescriptor;
 import com.hazelcast.internal.metrics.MetricsCollectionContext;
 import com.hazelcast.internal.metrics.Probe;
@@ -23,6 +24,8 @@ import com.hazelcast.internal.metrics.ProbeLevel;
 import com.hazelcast.internal.metrics.ProbeUnit;
 import com.hazelcast.internal.serialization.SerializationService;
 import com.hazelcast.internal.util.Preconditions;
+import com.hazelcast.internal.util.counters.Counter;
+import com.hazelcast.internal.util.counters.SwCounter;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.Processor;
@@ -49,7 +52,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.function.Predicate;
 
@@ -61,14 +65,21 @@ import static com.hazelcast.jet.core.metrics.MetricNames.RECEIVED_BATCHES;
 import static com.hazelcast.jet.core.metrics.MetricNames.RECEIVED_COUNT;
 import static com.hazelcast.jet.core.metrics.MetricNames.TOP_OBSERVED_WM;
 import static com.hazelcast.jet.impl.execution.DoneItem.DONE_ITEM;
+import static com.hazelcast.jet.impl.execution.ProcessorState.CLOSE;
 import static com.hazelcast.jet.impl.execution.ProcessorState.COMPLETE;
 import static com.hazelcast.jet.impl.execution.ProcessorState.COMPLETE_EDGE;
 import static com.hazelcast.jet.impl.execution.ProcessorState.EMIT_BARRIER;
 import static com.hazelcast.jet.impl.execution.ProcessorState.EMIT_DONE_ITEM;
 import static com.hazelcast.jet.impl.execution.ProcessorState.END;
+import static com.hazelcast.jet.impl.execution.ProcessorState.NULLARY_PROCESS;
 import static com.hazelcast.jet.impl.execution.ProcessorState.PROCESS_INBOX;
 import static com.hazelcast.jet.impl.execution.ProcessorState.PROCESS_WATERMARK;
 import static com.hazelcast.jet.impl.execution.ProcessorState.SAVE_SNAPSHOT;
+import static com.hazelcast.jet.impl.execution.ProcessorState.SNAPSHOT_COMMIT_FINISH__COMPLETE;
+import static com.hazelcast.jet.impl.execution.ProcessorState.SNAPSHOT_COMMIT_FINISH__FINAL;
+import static com.hazelcast.jet.impl.execution.ProcessorState.SNAPSHOT_COMMIT_FINISH__PROCESS;
+import static com.hazelcast.jet.impl.execution.ProcessorState.SNAPSHOT_COMMIT_PREPARE;
+import static com.hazelcast.jet.impl.execution.ProcessorState.WAITING_FOR_SNAPSHOT_COMPLETED;
 import static com.hazelcast.jet.impl.execution.WatermarkCoalescer.IDLE_MESSAGE;
 import static com.hazelcast.jet.impl.execution.WatermarkCoalescer.NO_NEW_WM;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
@@ -90,7 +101,6 @@ public class ProcessorTasklet implements Tasklet {
     private final OutboxImpl outbox;
     private final Processor.Context context;
 
-    private final Processor processor;
     private final SnapshotContext ssContext;
     private final BitSet receivedBarriers; // indicates if current snapshot is received on the ordinal
 
@@ -100,15 +110,20 @@ public class ProcessorTasklet implements Tasklet {
     private final ILogger logger;
     private final SerializationService serializationService;
     private final List<? extends InboundEdgeStream> instreams;
+    private final ExecutorService executionService;
 
+    private Processor processor;
     private int numActiveOrdinals; // counter for remaining active ordinals
     private CircularListCursor<InboundEdgeStream> instreamCursor;
     private InboundEdgeStream currInstream;
     private ProcessorState state;
-    private long pendingSnapshotId;
+
+    // pending snapshot IDs are the IDs of the next expected snapshot IDs for phase 1 and 2
+    private long pendingSnapshotId1;
+    private long pendingSnapshotId2;
+
     private SnapshotBarrier currentBarrier;
     private Watermark pendingWatermark;
-    private boolean processorClosed;
 
     // Tells whether we are operating in exactly-once or at-least-once mode.
     // In other words, whether a barrier from all inputs must be present before
@@ -121,16 +136,19 @@ public class ProcessorTasklet implements Tasklet {
     private final AtomicLongArray emittedCounts;
 
     @Probe(name = MetricNames.QUEUES_SIZE)
-    private final AtomicLong queuesSize = new AtomicLong();
+    private final Counter queuesSize = SwCounter.newSwCounter();
 
     @Probe(name = MetricNames.QUEUES_CAPACITY)
-    private final AtomicLong queuesCapacity = new AtomicLong();
+    private final Counter queuesCapacity = SwCounter.newSwCounter();
 
     private final Predicate<Object> addToInboxFunction = inbox.queue()::add;
     private final MetricsContext metricsContext = new MetricsContext();
+    private Future<?> closeFuture;
 
     @SuppressWarnings("checkstyle:ExecutableStatementCount")
-    public ProcessorTasklet(@Nonnull Context context,
+    public ProcessorTasklet(
+            @Nonnull Context context,
+            @Nonnull ExecutorService executionService,
             @Nonnull SerializationService serializationService,
             @Nonnull Processor processor,
             @Nonnull List<? extends InboundEdgeStream> instreams,
@@ -140,6 +158,7 @@ public class ProcessorTasklet implements Tasklet {
     ) {
         Preconditions.checkNotNull(processor, "processor");
         this.context = context;
+        this.executionService = executionService;
         this.serializationService = serializationService;
         this.processor = processor;
         this.numActiveOrdinals = instreams.size();
@@ -160,8 +179,8 @@ public class ProcessorTasklet implements Tasklet {
         emittedCounts = new AtomicLongArray(outstreams.size() + 1);
         outbox = createOutbox(ssCollector);
         receivedBarriers = new BitSet(instreams.size());
-        state = initialProcessingState();
-        pendingSnapshotId = ssContext.activeSnapshotId() + 1;
+        state = processingState();
+        pendingSnapshotId1 = pendingSnapshotId2 = ssContext.activeSnapshotIdPhase1() + 1;
         waitForAllBarriers = ssContext.processingGuarantee() == ProcessingGuarantee.EXACTLY_ONCE;
 
         watermarkCoalescer = WatermarkCoalescer.create(instreams.size());
@@ -187,11 +206,23 @@ public class ProcessorTasklet implements Tasklet {
 
     @Override
     public void init() {
-        if (serializationService.getManagedContext() != null) {
+        ManagedContext managedContext = serializationService.getManagedContext();
+        if (managedContext != null) {
             Processor toInit = processor instanceof ProcessorWrapper
                     ? ((ProcessorWrapper) processor).getWrapped() : processor;
-            Object initialized = serializationService.getManagedContext().initialize(toInit);
-            assert initialized == toInit : "different object returned";
+            Object initialized = null;
+            try {
+                initialized = managedContext.initialize(toInit);
+                toInit = (Processor) initialized;
+            } catch (ClassCastException e) {
+                throw new IllegalArgumentException(String.format(
+                        "The initialized object(%s) should be an instance of %s", initialized, Processor.class), e);
+            }
+            if (processor instanceof ProcessorWrapper) {
+                ((ProcessorWrapper) processor).setWrapped(toInit);
+            } else {
+                processor = toInit;
+            }
         }
         try {
             processor.init(outbox, context);
@@ -202,20 +233,15 @@ public class ProcessorTasklet implements Tasklet {
 
     @Override @Nonnull
     public ProgressState call() {
-        assert !processorClosed : "processor closed";
+        assert state != END : "already in terminal state";
         progTracker.reset();
+        progTracker.notDone();
         outbox.reset();
         stateMachineStep();
-        ProgressState progressState = progTracker.toProgressState();
-        if (progressState.isDone()) {
-            closeProcessor();
-            processorClosed = true;
-        }
-        return progressState;
+        return progTracker.toProgressState();
     }
 
     private void closeProcessor() {
-        assert !processorClosed : "processor already closed";
         try {
             processor.close();
         } catch (Throwable e) {
@@ -233,11 +259,10 @@ public class ProcessorTasklet implements Tasklet {
     private void stateMachineStep() {
         switch (state) {
             case PROCESS_WATERMARK:
-                progTracker.notDone();
                 if (pendingWatermark == null) {
                     long wm = watermarkCoalescer.checkWmHistory();
                     if (wm == NO_NEW_WM) {
-                        state = PROCESS_INBOX;
+                        state = NULLARY_PROCESS;
                         stateMachineStep(); // recursion
                         break;
                     }
@@ -246,66 +271,47 @@ public class ProcessorTasklet implements Tasklet {
                 if (pendingWatermark.equals(IDLE_MESSAGE)
                         ? outbox.offer(IDLE_MESSAGE)
                         : processor.tryProcessWatermark(pendingWatermark)) {
-                    state = PROCESS_INBOX;
+                    state = NULLARY_PROCESS;
                     pendingWatermark = null;
                 }
                 break;
 
-            case PROCESS_INBOX:
-                progTracker.notDone();
-                if (inbox.isEmpty()) {
-                    if (!isSnapshotInbox()) {
-                        if (!processor.tryProcess()) {
-                            return;
-                        }
-                        outbox.reset();
-                    }
-                    fillInbox();
+            case NULLARY_PROCESS:
+                // if currInstream is null, maybe fillInbox wasn't called yet. Avoid calling tryProcess in that case.
+                if (currInstream == null || isSnapshotInbox() || processor.tryProcess()) {
+                    state = PROCESS_INBOX;
+                    outbox.reset();
+                    stateMachineStep(); // recursion
                 }
-                if (!inbox.isEmpty()) {
-                    if (isSnapshotInbox()) {
-                        processor.restoreFromSnapshot(inbox);
-                    } else {
-                        processor.process(currInstream.ordinal(), inbox);
-                    }
-                }
+                break;
 
-                if (inbox.isEmpty()) {
-                    // there is either snapshot or instream is done, not both
-                    if (currInstream != null && currInstream.isDone()) {
-                        state = COMPLETE_EDGE;
-                        progTracker.madeProgress();
-                        return;
-                    } else if (numActiveOrdinals > 0
-                            && receivedBarriers.cardinality() == numActiveOrdinals) {
-                        // we have an empty inbox and received the current snapshot barrier from all active ordinals
-                        state = SAVE_SNAPSHOT;
-                        return;
-                    } else if (numActiveOrdinals == 0) {
-                        progTracker.madeProgress();
-                        state = COMPLETE;
-                    } else {
-                        state = PROCESS_WATERMARK;
-                    }
-                }
+            case PROCESS_INBOX:
+                processInbox();
                 return;
 
             case COMPLETE_EDGE:
-                progTracker.notDone();
                 if (isSnapshotInbox()
                         ? processor.finishSnapshotRestore() : processor.completeEdge(currInstream.ordinal())) {
                     assert !outbox.hasUnfinishedItem() || !isSnapshotInbox() :
                             "outbox has an unfinished item after successful finishSnapshotRestore()";
                     progTracker.madeProgress();
-                    state = initialProcessingState();
+                    state = processingState();
                 }
                 return;
 
             case SAVE_SNAPSHOT:
-                progTracker.notDone();
                 if (processor.saveToSnapshot()) {
                     progTracker.madeProgress();
+                    state = ssContext.isExportOnly() ? EMIT_BARRIER : SNAPSHOT_COMMIT_PREPARE;
+                    stateMachineStep(); // recursion
+                }
+                return;
+
+            case SNAPSHOT_COMMIT_PREPARE:
+                if (processor.snapshotCommitPrepare()) {
+                    progTracker.madeProgress();
                     state = EMIT_BARRIER;
+                    stateMachineStep(); // recursion
                 }
                 return;
 
@@ -314,52 +320,153 @@ public class ProcessorTasklet implements Tasklet {
                 if (outbox.offerToEdgesAndSnapshot(currentBarrier)) {
                     progTracker.madeProgress();
                     if (currentBarrier.isTerminal()) {
-                        state = EMIT_DONE_ITEM;
+                        state = WAITING_FOR_SNAPSHOT_COMPLETED;
                     } else {
                         currentBarrier = null;
                         receivedBarriers.clear();
-                        pendingSnapshotId++;
-                        state = initialProcessingState();
+                        pendingSnapshotId1++;
+                        state = processingState();
                     }
                 }
-                progTracker.notDone();
+                return;
+
+            case SNAPSHOT_COMMIT_FINISH__PROCESS:
+            case SNAPSHOT_COMMIT_FINISH__COMPLETE:
+            case SNAPSHOT_COMMIT_FINISH__FINAL:
+                if (ssContext.isExportOnly() || processor.snapshotCommitFinish(ssContext.isLastPhase1Successful())) {
+                    pendingSnapshotId2++;
+                    ssContext.phase2DoneForTasklet();
+                    progTracker.madeProgress();
+                    switch (state) {
+                        case SNAPSHOT_COMMIT_FINISH__PROCESS:
+                            state = PROCESS_INBOX;
+                            break;
+                        case SNAPSHOT_COMMIT_FINISH__COMPLETE:
+                            state = COMPLETE;
+                            break;
+                        case SNAPSHOT_COMMIT_FINISH__FINAL:
+                            state = EMIT_DONE_ITEM;
+                            break;
+                        default:
+                            throw new RuntimeException("unexpected state: " + state);
+                    }
+                }
+                return;
+
+            case WAITING_FOR_SNAPSHOT_COMPLETED:
+                long currSnapshotId2 = ssContext.activeSnapshotIdPhase2();
+                if (currSnapshotId2 >= pendingSnapshotId2) {
+                    state = SNAPSHOT_COMMIT_FINISH__FINAL;
+                    stateMachineStep(); // recursion
+                }
                 return;
 
             case COMPLETE:
-                progTracker.notDone();
-                // check ssContext to see if a barrier should be emitted
-                long currSnapshotId = ssContext.activeSnapshotId();
-                assert currSnapshotId + 1 == pendingSnapshotId || currSnapshotId == pendingSnapshotId
-                        : "Unexpected new snapshot id: " + currSnapshotId + ", expected was "
-                                + (pendingSnapshotId - 1) + " or " + pendingSnapshotId;
-                if (currSnapshotId == pendingSnapshotId) {
-                    if (outbox.hasUnfinishedItem()) {
-                        outbox.block();
-                    } else {
-                        outbox.unblock();
-                        state = SAVE_SNAPSHOT;
-                        currentBarrier = new SnapshotBarrier(currSnapshotId, ssContext.isTerminalSnapshot());
-                        progTracker.madeProgress();
-                        return;
-                    }
-                }
-                if (processor.complete()) {
-                    progTracker.madeProgress();
-                    state = EMIT_DONE_ITEM;
-                }
+                complete();
                 return;
 
             case EMIT_DONE_ITEM:
-                if (!outbox.offerToEdgesAndSnapshot(DONE_ITEM)) {
-                    progTracker.notDone();
-                    return;
+                if (outbox.offerToEdgesAndSnapshot(DONE_ITEM)) {
+                    ssContext.processorTaskletDone();
+                    progTracker.madeProgress();
+                    state = CLOSE;
+                    stateMachineStep();
+                }
+                return;
+
+            case CLOSE:
+                if (isCooperative()) {
+                    if (closeFuture == null) {
+                        closeFuture = executionService.submit(this::closeProcessor);
+                        progTracker.madeProgress();
+                    }
+                    if (!closeFuture.isDone()) {
+                        return;
+                    }
+                    progTracker.madeProgress();
+                } else {
+                    closeProcessor();
                 }
                 state = END;
+                progTracker.done();
                 return;
 
             default:
                 // note ProcessorState.END goes here
                 throw new JetException("Unexpected state: " + state);
+        }
+    }
+
+    private void processInbox() {
+        if (ssContext.activeSnapshotIdPhase2() == pendingSnapshotId2) {
+            state = SNAPSHOT_COMMIT_FINISH__PROCESS;
+            progTracker.madeProgress();
+            return;
+        }
+
+        if (inbox.isEmpty()) {
+            fillInbox();
+        }
+        if (!inbox.isEmpty()) {
+            if (isSnapshotInbox()) {
+                processor.restoreFromSnapshot(inbox);
+            } else {
+                processor.process(currInstream.ordinal(), inbox);
+            }
+        }
+
+        if (inbox.isEmpty()) {
+            // there is either snapshot or instream is done, not both
+            if (currInstream != null && currInstream.isDone()) {
+                state = COMPLETE_EDGE;
+                progTracker.madeProgress();
+            } else if (numActiveOrdinals > 0
+                    && receivedBarriers.cardinality() == numActiveOrdinals) {
+                // we have an empty inbox and received the current snapshot barrier from all active ordinals
+                state = SAVE_SNAPSHOT;
+            } else if (numActiveOrdinals == 0) {
+                progTracker.madeProgress();
+                state = COMPLETE;
+            } else {
+                state = PROCESS_WATERMARK;
+            }
+        }
+    }
+
+    private void complete() {
+        // check ssContext to see if snapshot phase should be executed
+        if (pendingSnapshotId1 == pendingSnapshotId2) {
+            long currSnapshotId1 = ssContext.activeSnapshotIdPhase1();
+            assert currSnapshotId1 + 1 == pendingSnapshotId1 || currSnapshotId1 == pendingSnapshotId1
+                    : "Unexpected new phase 1 snapshot id: " + currSnapshotId1 + ", expected was "
+                    + (pendingSnapshotId1 - 1) + " or " + pendingSnapshotId1;
+            if (currSnapshotId1 == pendingSnapshotId1) {
+                if (outbox.hasUnfinishedItem()) {
+                    outbox.block();
+                } else {
+                    outbox.unblock();
+                    state = SAVE_SNAPSHOT;
+                    currentBarrier = new SnapshotBarrier(currSnapshotId1, ssContext.isTerminalSnapshot());
+                    progTracker.madeProgress();
+                    return;
+                }
+            }
+        } else {
+            long currSnapshotId2 = ssContext.activeSnapshotIdPhase2();
+            assert currSnapshotId2 + 1 == pendingSnapshotId2 || currSnapshotId2 == pendingSnapshotId2
+                    : "Unexpected new phase 2 snapshot id: " + currSnapshotId2 + ", expected was "
+                    + (pendingSnapshotId2 - 1) + " or " + pendingSnapshotId2;
+            if (currSnapshotId2 == pendingSnapshotId2) {
+                state = SNAPSHOT_COMMIT_FINISH__COMPLETE;
+                progTracker.madeProgress();
+                return;
+            }
+        }
+        if (processor.complete()) {
+            progTracker.madeProgress();
+            state = pendingSnapshotId2 < pendingSnapshotId1
+                    ? WAITING_FOR_SNAPSHOT_COMPLETED
+                    : EMIT_DONE_ITEM;
         }
     }
 
@@ -425,8 +532,8 @@ public class ProcessorTasklet implements Tasklet {
         if (!inbox.isEmpty()) {
             lazyIncrement(receivedBatches, currInstream.ordinal());
         }
-        queuesCapacity.lazySet(instreamCursor == null ? 0 : sum(instreamCursor.getList(), InboundEdgeStream::capacities));
-        queuesSize.lazySet(instreamCursor == null ? 0 : sum(instreamCursor.getList(), InboundEdgeStream::sizes));
+        queuesCapacity.set(instreamCursor == null ? 0 : sum(instreamCursor.getList(), InboundEdgeStream::capacities));
+        queuesSize.set(instreamCursor == null ? 0 : sum(instreamCursor.getList(), InboundEdgeStream::sizes));
     }
 
     private CircularListCursor<InboundEdgeStream> popInstreamGroup() {
@@ -442,9 +549,9 @@ public class ProcessorTasklet implements Tasklet {
     }
 
     private void observeBarrier(int ordinal, SnapshotBarrier barrier) {
-        if (barrier.snapshotId() != pendingSnapshotId) {
+        if (barrier.snapshotId() != pendingSnapshotId1) {
             throw new JetException("Unexpected snapshot barrier ID " + barrier.snapshotId() + " from ordinal " + ordinal +
-                    ", expected " + pendingSnapshotId);
+                    ", expected " + pendingSnapshotId1);
         }
         currentBarrier = barrier;
         if (barrier.isTerminal()) {
@@ -458,12 +565,11 @@ public class ProcessorTasklet implements Tasklet {
     }
 
     /**
-     * Initial state of the processor. If there are no inbound ordinals left, we will go to COMPLETE state
-     * otherwise to PROCESS_INBOX.
+     * If there are no inbound ordinals left, we will go to COMPLETE state
+     * otherwise to PROCESS_WATERMARK.
      */
-    private ProcessorState initialProcessingState() {
-        return pendingWatermark != null ? PROCESS_WATERMARK
-                : instreamCursor == null ? COMPLETE : PROCESS_INBOX;
+    private ProcessorState processingState() {
+        return instreamCursor == null ? COMPLETE : PROCESS_WATERMARK;
     }
 
     /**
@@ -491,9 +597,14 @@ public class ProcessorTasklet implements Tasklet {
 
     @Override
     public void close() {
-        if (!processorClosed) {
+        if (state == CLOSE) {
+            try {
+                closeFuture.get();
+            } catch (Exception e) {
+                throw sneakyThrow(e);
+            }
+        } else if (state != END) {
             closeProcessor();
-            processorClosed = true;
         }
     }
 

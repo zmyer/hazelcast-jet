@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,9 @@
 
 package com.hazelcast.jet.impl;
 
-import com.hazelcast.cluster.Address;
 import com.hazelcast.core.LocalMemberResetException;
 import com.hazelcast.core.MemberLeftException;
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.internal.serialization.SerializationService;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JobConfig;
@@ -26,11 +26,11 @@ import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.impl.util.NonCompletableFuture;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.logging.LoggingService;
-import com.hazelcast.nio.serialization.Data;
 import com.hazelcast.spi.exception.TargetDisconnectedException;
 import com.hazelcast.spi.exception.TargetNotMemberException;
 
 import javax.annotation.Nonnull;
+import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -147,6 +147,10 @@ public abstract class AbstractJobProxy<T> implements Job {
         terminate(TerminationMode.RESTART_GRACEFUL);
     }
 
+    public void restart(boolean graceful) {
+        terminate(graceful ? TerminationMode.RESTART_GRACEFUL : TerminationMode.RESTART_FORCEFUL);
+    }
+
     @Override
     public void suspend() {
         terminate(TerminationMode.SUSPEND_GRACEFUL);
@@ -192,7 +196,7 @@ public abstract class AbstractJobProxy<T> implements Job {
 
     protected abstract JobConfig doGetJobConfig();
 
-    protected abstract Address masterAddress();
+    protected abstract UUID masterUuid();
 
     protected abstract SerializationService serializationService();
 
@@ -254,7 +258,7 @@ public abstract class AbstractJobProxy<T> implements Job {
         }
 
         private void resubmitJob(Throwable t) {
-            if (masterAddress() != null) {
+            if (masterUuid() != null) {
                 logger.fine("Resubmitting job " + idAndName() + " after " + t.getClass().getSimpleName());
                 invokeSubmitJob(serializationService().toData(dag), config).whenCompleteAsync(this);
                 return;
@@ -293,7 +297,7 @@ public abstract class AbstractJobProxy<T> implements Job {
         }
 
         private void rejoinJob(Throwable t) {
-            if (masterAddress() != null) {
+            if (masterUuid() != null) {
                 logger.fine("Rejoining to job " + idAndName() + " after " + t.getClass().getSimpleName());
                 doInvokeJoinJob();
                 return;

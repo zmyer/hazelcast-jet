@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -105,6 +105,7 @@ public interface Partitioner<T> extends Serializable {
      * Instances should be retrieved from {@link #defaultPartitioner()}.
      */
     final class Default implements Partitioner<Object> {
+
         private static final long serialVersionUID = 1L;
 
         transient DefaultPartitionStrategy defaultPartitioning;

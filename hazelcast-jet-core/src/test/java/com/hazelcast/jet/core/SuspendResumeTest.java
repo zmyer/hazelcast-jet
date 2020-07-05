@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,7 +43,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
 @RunWith(HazelcastSerialClassRunner.class)
 public class SuspendResumeTest extends JetTestSupport {
@@ -220,13 +219,8 @@ public class SuspendResumeTest extends JetTestSupport {
         NoOutputSourceP.executionStarted.await();
         job.suspend();
         assertJobStatusEventually(job, SUSPENDED);
-        // When
-        job.cancel();
-        // Then
-        try {
-            job.join();
-            fail("job.join() should have failed");
-        } catch (CancellationException ignored) { }
+        // When-Then
+        cancelAndJoin(job);
         assertJobStatusEventually(job, FAILED);
 
         // check that job resources are deleted
@@ -234,7 +228,7 @@ public class SuspendResumeTest extends JetTestSupport {
         assertTrueEventually(() -> {
             assertNull("JobRecord", jobRepository.getJobRecord(job.getId()));
             JobResult jobResult = jobRepository.getJobResult(job.getId());
-            assertEquals(CancellationException.class.getName(), jobResult.getFailureText());
+            assertContains(jobResult.getFailureText(), CancellationException.class.getName());
             assertFalse("Job result successful", jobResult.isSuccessful());
         });
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,10 +18,11 @@ package com.hazelcast.jet.impl.processor;
 
 import com.hazelcast.function.BiFunctionEx;
 import com.hazelcast.internal.metrics.Probe;
+import com.hazelcast.internal.util.counters.Counter;
+import com.hazelcast.internal.util.counters.SwCounter;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
-import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.ResettableSingletonTraverser;
 import com.hazelcast.jet.core.Watermark;
@@ -29,10 +30,8 @@ import com.hazelcast.jet.datamodel.Tuple2;
 import com.hazelcast.jet.pipeline.ServiceFactory;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 import java.util.ArrayDeque;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.hazelcast.jet.datamodel.Tuple2.tuple2;
 import static com.hazelcast.jet.impl.processor.ProcessorSupplierWithService.supplierWithService;
@@ -49,81 +48,77 @@ import static com.hazelcast.jet.impl.processor.ProcessorSupplierWithService.supp
  * @param <T> received item type
  * @param <R> emitted item type
  */
-public final class AsyncTransformUsingServiceOrderedP<S, T, R> extends AbstractProcessor {
+public class AsyncTransformUsingServiceOrderedP<C, S, T, R> extends AbstractAsyncTransformUsingServiceP<C, S> {
 
-    private final ServiceFactory<S> serviceFactory;
-    private final BiFunctionEx<? super S, ? super T, CompletableFuture<Traverser<R>>> callAsyncFn;
+    private final BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Traverser<R>>> callAsyncFn;
 
-    private S service;
-    // on the queue there is either:
-    // - tuple2(originalItem, future)
-    // - watermark
+    // The queue holds both watermarks and output items
     private ArrayDeque<Object> queue;
+    // The number of watermarks in the queue
+    private int queuedWmCount;
+
     private Traverser<?> currentTraverser = Traversers.empty();
-    private int maxAsyncOps;
     private ResettableSingletonTraverser<Watermark> watermarkTraverser = new ResettableSingletonTraverser<>();
 
     @Probe(name = "numInFlightOps")
-    private final AtomicInteger asyncOpsCounterMetric = new AtomicInteger();
+    private final Counter asyncOpsCounterMetric = SwCounter.newSwCounter();
 
     /**
      * Constructs a processor with the given mapping function.
      */
-    private AsyncTransformUsingServiceOrderedP(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nullable S service,
-            @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<Traverser<R>>> callAsyncFn
+    AsyncTransformUsingServiceOrderedP(
+            @Nonnull ServiceFactory<C, S> serviceFactory,
+            @Nonnull C serviceContext,
+            int maxConcurrentOps,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Traverser<R>>> callAsyncFn
     ) {
-        this.serviceFactory = serviceFactory;
+        super(serviceFactory, serviceContext, maxConcurrentOps, true);
         this.callAsyncFn = callAsyncFn;
-        this.service = service;
-
-        assert service == null ^ serviceFactory.hasLocalSharing()
-                : "if service is shared, it must be non-null, or vice versa";
     }
 
     @Override
-    public boolean isCooperative() {
-        return serviceFactory.isCooperative();
-    }
-
-    @Override
-    protected void init(@Nonnull Context context) {
-        if (!serviceFactory.hasLocalSharing()) {
-            assert service == null : "service is not null: " + service;
-            service = serviceFactory.createFn().apply(context.jetInstance());
-        }
-        maxAsyncOps = serviceFactory.maxPendingCallsPerProcessor();
-        queue = new ArrayDeque<>(maxAsyncOps);
+    protected void init(@Nonnull Context context) throws Exception {
+        super.init(context);
+        // Size for the worst case: interleaved output items an WMs
+        queue = new ArrayDeque<>(maxConcurrentOps * 2);
     }
 
     @Override
     protected boolean tryProcess(int ordinal, @Nonnull Object item) {
-        if (queue.size() == maxAsyncOps) {
-            // if queue is full, try to emit and apply backpressure
-            tryFlushQueue();
+        if (isQueueFull() && !tryFlushQueue()) {
             return false;
         }
         @SuppressWarnings("unchecked")
-        T castedItem = (T) item;
-        CompletableFuture<? extends Traverser<R>> future = callAsyncFn.apply(service, castedItem);
+        T castItem = (T) item;
+        CompletableFuture<? extends Traverser<? extends R>> future = callAsyncFn.apply(service, castItem);
         if (future != null) {
-            queue.add(tuple2(castedItem, future));
+            queue.add(tuple2(castItem, future));
         }
         return true;
+    }
+
+    boolean isQueueFull() {
+        return queue.size() - queuedWmCount == maxConcurrentOps;
     }
 
     @Override
     public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
         tryFlushQueue();
-        return queue.size() < maxAsyncOps
-                && queue.add(watermark);
+        if (queue.peekLast() instanceof Watermark) {
+            // conflate the previous wm with the current one
+            queue.removeLast();
+            queue.add(watermark);
+        } else {
+            queue.add(watermark);
+            queuedWmCount++;
+        }
+        return true;
     }
 
     @Override
     public boolean tryProcess() {
         tryFlushQueue();
-        asyncOpsCounterMetric.lazySet(queue.size());
+        asyncOpsCounterMetric.set(queue.size());
         return true;
     }
 
@@ -140,16 +135,6 @@ public final class AsyncTransformUsingServiceOrderedP<S, T, R> extends AbstractP
         return tryFlushQueue();
     }
 
-    @Override
-    public void close() {
-        // close() might be called even if init() was not called.
-        // Only destroy the service if is not shared (i.e. it is our own).
-        if (service != null && !serviceFactory.hasLocalSharing()) {
-            serviceFactory.destroyFn().accept(service);
-        }
-        service = null;
-    }
-
     /**
      * Drains items from the queue until either:
      * <ul><li>
@@ -161,7 +146,7 @@ public final class AsyncTransformUsingServiceOrderedP<S, T, R> extends AbstractP
      * @return true if there are no more in-flight items and everything was emitted
      *         to the outbox
      */
-    private boolean tryFlushQueue() {
+    boolean tryFlushQueue() {
         // We check the futures in submission order. While this might increase latency for some
         // later-submitted item that gets the result before some earlier-submitted one, we don't
         // have to do many volatile reads to check all the futures in each call or a concurrent
@@ -177,6 +162,7 @@ public final class AsyncTransformUsingServiceOrderedP<S, T, R> extends AbstractP
             if (o instanceof Watermark) {
                 watermarkTraverser.accept((Watermark) o);
                 currentTraverser = watermarkTraverser;
+                queuedWmCount--;
             } else {
                 @SuppressWarnings("unchecked")
                 CompletableFuture<Traverser<R>> f = ((Tuple2<T, CompletableFuture<Traverser<R>>>) o).f1();
@@ -200,12 +186,12 @@ public final class AsyncTransformUsingServiceOrderedP<S, T, R> extends AbstractP
      * The {@link ResettableSingletonTraverser} is passed as a first argument to
      * {@code callAsyncFn}, it can be used if needed.
      */
-    public static <S, T, R> ProcessorSupplier supplier(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<Traverser<R>>> callAsyncFn
+    public static <C, S, T, R> ProcessorSupplier supplier(
+            @Nonnull ServiceFactory<C, S> serviceFactory,
+            int maxConcurrentOps,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Traverser<R>>> callAsyncFn
     ) {
-        return supplierWithService(serviceFactory,
-                (serviceFn, service) -> new AsyncTransformUsingServiceOrderedP<>(serviceFn, service, callAsyncFn)
-        );
+        return supplierWithService(serviceFactory, (serviceFn, context) ->
+                new AsyncTransformUsingServiceOrderedP<>(serviceFn, context, maxConcurrentOps, callAsyncFn));
     }
 }

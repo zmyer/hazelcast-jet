@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -361,8 +361,8 @@ public class StreamFilesP<R> extends AbstractProcessor {
     ) {
         checkSerializable(mapOutputFn, "mapOutputFn");
 
-        return ProcessorMetaSupplier.of(() ->
-                new StreamFilesP<>(watchedDirectory, Charset.forName(charset), glob, sharedFileSystem, mapOutputFn), 2);
+        return ProcessorMetaSupplier.of(2, () ->
+                new StreamFilesP<>(watchedDirectory, Charset.forName(charset), glob, sharedFileSystem, mapOutputFn));
     }
 
     private static WatchEvent.Modifier[] getHighSensitivityModifiers() {

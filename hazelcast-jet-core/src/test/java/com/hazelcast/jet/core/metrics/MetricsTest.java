@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.accumulator.LongAccumulator;
+import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.JetTestSupport;
@@ -30,7 +31,6 @@ import com.hazelcast.jet.core.TestProcessors;
 import com.hazelcast.jet.core.Vertex;
 import com.hazelcast.jet.impl.processor.TransformP;
 import com.hazelcast.jet.pipeline.Pipeline;
-import com.hazelcast.jet.pipeline.ServiceFactory;
 import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.jet.pipeline.test.TestSources;
 import com.hazelcast.test.HazelcastSerialClassRunner;
@@ -38,18 +38,15 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
-import java.lang.management.ManagementFactory;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
 
 import static com.hazelcast.jet.aggregate.AggregateOperations.counting;
 import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeListP;
+import static com.hazelcast.jet.pipeline.ServiceFactories.nonSharedService;
 import static java.util.Arrays.asList;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -65,12 +62,12 @@ public class MetricsTest extends JetTestSupport {
 
     @Before
     public void before() {
-        instance = createJetMember();
+        instance = createJetMember(new JetConfig().setProperty("hazelcast.jmx", "true"));
         pipeline = Pipeline.create();
     }
 
     @Test
-    public void counter_notUsed() {
+    public void unusedMetrics() {
         pipeline.readFrom(TestSources.items(0L, 1L, 2L, 3L, 4L))
                 .filter(l -> {
                     boolean pass = l % 2 == 0;
@@ -82,34 +79,45 @@ public class MetricsTest extends JetTestSupport {
 
                     return pass;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = runPipeline(pipeline.toDag());
-        assertMetricsProduced(job, "dropped", 0, "total", null);
+        JobMetricsChecker checker = new JobMetricsChecker(job);
+        checker.assertSummedMetricValue("dropped", 0);
+        checker.assertNoMetricValues("total");
     }
 
     @Test
-    public void counter() {
-        pipeline.readFrom(TestSources.items(0L, 1L, 2L, 3L, 4L))
+    public void typicalUsage() {
+        pipeline.readFrom(TestSources.items(5L, 4L, 3L, 2L, 1L, 0L))
                 .filter(l -> {
                     boolean pass = l % 2 == 0;
 
-                    if (!pass) {
+                    if (pass) {
+                        Metrics.metric("single-flip-flop").decrement();
+                        Metrics.metric("multi-flip-flop").decrement(10);
+                    } else {
                         Metrics.metric("dropped").increment();
+                        Metrics.metric("single-flip-flop").increment();
+                        Metrics.metric("multi-flip-flop").increment(10);
                     }
                     Metrics.metric("total").increment();
                     Metrics.metric("last").set(l);
 
                     return pass;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = runPipeline(pipeline.toDag());
-        assertMetricsProduced(job, "dropped", 2, "total", 5);
+        JobMetricsChecker checker = new JobMetricsChecker(job);
+        checker.assertSummedMetricValue("dropped", 3);
+        checker.assertSummedMetricValue("total", 6);
+        checker.assertSummedMetricValue("single-flip-flop", 0);
+        checker.assertSummedMetricValue("multi-flip-flop", 0);
     }
 
     @Test
-    public void gauge() {
+    public void customUnit() {
         pipeline.readFrom(TestSources.items(0L, 1L, 2L, 3L, 4L))
                 .mapStateful(LongAccumulator::new, (acc, i) -> {
                     acc.add(i);
@@ -117,24 +125,26 @@ public class MetricsTest extends JetTestSupport {
                     metric.set(acc.get());
                     return acc.get();
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = runPipeline(pipeline.toDag());
-        assertMetricsProduced(job, "sum", 10);
+        JobMetricsChecker checker = new JobMetricsChecker(job);
+        checker.assertSummedMetricValue("sum", 10);
     }
 
     @Test
-    public void gauge_notUsed() {
+    public void customUnit_notUsed() {
         pipeline.readFrom(TestSources.items(0L, 1L, 2L, 3L, 4L))
                 .mapStateful(LongAccumulator::new, (acc, i) -> {
                     acc.add(i);
                     Metrics.metric("sum", Unit.COUNT);
                     return acc.get();
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = runPipeline(pipeline.toDag());
-        assertMetricsProduced(job, "sum", 0L);
+        JobMetricsChecker checker = new JobMetricsChecker(job);
+        checker.assertSummedMetricValue("sum", 0L);
     }
 
     @Test
@@ -151,7 +161,8 @@ public class MetricsTest extends JetTestSupport {
         dag.edge(between(source, map)).edge(between(map, sink));
 
         Job job = runPipeline(dag);
-        assertMetricsProduced(job, "mapped", 3L);
+        JobMetricsChecker checker = new JobMetricsChecker(job);
+        checker.assertSummedMetricValue("mapped", 3L);
         assertEquals(
                 new HashSet<>(Arrays.asList(10L, 20L, 30L)),
                 new HashSet<>(instance.getList("results"))
@@ -167,7 +178,7 @@ public class MetricsTest extends JetTestSupport {
                     Metrics.metric("total", Unit.COUNT).set(input.length);
                     return l;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = instance.newJob(pipeline, new JobConfig().setMetricsEnabled(false));
         job.join();
@@ -178,7 +189,7 @@ public class MetricsTest extends JetTestSupport {
     }
 
     @Test
-    public void usingContextAsync() {
+    public void usingServiceAsync() {
         int inputSize = 100_000;
 
         Integer[] inputs = new Integer[inputSize];
@@ -186,11 +197,11 @@ public class MetricsTest extends JetTestSupport {
 
         pipeline.readFrom(TestSources.items(inputs))
                 .addTimestamps(i -> i, 0L)
-                .filterUsingServiceAsync(
-                        ServiceFactory.withCreateFn(i -> 0L),
+                .mapUsingServiceAsync(
+                        nonSharedService(pctx -> 0L),
                         (ctx, l) -> {
-                            Metric dropped = Metrics.threadSafeMetric("dropped", Unit.COUNT);
-                            Metric total = Metrics.threadSafeMetric("total", Unit.COUNT);
+                            Metric dropped = Metrics.threadSafeMetric("dropped");
+                            Metric total = Metrics.threadSafeMetric("total");
                             return CompletableFuture.supplyAsync(
                                     () -> {
                                         boolean pass = l % 2L == ctx;
@@ -198,7 +209,7 @@ public class MetricsTest extends JetTestSupport {
                                             dropped.increment();
                                         }
                                         total.increment();
-                                        return pass;
+                                        return l;
                                     }
                             );
                         }
@@ -224,12 +235,11 @@ public class MetricsTest extends JetTestSupport {
                     Metrics.metric("total").increment();
                     return t;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = instance.newJob(pipeline, JOB_CONFIG_WITH_METRICS);
-        assertTrueEventually(() -> {
-            assertMetricsProduced(job, "total", generatedItems);
-        });
+        JobMetricsChecker checker = new JobMetricsChecker(job);
+        assertTrueEventually(() -> checker.assertSummedMetricValue("total", generatedItems));
     }
 
     @Test
@@ -247,26 +257,25 @@ public class MetricsTest extends JetTestSupport {
 
         Job job = instance.newJob(pipeline, new JobConfig().setMetricsEnabled(false));
         List<Object> list = instance.getList("sink");
-        assertTrueEventually(() -> {
-            assertTrue(!list.isEmpty());
-        });
+        assertTrueEventually(() -> assertFalse(list.isEmpty()));
         assertTrue(job.getMetrics().get("total").isEmpty());
     }
 
     @Test
     public void when_jetMetricNameIsUsed_then_itIsNotOverwritten() {
-        pipeline.readFrom(TestSources.items(0L, 1L, 2L, 3L, 4L))
+        Long[] items = {0L, 1L, 2L, 3L, 4L};
+        pipeline.readFrom(TestSources.items(items))
                 .filter(l -> {
                     Metrics.metric("emittedCount").increment(1000);
                     return true;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = runPipeline(pipeline.toDag());
-        // expected value is number_of_emitted_items (5) * number_of_vertex (2) = 10
-        assertJetMetricsProduced(job, "emittedCount", 10);
-        // expected value is number_of_emitted_items (5) * 1000 + expected_jet_metric_value (10)
-        assertMetricsProduced(job, "emittedCount", 10 + 5 * 1000);
+        new JobMetricsChecker(job, MeasurementPredicates.tagValueEquals("user", "true").negate())
+                .assertSummedMetricValue("emittedCount", 10);
+        new JobMetricsChecker(job)
+                .assertSummedMetricValue("emittedCount", 10 + items.length * 1000);
     }
 
     @Test
@@ -286,10 +295,13 @@ public class MetricsTest extends JetTestSupport {
                     Metrics.metric("inBoth").increment();
                     return t;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = runPipeline(pipeline.toDag());
-        assertMetricsProduced(job, "onlyInFilter", inputSize, "onlyInMap", inputSize, "inBoth", 2 * inputSize);
+        JobMetricsChecker checker = new JobMetricsChecker(job);
+        checker.assertSummedMetricValue("onlyInFilter", inputSize);
+        checker.assertSummedMetricValue("onlyInMap", inputSize);
+        checker.assertSummedMetricValue("inBoth", 2 * inputSize);
     }
 
     @Test
@@ -311,10 +323,13 @@ public class MetricsTest extends JetTestSupport {
                     Metrics.metric("inBoth").increment();
                     return t;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = runPipeline(pipeline.toDag());
-        assertMetricsProduced(job, "onlyInFilter", inputSize, "onlyInMap", inputSize, "inBoth", 2 * inputSize);
+        JobMetricsChecker checker = new JobMetricsChecker(job);
+        checker.assertSummedMetricValue("onlyInFilter", inputSize);
+        checker.assertSummedMetricValue("onlyInMap", inputSize);
+        checker.assertSummedMetricValue("inBoth", 2 * inputSize);
     }
 
     @Test
@@ -324,12 +339,12 @@ public class MetricsTest extends JetTestSupport {
                     Metrics.metric("total").increment();
                     return true;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = runPipeline(pipeline.toDag());
-        assertMetricsProduced(job, "total", 5);
+        new JobMetricsChecker(job).assertSummedMetricValue("total", 5);
         job = runPipeline(pipeline.toDag());
-        assertMetricsProduced(job, "total", 5);
+        new JobMetricsChecker(job).assertSummedMetricValue("total", 5);
     }
 
     @Test
@@ -343,7 +358,7 @@ public class MetricsTest extends JetTestSupport {
                     }
                     return t;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Pipeline pipeline2 = Pipeline.create();
         pipeline2.readFrom(TestSources.itemStream(1_000))
@@ -355,22 +370,18 @@ public class MetricsTest extends JetTestSupport {
                     }
                     return t;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = instance.newJob(pipeline, JOB_CONFIG_WITH_METRICS);
         Job job2 = instance.newJob(pipeline2, JOB_CONFIG_WITH_METRICS);
-        assertTrueEventually(() -> {
-            assertMetricsProduced(job, "total", 1000);
-        });
-        assertTrueEventually(() -> {
-            assertMetricsProduced(job2, "total", 3000);
-        });
+        JobMetricsChecker checker1 = new JobMetricsChecker(job);
+        assertTrueEventually(() -> checker1.assertSummedMetricValue("total", 1000));
+        JobMetricsChecker checker2 = new JobMetricsChecker(job2);
+        assertTrueEventually(() -> checker2.assertSummedMetricValue("total", 3000));
     }
 
     @Test
     public void availableViaJmx() throws Exception {
-        MBeanServer platformMBeanServer = ManagementFactory.getPlatformMBeanServer();
-
         int generatedItems = 1000;
 
         pipeline.readFrom(TestSources.itemStream(1_000))
@@ -380,36 +391,19 @@ public class MetricsTest extends JetTestSupport {
                     Metrics.metric("total").increment();
                     return t;
                 })
-                .writeTo(Sinks.logger());
+                .writeTo(Sinks.noop());
 
         Job job = instance.newJob(pipeline, JOB_CONFIG_WITH_METRICS);
-        assertTrueEventually(() -> {
-            assertMetricsProduced(job, "total", generatedItems);
-        });
+        JobMetricsChecker jobMetricsChecker = new JobMetricsChecker(job);
+        assertTrueEventually(() -> jobMetricsChecker.assertSummedMetricValue("total", generatedItems));
 
-        List<String> mBeanNames = new ArrayList<>();
-        String memberName = instance.getHazelcastInstance().getName();
-        String jobId = job.getIdString();
-        String execId = job.getMetrics().get("total").get(0).tag("exec");
+        String instanceName = instance.getHazelcastInstance().getName();
+        long sum = 0;
         int availableProcessors = Runtime.getRuntime().availableProcessors();
         for (int i = 0; i < availableProcessors; i++) {
-            StringBuilder sb = new StringBuilder();
-            sb.append("com.hazelcast.jet:type=Metrics,instance=")
-                    .append(memberName)
-                    .append(",tag0=\"job=")
-                    .append(jobId)
-                    .append("\",tag1=\"exec=")
-                    .append(execId)
-                    .append("\",tag2=\"vertex=fused(filter, map)\",tag3=\"procType=TransformP\",tag4=\"proc=")
-                    .append(i)
-                    .append("\",tag5=\"user=true\"");
-            mBeanNames.add(sb.toString());
-        }
-
-        long sum = 0;
-        for (String mBeanName : mBeanNames) {
-            ObjectName objectName = new ObjectName(mBeanName);
-            long attributeValue = (long) platformMBeanServer.getAttribute(objectName, "total");
+            JmxMetricsChecker jmxMetricsChecker = new JmxMetricsChecker(instanceName, job,
+                    "vertex=fused(filter, map)", "procType=TransformP", "proc=" + i, "user=true");
+            long attributeValue = jmxMetricsChecker.getMetricValue("total");
             sum += attributeValue;
         }
         assertEquals(generatedItems, sum);
@@ -419,57 +413,6 @@ public class MetricsTest extends JetTestSupport {
         Job job = instance.newJob(dag, JOB_CONFIG_WITH_METRICS);
         job.join();
         return job;
-    }
-
-    private void assertMetricsProduced(Job job, Object... expected) {
-        JobMetrics metrics = job.getMetrics();
-        for (int i = 0; i < expected.length; i += 2) {
-            String name = (String) expected[i];
-            List<Measurement> measurements = metrics.get(name);
-            assertMetricValue(name, measurements, expected[i + 1]);
-        }
-    }
-
-    private void assertJetMetricsProduced(Job job, Object... expected) {
-        JobMetrics metrics = job.getMetrics();
-        for (int i = 0; i < expected.length; i += 2) {
-            String name = (String) expected[i];
-            List<Measurement> measurements = metrics.filter(
-                    MeasurementPredicates.tagValueEquals("user", "true").negate()).get(name);
-            assertMetricValue(name, measurements, expected[i + 1]);
-        }
-    }
-
-    private void assertMetricValue(String name, List<Measurement> measurements, Object expected) {
-        if (expected == null) {
-            assertTrue(
-                    String.format("Did not expect measurements for metric '%s', but there were some", name),
-                    measurements.isEmpty()
-            );
-        } else {
-            assertFalse(
-                    String.format("Expected measurements for metric '%s', but there were none", name),
-                    measurements.isEmpty()
-            );
-            long actualValue = measurements.stream().mapToLong(Measurement::value).sum();
-            if (expected instanceof Number) {
-                long expectedValue = ((Number) expected).longValue();
-                assertEquals(
-                        String.format("Expected %d for metric '%s', but got %d instead", expectedValue, name,
-                                actualValue),
-                        expectedValue,
-                        actualValue
-                );
-            } else {
-                long expectedMinValue = ((long[]) expected)[0];
-                long expectedMaxValue = ((long[]) expected)[1];
-                assertTrue(
-                        String.format("Expected a value in the range [%d, %d] for metric '%s', but got %d",
-                                expectedMinValue, expectedMaxValue, name, actualValue),
-                        expectedMinValue <= actualValue && actualValue <= expectedMaxValue
-                );
-            }
-        }
     }
 
     private static class NonCoopTransformPSupplier implements SupplierEx<Processor> {

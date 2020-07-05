@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 package com.hazelcast.jet.pipeline.test;
 
 import com.hazelcast.jet.Job;
-import com.hazelcast.spi.annotation.Beta;
+import com.hazelcast.jet.annotation.EvolvingApi;
 
 /**
  * An exception which indicates that an assertion passed successfully. It is
@@ -26,7 +26,7 @@ import com.hazelcast.spi.annotation.Beta;
  *
  * @since 3.2
  */
-@Beta
+@EvolvingApi
 public final class AssertionCompletedException extends RuntimeException {
 
     /**

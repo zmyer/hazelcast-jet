@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,15 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Test;
+import org.junit.runner.RunWith;
 
 import java.util.concurrent.locks.LockSupport;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
+@RunWith(HazelcastSerialClassRunner.class)
 public class JobRestartStressTest extends JobRestartStressTestBase {
     @Test
     public void stressTest_restart() throws Exception {

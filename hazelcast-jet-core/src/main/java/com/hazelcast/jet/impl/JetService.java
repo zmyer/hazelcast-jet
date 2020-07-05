@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,13 +18,15 @@ package com.hazelcast.jet.impl;
 
 import com.hazelcast.client.impl.ClientEngineImpl;
 import com.hazelcast.config.Config;
+import com.hazelcast.config.ConfigAccessor;
 import com.hazelcast.instance.impl.HazelcastInstanceImpl;
 import com.hazelcast.instance.impl.Node;
 import com.hazelcast.internal.metrics.impl.MetricsService;
 import com.hazelcast.internal.nio.Packet;
 import com.hazelcast.internal.partition.InternalPartitionService;
+import com.hazelcast.internal.serialization.InternalSerializationService;
+import com.hazelcast.jet.impl.serialization.DelegatingSerializationService;
 import com.hazelcast.internal.services.ManagedService;
-import com.hazelcast.internal.services.MemberAttributeServiceEvent;
 import com.hazelcast.internal.services.MembershipAwareService;
 import com.hazelcast.internal.services.MembershipServiceEvent;
 import com.hazelcast.jet.JetInstance;
@@ -43,6 +45,7 @@ import com.hazelcast.spi.impl.operationservice.LiveOperationsTracker;
 import com.hazelcast.spi.impl.operationservice.Operation;
 
 import java.io.IOException;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -52,7 +55,7 @@ import java.util.function.Supplier;
 import static com.hazelcast.jet.core.JetProperties.JET_SHUTDOWNHOOK_ENABLED;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
 import static com.hazelcast.jet.impl.util.Util.memoizeConcurrent;
-import static com.hazelcast.spi.properties.GroupProperty.SHUTDOWNHOOK_POLICY;
+import static com.hazelcast.spi.properties.ClusterProperty.SHUTDOWNHOOK_POLICY;
 import static java.lang.Boolean.parseBoolean;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
@@ -68,10 +71,6 @@ public class JetService implements ManagedService, MembershipAwareService, LiveO
     private final LiveOperationRegistry liveOperationRegistry;
     private final AtomicReference<CompletableFuture> shutdownFuture = new AtomicReference<>();
     private final Thread shutdownHookThread;
-
-    // We share the migration watcher for local member because there's a deadlock possible when many
-    // vertices registered/deregistered their own watchers.
-    private MigrationWatcher sharedMigrationWatcher;
 
     private JetConfig config;
     private JetInstance jetInstance;
@@ -96,12 +95,12 @@ public class JetService implements ManagedService, MembershipAwareService, LiveO
     public void init(NodeEngine engine, Properties hzProperties) {
         this.nodeEngine = (NodeEngineImpl) engine;
         this.config = findJetServiceConfig(engine.getConfig());
-        this.sharedMigrationWatcher = new MigrationWatcher(engine.getHazelcastInstance());
         jetInstance = new JetInstanceImpl((HazelcastInstanceImpl) engine.getHazelcastInstance(), config);
         taskletExecutionService = new TaskletExecutionService(
                 nodeEngine, config.getInstanceConfig().getCooperativeThreadCount(), nodeEngine.getProperties()
         );
         jobRepository = new JobRepository(jetInstance);
+
         jobExecutionService = new JobExecutionService(nodeEngine, taskletExecutionService, jobRepository);
         jobCoordinationService = createJobCoordinationService();
 
@@ -124,7 +123,8 @@ public class JetService implements ManagedService, MembershipAwareService, LiveO
     }
 
     static JetConfig findJetServiceConfig(Config hzConfig) {
-        return (JetConfig) hzConfig.getServicesConfig().getServiceConfig(SERVICE_NAME).getConfigObject();
+        return (JetConfig) ConfigAccessor.getServicesConfig(hzConfig)
+                                         .getServiceConfig(SERVICE_NAME).getConfigObject();
     }
 
     /**
@@ -178,6 +178,11 @@ public class JetService implements ManagedService, MembershipAwareService, LiveO
 
     JobCoordinationService createJobCoordinationService() {
         return new JobCoordinationService(nodeEngine, this, config, jobRepository);
+    }
+
+    public InternalSerializationService createSerializationService(Map<String, String> serializerConfigs) {
+        return DelegatingSerializationService
+                .from(getNodeEngine().getSerializationService(), serializerConfigs);
     }
 
     public Operation createExportSnapshotOperation(long jobId, String name, boolean cancelJob) {
@@ -253,10 +258,6 @@ public class JetService implements ManagedService, MembershipAwareService, LiveO
         jobCoordinationService.onMemberAdded(event.getMember());
     }
 
-    @Override
-    public void memberAttributeChanged(MemberAttributeServiceEvent event) {
-    }
-
     public AtomicInteger numConcurrentAsyncOps() {
         return numConcurrentAsyncOps;
     }
@@ -286,10 +287,6 @@ public class JetService implements ManagedService, MembershipAwareService, LiveO
             }
         }
         return keys;
-    }
-
-    public MigrationWatcher getSharedMigrationWatcher() {
-        return sharedMigrationWatcher;
     }
 
     private Thread shutdownHookThread(Node node) {

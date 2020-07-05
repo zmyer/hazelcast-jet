@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,6 @@ import org.junit.runner.RunWith;
 
 import java.io.Serializable;
 import java.util.Iterator;
-import java.util.concurrent.CancellationException;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -122,11 +121,7 @@ public class SourceBuilder_TopologyChangeTest extends JetTestSupport {
         int oldSize = result.size();
         assertTrueEventually(() -> assertTrue("no more results added to the list", result.size() > oldSize));
 
-        job.cancel();
-        try {
-            job.join();
-        } catch (CancellationException ignored) {
-        }
+        cancelAndJoin(job);
 
         // results should contain sequence of results, each with count=windowSize, monotonic, if job was
         // allowed to terminate gracefully

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.core.test;
 
+import com.hazelcast.core.ManagedContext;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.Processor;
@@ -97,8 +98,13 @@ public class TestProcessorContext extends TestProcessorSupplierContext implement
     }
 
     @Nonnull @Override
-    public TestProcessorContext setProcessingGuarantee(ProcessingGuarantee processingGuarantee) {
+    public TestProcessorContext setProcessingGuarantee(@Nonnull ProcessingGuarantee processingGuarantee) {
         return (TestProcessorContext) super.setProcessingGuarantee(processingGuarantee);
+    }
+
+    @Nonnull @Override
+    public TestProcessorContext setManagedContext(@Nonnull ManagedContext managedContext) {
+        return (TestProcessorContext) super.setManagedContext(managedContext);
     }
 
     @Override

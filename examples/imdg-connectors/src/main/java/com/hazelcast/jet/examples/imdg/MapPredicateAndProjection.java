@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,8 +48,7 @@ public class MapPredicateAndProjection {
     private static final String SOURCE_NAME = "source";
     private static final String SINK_NAME = "sink";
 
-    public static void main(String[] args) throws Exception {
-        System.setProperty("hazelcast.logging.type", "log4j");
+    public static void main(String[] args) {
         JetConfig config = new JetConfig();
         config.getHazelcastConfig().getSerializationConfig().addPortableFactory(
                 TradePortableFactory.FACTORY_ID, new TradePortableFactory()

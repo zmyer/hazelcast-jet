@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,10 +19,12 @@ package com.hazelcast.jet.config;
 import com.hazelcast.core.HazelcastException;
 import com.hazelcast.jet.impl.config.ConfigProvider;
 import com.hazelcast.jet.impl.config.YamlJetConfigBuilder;
-import com.hazelcast.jet.impl.util.Util;
+import com.hazelcast.jet.impl.util.IOUtil;
+import com.hazelcast.jet.test.SerialTest;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 
@@ -39,6 +41,7 @@ import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 
 @RunWith(HazelcastSerialClassRunner.class)
+@Category({SerialTest.class})
 public class YamlJetConfigWithSystemPropertyTest extends AbstractJetMemberConfigWithSystemPropertyTest {
 
     private static final String JET_TEST_YAML = "hazelcast-jet-test.yaml";
@@ -78,7 +81,7 @@ public class YamlJetConfigWithSystemPropertyTest extends AbstractJetMemberConfig
         File tempFile = File.createTempFile("jet", ".yaml");
         try (FileOutputStream os = new FileOutputStream(tempFile)) {
             InputStream resourceAsStream = getClass().getClassLoader().getResourceAsStream(JET_TEST_YAML);
-            os.write(Util.readFully(resourceAsStream));
+            os.write(IOUtil.readFully(resourceAsStream));
         }
         System.setProperty(SYSPROP_JET_CONFIG, tempFile.getAbsolutePath());
 
@@ -123,7 +126,7 @@ public class YamlJetConfigWithSystemPropertyTest extends AbstractJetMemberConfig
         File tempFile = File.createTempFile("jet", ".yaml");
         try (FileOutputStream os = new FileOutputStream(tempFile)) {
             InputStream resourceAsStream = getClass().getClassLoader().getResourceAsStream(JET_MEMBER_TEST_YAML);
-            os.write(Util.readFully(resourceAsStream));
+            os.write(IOUtil.readFully(resourceAsStream));
         }
         System.setProperty(SYSPROP_MEMBER_CONFIG, tempFile.getAbsolutePath());
 

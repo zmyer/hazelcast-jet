@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,16 +35,20 @@ import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.map.EntryProcessor;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.jms.Connection;
 import javax.jms.Message;
-import javax.jms.MessageProducer;
 import javax.jms.Session;
+import javax.sql.CommonDataSource;
 import java.io.BufferedWriter;
 import java.io.OutputStreamWriter;
 import java.net.Socket;
 import java.nio.charset.Charset;
 import java.sql.PreparedStatement;
+import java.util.Map;
 
+import static com.hazelcast.function.FunctionEx.identity;
+import static com.hazelcast.internal.util.Preconditions.checkNotNull;
 import static com.hazelcast.jet.core.ProcessorMetaSupplier.preferLocalParallelismOne;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 
@@ -65,7 +69,20 @@ public final class SinkProcessors {
      */
     @Nonnull
     public static <K, V> ProcessorMetaSupplier writeMapP(@Nonnull String mapName) {
-        return HazelcastWriters.<K, V>writeMapSupplier(mapName, null);
+        return writeMapP(mapName, Map.Entry::getKey, Map.Entry<K, V>::getValue);
+    }
+
+    /**
+     * Returns a supplier of processors for
+     * {@link Sinks#map(String, FunctionEx, FunctionEx)}.
+     */
+    @Nonnull
+    public static <T, K, V> ProcessorMetaSupplier writeMapP(
+            @Nonnull String mapName,
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends V> toValueFn
+    ) {
+        return HazelcastWriters.writeMapSupplier(mapName, null, toKeyFn, toValueFn);
     }
 
     /**
@@ -73,10 +90,24 @@ public final class SinkProcessors {
      * {@link Sinks#remoteMap(String, ClientConfig)}.
      */
     @Nonnull
-    public static <K, V> ProcessorMetaSupplier writeRemoteMapP(
+    public static ProcessorMetaSupplier writeRemoteMapP(
         @Nonnull String mapName, @Nonnull ClientConfig clientConfig
     ) {
-        return HazelcastWriters.<K, V>writeMapSupplier(mapName, clientConfig);
+        return writeRemoteMapP(mapName, clientConfig, identity(), identity());
+    }
+
+    /**
+     * Returns a supplier of processors for
+     * {@link Sinks#remoteMap(String, ClientConfig, FunctionEx, FunctionEx)}.
+     */
+    @Nonnull
+    public static <T, K, V> ProcessorMetaSupplier writeRemoteMapP(
+            @Nonnull String mapName,
+            @Nonnull ClientConfig clientConfig,
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends V> toValueFn
+    ) {
+        return HazelcastWriters.writeMapSupplier(mapName, clientConfig, toKeyFn, toValueFn);
     }
 
     /**
@@ -154,6 +185,21 @@ public final class SinkProcessors {
 
     /**
      * Returns a supplier of processors for
+     * {@link Sinks#mapWithEntryProcessor(int, String, FunctionEx, FunctionEx)}.
+     */
+    @Nonnull
+    public static <T, K, V, R> ProcessorMetaSupplier updateMapP(
+            int maxParallelAsyncOps,
+            @Nonnull String mapName,
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends EntryProcessor<K, V, R>> toEntryProcessorFn
+
+    ) {
+        return HazelcastWriters.updateMapSupplier(maxParallelAsyncOps, mapName, null, toKeyFn, toEntryProcessorFn);
+    }
+
+    /**
+     * Returns a supplier of processors for
      * {@link Sinks#remoteMapWithEntryProcessor(String, ClientConfig, FunctionEx,
      * FunctionEx)}.
      */
@@ -172,8 +218,8 @@ public final class SinkProcessors {
      * {@link Sinks#cache(String)}.
      */
     @Nonnull
-    public static <K, V> ProcessorMetaSupplier writeCacheP(@Nonnull String cacheName) {
-        return HazelcastWriters.<K, V>writeCacheSupplier(cacheName, null);
+    public static ProcessorMetaSupplier writeCacheP(@Nonnull String cacheName) {
+        return HazelcastWriters.writeCacheSupplier(cacheName, null);
     }
 
     /**
@@ -181,10 +227,10 @@ public final class SinkProcessors {
      * {@link Sinks#remoteCache(String, ClientConfig)}.
      */
     @Nonnull
-    public static <K, V> ProcessorMetaSupplier writeRemoteCacheP(
+    public static ProcessorMetaSupplier writeRemoteCacheP(
             @Nonnull String cacheName, @Nonnull ClientConfig clientConfig
     ) {
-        return HazelcastWriters.<K, V>writeCacheSupplier(cacheName, clientConfig);
+        return HazelcastWriters.writeCacheSupplier(cacheName, clientConfig);
     }
 
     /**
@@ -237,15 +283,17 @@ public final class SinkProcessors {
     @Nonnull
     public static <T> ProcessorMetaSupplier writeFileP(
             @Nonnull String directoryName,
-            @Nonnull FunctionEx<? super T, ? extends String> toStringFn,
             @Nonnull Charset charset,
-            boolean append
+            @Nullable String datePattern,
+            long maxFileSize,
+            boolean exactlyOnce,
+            @Nonnull FunctionEx<? super T, ? extends String> toStringFn
     ) {
         checkSerializable(toStringFn, "toStringFn");
 
-        return WriteFileP.metaSupplier(directoryName, toStringFn, charset.name(), append);
+        return WriteFileP.metaSupplier(directoryName, toStringFn, charset.name(),
+                datePattern, maxFileSize, exactlyOnce);
     }
-
 
     /**
      * Shortcut for {@link #writeBufferedP(FunctionEx,
@@ -296,14 +344,12 @@ public final class SinkProcessors {
      */
     @Nonnull
     public static <T> ProcessorMetaSupplier writeJmsQueueP(
+            @Nonnull String queueName,
+            boolean exactlyOnce,
             @Nonnull SupplierEx<? extends Connection> newConnectionFn,
-            @Nonnull FunctionEx<? super Connection, ? extends Session> newSessionFn,
-            @Nonnull BiFunctionEx<? super Session, ? super T, ? extends Message> messageFn,
-            @Nonnull BiConsumerEx<? super MessageProducer, ? super Message> sendFn,
-            @Nonnull ConsumerEx<? super Session> flushFn,
-            @Nonnull String name
+            @Nonnull BiFunctionEx<? super Session, ? super T, ? extends Message> messageFn
     ) {
-        return WriteJmsP.supplier(newConnectionFn, newSessionFn, messageFn, sendFn, flushFn, name, false);
+        return WriteJmsP.supplier(queueName, exactlyOnce, newConnectionFn, messageFn, false);
     }
 
     /**
@@ -311,26 +357,37 @@ public final class SinkProcessors {
      */
     @Nonnull
     public static <T> ProcessorMetaSupplier writeJmsTopicP(
+            @Nonnull String topicName,
+            boolean exactlyOnce,
             @Nonnull SupplierEx<? extends Connection> newConnectionFn,
-            @Nonnull FunctionEx<? super Connection, ? extends Session> newSessionFn,
-            @Nonnull BiFunctionEx<? super Session, ? super T, ? extends Message> messageFn,
-            @Nonnull BiConsumerEx<? super MessageProducer, ? super Message> sendFn,
-            @Nonnull ConsumerEx<? super Session> flushFn,
-            @Nonnull String name
+            @Nonnull BiFunctionEx<? super Session, ? super T, ? extends Message> messageFn
     ) {
-        return WriteJmsP.supplier(newConnectionFn, newSessionFn, messageFn, sendFn, flushFn, name, true);
+        return WriteJmsP.supplier(topicName, exactlyOnce, newConnectionFn, messageFn, true);
     }
 
     /**
-     * Returns a supplier of processors for {@link
-     * Sinks#jdbc(String, SupplierEx, BiConsumerEx)}.
+     * Returns a supplier of processors for {@link Sinks#jdbcBuilder()}.
      */
     @Nonnull
     public static <T> ProcessorMetaSupplier writeJdbcP(
             @Nonnull String updateQuery,
-            @Nonnull SupplierEx<? extends java.sql.Connection> newConnectionFn,
-            @Nonnull BiConsumerEx<? super PreparedStatement, ? super T> bindFn
+            @Nonnull SupplierEx<? extends CommonDataSource> dataSourceSupplier,
+            @Nonnull BiConsumerEx<? super PreparedStatement, ? super T> bindFn,
+            boolean exactlyOnce
     ) {
-        return WriteJdbcP.metaSupplier(updateQuery, newConnectionFn, bindFn);
+        checkNotNull(updateQuery, "updateQuery");
+        checkNotNull(dataSourceSupplier, "dataSourceSupplier");
+        checkNotNull(bindFn, "bindFn");
+        return WriteJdbcP.metaSupplier(updateQuery, dataSourceSupplier, bindFn, exactlyOnce);
+    }
+
+    /**
+     * Returns a supplier of processors for {@link Sinks#observable}.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    public static ProcessorMetaSupplier writeObservableP(@Nonnull String name) {
+        return HazelcastWriters.writeObservableSupplier(name);
     }
 }

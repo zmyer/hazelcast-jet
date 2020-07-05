@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,13 @@
 
 package com.hazelcast.jet.impl.connector;
 
+import com.hazelcast.client.impl.clientside.HazelcastClientProxy;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.function.FunctionEx;
+import com.hazelcast.internal.serialization.SerializationService;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorSupplier;
+import com.hazelcast.jet.impl.execution.init.Contexts.ProcSupplierCtx;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -34,28 +38,43 @@ public abstract class AbstractHazelcastConnectorSupplier implements ProcessorSup
     private final String clientXml;
 
     private transient HazelcastInstance instance;
+    private transient SerializationService serializationService;
 
     AbstractHazelcastConnectorSupplier(@Nullable String clientXml) {
         this.clientXml = clientXml;
+    }
+
+    public static ProcessorSupplier of(
+            @Nullable String clientXml,
+            @Nonnull FunctionEx<HazelcastInstance, Processor> procFn
+    ) {
+        return new AbstractHazelcastConnectorSupplier(clientXml) {
+            @Override
+            protected Processor createProcessor(HazelcastInstance instance, SerializationService serializationService) {
+                return procFn.apply(instance);
+            }
+        };
     }
 
     @Override
     public void init(@Nonnull Context context) {
         if (clientXml != null) {
             instance = newHazelcastClient(asClientConfig(clientXml));
+            serializationService = ((HazelcastClientProxy) instance).getSerializationService();
         } else {
             instance = context.jetInstance().getHazelcastInstance();
+            serializationService = ((ProcSupplierCtx) context).serializationService();
         }
     }
 
     @Nonnull @Override
     public Collection<? extends Processor> get(int count) {
-        return Stream.generate(() -> createProcessor(instance))
+        return Stream.generate(() -> createProcessor(instance, serializationService))
                      .limit(count)
                      .collect(toList());
     }
 
-    protected abstract Processor createProcessor(HazelcastInstance instance);
+    protected abstract Processor createProcessor(HazelcastInstance instance, SerializationService serializationService);
 
     boolean isLocal() {
         return clientXml == null;

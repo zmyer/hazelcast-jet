@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,15 @@ import com.hazelcast.collection.IList;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.function.BiFunctionEx;
 import com.hazelcast.function.FunctionEx;
+import com.hazelcast.internal.util.UuidUtil;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.DAG;
+import com.hazelcast.jet.function.Observer;
 import com.hazelcast.jet.impl.AbstractJetInstance;
 import com.hazelcast.jet.impl.JobRepository;
 import com.hazelcast.jet.impl.SnapshotValidationRecord;
+import com.hazelcast.jet.impl.pipeline.PipelineImpl;
 import com.hazelcast.jet.pipeline.GeneralStage;
 import com.hazelcast.jet.pipeline.JournalInitialPosition;
 import com.hazelcast.jet.pipeline.Pipeline;
@@ -35,6 +38,8 @@ import com.hazelcast.jet.pipeline.Sources;
 import com.hazelcast.map.IMap;
 import com.hazelcast.map.impl.MapService;
 import com.hazelcast.replicatedmap.ReplicatedMap;
+import com.hazelcast.ringbuffer.Ringbuffer;
+import com.hazelcast.topic.ITopic;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -94,21 +99,21 @@ public interface JetInstance {
      */
     @Nonnull
     default Job newJob(@Nonnull Pipeline pipeline) {
-        return newJob(pipeline.toDag());
+        return newJob(pipeline, new JobConfig());
     }
 
     /**
      * Creates and returns a Jet job based on the supplied DAG and job
      * configuration. Jet will asynchronously start executing the job.
-     *
-     * <p>If the name in the JobConfig is non-null, Jet checks if there is an
+     * <p>
+     * If the name in the JobConfig is non-null, Jet checks if there is an
      * active job with equal name, in which case it throws {@link
      * JobAlreadyExistsException}. Job is active if it is running,
      * suspended or waiting to be run; that is it has not completed or failed.
      * Thus there can be at most one active job with a given name at a time and
      * you can re-use the job name after the previous job completed.
-     *
-     * <p>See also {@link #newJobIfAbsent}.
+     * <p>
+     * See also {@link #newJobIfAbsent}.
      *
      * @throws JobAlreadyExistsException if there is an active job with
      *      an equal name
@@ -119,44 +124,44 @@ public interface JetInstance {
     /**
      * Creates and returns a Jet job based on the supplied pipeline and job
      * configuration. Jet will asynchronously start executing the job.
-     *
-     * <p>If the name in the JobConfig is non-null, Jet checks if there is an
+     * <p>
+     * If the name in the JobConfig is non-null, Jet checks if there is an
      * active job with equal name, in which case it throws {@link
      * JobAlreadyExistsException}. Job is active if it is running,
      * suspended or waiting to be run; that is it has not completed or failed.
      * Thus there can be at most one active job with a given name at a time and
      * you can re-use the job name after the previous job completed.
-     *
-     * <p>See also {@link #newJobIfAbsent}.
+     * <p>
+     * See also {@link #newJobIfAbsent}.
      *
      * @throws JobAlreadyExistsException if there is an active job with
      *      an equal name
      */
     @Nonnull
     default Job newJob(@Nonnull Pipeline pipeline, @Nonnull JobConfig config) {
-        return newJob(pipeline.toDag(), config);
+        return newJob(pipeline.toDag(), config.attachAll(((PipelineImpl) pipeline).attachedFiles()));
     }
 
     /**
      * Creates and returns a Jet job based on the supplied DAG and job
      * configuration. Jet will asynchronously start executing the job.
-     *
-     * <p>If the name in the JobConfig is non-null, Jet checks if there is an
+     * <p>
+     * If the name in the JobConfig is non-null, Jet checks if there is an
      * active job with equal name. If there is, it will join that job instead
      * of submitting a new one. Job is active if it is running, suspended or
      * waiting to be run; that is it has not completed or failed. In other
      * words, this method ensures that the job with this name is running and is
      * not running multiple times in parallel.
-     *
-     * <p>This method is useful for microservices deployment when each package
+     * <p>
+     * This method is useful for microservices deployment when each package
      * contains a jet member and the job and you want the job to run only once.
      * But if the job is a batch job and runs very quickly, it can happen that
      * it executes multiple times, because the job name can be reused after a
      * previous execution completed.
-     *
-     * <p>If the job name is null, a new job is always submitted.
-     *
-     * <p>See also {@link #newJob}.
+     * <p>
+     * If the job name is null, a new job is always submitted.
+     * <p>
+     * See also {@link #newJob}.
      */
     @Nonnull
     Job newJobIfAbsent(@Nonnull DAG dag, @Nonnull JobConfig config);
@@ -164,27 +169,27 @@ public interface JetInstance {
     /**
      * Creates and returns a Jet job based on the supplied pipeline and job
      * configuration. Jet will asynchronously start executing the job.
-     *
-     * <p>If the name in the JobConfig is non-null, Jet checks if there is an
+     * <p>
+     * If the name in the JobConfig is non-null, Jet checks if there is an
      * active job with equal name. If there is, it will join that job instead
      * of submitting a new one. Job is active if it is running, suspended or
      * waiting to be run; that is it has not completed or failed. In other
      * words, this method ensures that the job with this name is running and is
      * not running multiple times in parallel.
-     *
-     * <p>This method is useful for microservices deployment when each package
+     * <p>
+     * This method is useful for microservices deployment when each package
      * contains a jet member and the job and you want the job to run only once.
      * But if the job is a batch job and runs very quickly, it can happen that
      * it executes multiple times, because the job name can be reused after a
      * previous execution completed.
-     *
-     * <p>If the job name is null, a new job is always submitted.
-     *
-     * <p>See also {@link #newJob}.
+     * <p>
+     * If the job name is null, a new job is always submitted.
+     * <p>
+     * See also {@link #newJob}.
      */
     @Nonnull
     default Job newJobIfAbsent(@Nonnull Pipeline pipeline, @Nonnull JobConfig config) {
-        return newJobIfAbsent(pipeline.toDag(), config);
+        return newJobIfAbsent(pipeline.toDag(), config.attachAll(((PipelineImpl) pipeline).attachedFiles()));
     }
 
     /**
@@ -295,6 +300,17 @@ public interface JetInstance {
     <E> IList<E> getList(@Nonnull String name);
 
     /**
+     * Returns a distributed reliable topic instance with the specified name.
+     *
+     * @param name name of the distributed topic
+     * @return distributed reliable topic instance with the specified name
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    <E> ITopic<E> getReliableTopic(@Nonnull String name);
+
+    /**
      * Obtain the {@link JetCacheManager} that provides access to JSR-107 (JCache) caches
      * configured on a Hazelcast Jet cluster.
      * <p>
@@ -305,6 +321,46 @@ public interface JetInstance {
      */
     @Nonnull
     JetCacheManager getCacheManager();
+
+    /**
+     * Returns an {@link Observable} instance with the specified name.
+     * Represents a flowing sequence of events produced by jobs containing
+     * {@linkplain Sinks#observable(String) observable sinks}.
+     * <p>
+     * Multiple calls of this method with the same name return the same
+     * instance (unless it was destroyed in the meantime).
+     * <p>
+     * In order to observe the events register an {@link Observer} on the
+     * {@code Observable}.
+     *
+     * @param name name of the observable
+     * @return observable with the specified name
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    <T> Observable<T> getObservable(@Nonnull String name);
+
+    /**
+     * Returns a new observable with a randomly generated name
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    default <T> Observable<T> newObservable() {
+        return getObservable(UuidUtil.newUnsecureUuidString());
+    }
+
+    /**
+     * Returns a list of all the {@link Observable Observables} that are active.
+     * By "active" we mean that their backing {@link Ringbuffer} has been
+     * created, which happens when either their first {@link Observer} is
+     * registered or when the job publishing their data (via
+     * {@linkplain Sinks#observable(String) observable sinks}) starts
+     * executing.
+     */
+    @Nonnull
+    Collection<Observable<?>> getObservables();
 
     /**
      * Shuts down the current instance. If this is a client instance, it

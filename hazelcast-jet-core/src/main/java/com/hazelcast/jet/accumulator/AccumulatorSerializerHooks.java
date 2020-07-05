@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,11 +47,6 @@ class AccumulatorSerializerHooks {
                 }
 
                 @Override
-                public void destroy() {
-
-                }
-
-                @Override
                 public void write(ObjectDataOutput out, LongAccumulator object) throws IOException {
                     out.writeLong(object.get());
                 }
@@ -82,11 +77,6 @@ class AccumulatorSerializerHooks {
                 @Override
                 public int getTypeId() {
                     return SerializerHookConstants.DOUBLE_ACC;
-                }
-
-                @Override
-                public void destroy() {
-
                 }
 
                 @Override
@@ -123,11 +113,6 @@ class AccumulatorSerializerHooks {
                 }
 
                 @Override
-                public void destroy() {
-
-                }
-
-                @Override
                 public void write(ObjectDataOutput out, MutableReference object) throws IOException {
                     out.writeObject(object.get());
                 }
@@ -158,10 +143,6 @@ class AccumulatorSerializerHooks {
                 @Override
                 public int getTypeId() {
                     return SerializerHookConstants.LIN_TREND_ACC;
-                }
-
-                @Override
-                public void destroy() {
                 }
 
                 @Override
@@ -207,10 +188,6 @@ class AccumulatorSerializerHooks {
                 }
 
                 @Override
-                public void destroy() {
-                }
-
-                @Override
                 public void write(ObjectDataOutput out, LongLongAccumulator object) throws IOException {
                     out.writeLong(object.get1());
                     out.writeLong(object.get2());
@@ -242,10 +219,6 @@ class AccumulatorSerializerHooks {
                 @Override
                 public int getTypeId() {
                     return SerializerHookConstants.LONG_DOUBLE_ACC;
-                }
-
-                @Override
-                public void destroy() {
                 }
 
                 @Override

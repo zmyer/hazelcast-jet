@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,12 +27,10 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.rules.ExpectedException;
 
-import java.util.concurrent.CancellationException;
 import java.util.function.Function;
 
 import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
 import static com.hazelcast.jet.datamodel.Tuple3.tuple3;
-import static org.junit.Assert.fail;
 
 public class JobRestartStressTestBase extends JetTestSupport {
 
@@ -56,7 +54,7 @@ public class JobRestartStressTestBase extends JetTestSupport {
         TestProcessors.reset(2);
 
         DAG dag = new DAG();
-        dag.newVertex("generator", DummyStatefulP::new)
+        dag.newVertex("dummy-stateful-p", DummyStatefulP::new)
            .localParallelism(1);
 
         Job[] job = {instance1.newJob(dag,
@@ -66,19 +64,11 @@ public class JobRestartStressTestBase extends JetTestSupport {
         logger.info("waiting for 1st snapshot");
         waitForFirstSnapshot(jobRepository, job[0].getId(), 5, false);
         logger.info("first snapshot found");
-        spawn(() -> {
-            for (int i = 0; i < 10; i++) {
-                job[0] = action.apply(tuple3(instance1, dag, job[0]));
-                waitForNextSnapshot(jobRepository, job[0].getId(), 5);
-            }
-            return null;
-        }).get();
-
-        job[0].cancel();
-        try {
-            job[0].join();
-            fail("CancellationException was expected");
-        } catch (CancellationException expected) {
+        for (int i = 0; i < 10; i++) {
+            job[0] = action.apply(tuple3(instance1, dag, job[0]));
+            waitForNextSnapshot(jobRepository, job[0].getId(), 5, false);
         }
+
+        cancelAndJoin(job[0]);
     }
 }

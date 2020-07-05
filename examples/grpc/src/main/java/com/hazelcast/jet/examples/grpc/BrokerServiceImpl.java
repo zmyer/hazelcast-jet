@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,10 +35,26 @@ public class BrokerServiceImpl extends BrokerServiceImplBase {
     }
 
     @Override
-    public void brokerInfo(BrokerInfoRequest request, StreamObserver<BrokerInfoReply> responseObserver) {
-        String brokerName = brokers.get(request.getId()).name();
-        BrokerInfoReply reply = BrokerInfoReply.newBuilder().setBrokerName(brokerName).build();
-        responseObserver.onNext(reply);
-        responseObserver.onCompleted();
+    public StreamObserver<BrokerInfoRequest> brokerInfo(StreamObserver<BrokerInfoReply> responseObserver) {
+
+        return new StreamObserver<BrokerInfoRequest>() {
+            @Override
+            public void onNext(BrokerInfoRequest request) {
+                String brokerName = brokers.get(request.getId()).name();
+                BrokerInfoReply reply = BrokerInfoReply.newBuilder().setBrokerName(brokerName).build();
+                responseObserver.onNext(reply);
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                t.printStackTrace();
+            }
+
+            @Override
+            public void onCompleted() {
+                responseObserver.onCompleted();
+            }
+        };
+
     }
 }

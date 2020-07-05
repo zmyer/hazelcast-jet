@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,8 +51,6 @@ public class AggregateTransform<A, R> extends AbstractTransform {
 
     @Override
     public void addToDag(Planner p) {
-        // We don't use single-stage even when optimizing for memory because the
-        // single-stage setup doesn't save memory with just one global key.
         if (aggrOp.combineFn() == null) {
             addToDagSingleStage(p);
         } else {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import com.hazelcast.function.PredicateEx;
 import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Util;
 import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.EventTimeMapper;
 import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
@@ -34,8 +35,9 @@ import com.hazelcast.jet.core.processor.SourceProcessors;
 import com.hazelcast.jet.function.ToResultSetFunction;
 import com.hazelcast.jet.impl.pipeline.transform.BatchSourceTransform;
 import com.hazelcast.jet.impl.pipeline.transform.StreamSourceTransform;
-import com.hazelcast.map.IMap;
+import com.hazelcast.jet.json.JsonUtil;
 import com.hazelcast.map.EventJournalMapEvent;
+import com.hazelcast.map.IMap;
 import com.hazelcast.projection.Projection;
 import com.hazelcast.projection.Projections;
 import com.hazelcast.query.Predicate;
@@ -48,6 +50,8 @@ import javax.jms.Message;
 import java.nio.charset.Charset;
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
 import java.util.function.Function;
 
@@ -154,15 +158,11 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may miss
-     * and/or duplicate some entries. If we detect a topology change, the job
-     * will fail, but the detection is only on a best-effort basis - we might
-     * still give incorrect results without reporting a failure. Concurrent
-     * mutation is not detected at all.
+     * If entries are added or removed to the map during the job, the keys which
+     * have been deleted or added since the job started will be emitted at most
+     * once, other keys must be emitted exactly once.
      * <p>
-     * The default local parallelism for this processor is 2 (or 1 if just 1
-     * CPU is available).
+     * The default local parallelism for this processor is 1.
      */
     @Nonnull
     public static <K, V> BatchSource<Entry<K, V>> map(@Nonnull String mapName) {
@@ -183,15 +183,11 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may miss
-     * and/or duplicate some entries. If we detect a topology change, the job
-     * will fail, but the detection is only on a best-effort basis - we might
-     * still give incorrect results without reporting a failure. Concurrent
-     * mutation is not detected at all.
+     * If entries are added or removed to the map during the job, the keys which
+     * have been deleted or added since the job started will be emitted at most
+     * once, other keys must be emitted exactly once.
      * <p>
-     * The default local parallelism for this processor is 2 (or 1 if just 1
-     * CPU is available).
+     * The default local parallelism for this processor is 1.
      */
     @Nonnull
     public static <K, V> BatchSource<Entry<K, V>> map(@Nonnull IMap<? extends K, ? extends V> map) {
@@ -223,15 +219,11 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may miss
-     * and/or duplicate some entries. If we detect a topology change, the job
-     * will fail, but the detection is only on a best-effort basis - we might
-     * still give incorrect results without reporting a failure. Concurrent
-     * mutation is not detected at all.
+     * If entries are added or removed to the map during the job, the keys which
+     * have been deleted or added since the job started will be emitted at most
+     * once, other keys must be emitted exactly once.
      * <p>
-     * The default local parallelism for this processor is 2 (or 1 if just 1
-     * CPU is available).
+     * The default local parallelism for this processor is 1.
      *
      * <h4>Predicate/projection class requirements</h4>
      *
@@ -293,15 +285,11 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * If the {@code IMap} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may miss
-     * and/or duplicate some entries. If we detect a topology change, the job
-     * will fail, but the detection is only on a best-effort basis - we might
-     * still give incorrect results without reporting a failure. Concurrent
-     * mutation is not detected at all.
+     * If entries are added or removed to the map during the job, the keys which
+     * have been deleted or added since the job started will be emitted at most
+     * once, other keys must be emitted exactly once.
      * <p>
-     * The default local parallelism for this processor is 2 (or 1 if just 1
-     * CPU is available).
+     * The default local parallelism for this processor 1.
      *
      * <h4>Predicate/projection class requirements</h4>
      * <p>
@@ -680,15 +668,11 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * If the {@code ICache} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may miss
-     * and/or duplicate some entries. If we detect a topology change, the job
-     * will fail, but the detection is only on a best-effort basis - we might
-     * still give incorrect results without reporting a failure. Concurrent
-     * mutation is not detected at all.
+     * If entries are added or removed to the cache during the job, the keys which
+     * have been deleted or added since the job started will be emitted at most
+     * once, other keys must be emitted exactly once.
      * <p>
-     * The default local parallelism for this processor is 2 (or 1 if just 1
-     * CPU is available).
+     * The default local parallelism for this processor 1.
      */
     @Nonnull
     public static <K, V> BatchSource<Entry<K, V>> cache(@Nonnull String cacheName) {
@@ -778,12 +762,9 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * If the {@code ICache} is modified while being read, or if there is a
-     * cluster topology change (triggering data migration), the source may miss
-     * and/or duplicate some entries. If we detect a topology change, the job
-     * will fail, but the detection is only on a best-effort basis - we might
-     * still give incorrect results without reporting a failure. Concurrent
-     * mutation is not detected at all.
+     * If entries are added or removed to the cache during the job, the keys which
+     * have been deleted or added since the job started will be emitted at most
+     * once, other keys must be emitted exactly once.
      * <p>
      * The default local parallelism for this processor is 1.
      */
@@ -883,7 +864,8 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * The default local parallelism for this processor is 1.
+     * One instance of this processor runs only on the member that owns the
+     * list.
      */
     @Nonnull
     public static <T> BatchSource<T> list(@Nonnull String listName) {
@@ -906,7 +888,8 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * The default local parallelism for this processor is 1.
+     * One instance of this processor runs only on the member that owns the
+     * list.
      */
     @Nonnull
     public static <T> BatchSource<T> list(@Nonnull IList<? extends T> list) {
@@ -924,7 +907,7 @@ public final class Sources {
      * The source does not save any state to snapshot. If the job is restarted,
      * it will re-emit all entries.
      * <p>
-     * The default local parallelism for this processor is 1.
+     * Only 1 instance of this processor runs in the cluster.
      */
     @Nonnull
     public static <T> BatchSource<T> remoteList(@Nonnull String listName, @Nonnull ClientConfig clientConfig) {
@@ -989,8 +972,7 @@ public final class Sources {
      *      .charset(UTF_8)
      *      .glob(GLOB_WILDCARD)
      *      .sharedFileSystem(false)
-     *      .mapToOutputFn((fileName, line) -> line)
-     *      .build()
+     *      .build((fileName, line) -> line)
      * }</pre>
      * <p>
      * If files are appended to while being read, the addition might or might
@@ -1005,6 +987,52 @@ public final class Sources {
     }
 
     /**
+     * A source to read all files in a directory in a batch way. The source
+     * expects the content of the files as
+     * <a href="https://en.wikipedia.org/wiki/JSON_streaming">streaming JSON</a>
+     * content, where each JSON string is separated by a new-line. The JSON
+     * string itself can span on multiple lines. The source converts each JSON
+     * string to an object of given type.
+     * <p>
+     * This method is a shortcut for: <pre>{@code
+     *   filesBuilder(directory)
+     *      .charset(UTF_8)
+     *      .glob(GLOB_WILDCARD)
+     *      .sharedFileSystem(false)
+     *      .build(path -> JsonUtil.beanSequenceFrom(path, type))
+     * }</pre>
+     * <p>
+     * If files are appended to while being read, the addition might or might
+     * not be emitted or part of a line can be emitted. If files are modified
+     * in more complex ways, the behavior is undefined.
+     * <p>
+     *
+     * See {@link #filesBuilder(String)}, {@link #files(String)}.
+     *
+     * @since 4.2
+     */
+    @Nonnull
+    public static <T> BatchSource<T> json(@Nonnull String directory, @Nonnull Class<T> type) {
+        return filesBuilder(directory)
+                .build(path -> JsonUtil.beanSequenceFrom(path, type));
+    }
+
+    /**
+     * Convenience for {@link #json(String, Class)} which converts each
+     * JSON string to a {@link Map}. It will throw {@link ClassCastException}
+     * if JSON string is just primitive ({@link String}, {@link Number},
+     * {@link Boolean}) or JSON array ({@link List}).
+     *
+     * @since 4.2
+     */
+    @Nonnull
+    public static BatchSource<Map<String, Object>> json(@Nonnull String directory) {
+        return filesBuilder(directory)
+                .build(path -> JsonUtil.mapSequenceFrom(path));
+    }
+
+
+    /**
      * A source to stream lines added to files in a directory. This is a
      * streaming source, it will watch directory and emit lines as they are
      * appended to files in that directory.
@@ -1014,8 +1042,7 @@ public final class Sources {
      *      .charset(UTF_8)
      *      .glob(GLOB_WILDCARD)
      *      .sharedFileSystem(false)
-     *      .mapToOutputFn((fileName, line) -> line)
-     *      .buildWatcher()
+     *      .buildWatcher((fileName, line) -> line)
      * }</pre>
      *
      * <h3>Appending lines using an text editor</h3>
@@ -1023,7 +1050,7 @@ public final class Sources {
      * append the lines. However, it might not work as expected because some
      * editors write to a temp file and then rename it or append extra newline
      * character at the end which gets overwritten if more text is added in the
-     * editor. Best way to append is to use {@code echo text >> yourfile}.
+     * editor. The best way to append is to use {@code echo text >> yourFile}.
      *
      * See {@link #filesBuilder(String)}.
      */
@@ -1033,22 +1060,84 @@ public final class Sources {
     }
 
     /**
-     * Convenience for {@link #jmsQueueBuilder(SupplierEx)}. This
-     * version creates a connection without any authentication parameters and
-     * uses non-transacted sessions with {@code Session.AUTO_ACKNOWLEDGE} mode.
-     * JMS {@link Message} objects are emitted to downstream.
+     * A source to stream lines added to files in a directory. This is a
+     * streaming source, it will watch directory and emit objects of given
+     * {@code type} by converting each line as they are appended to files in
+     * that directory.
      * <p>
-     * <b>Note:</b> {@link javax.jms.Message} might not be serializable. In
-     * that case you can use {@linkplain #jmsQueueBuilder(SupplierEx)
-     * the builder} and add a projection.
+     * This method is a shortcut for: <pre>{@code
+     *   filesBuilder(directory)
+     *      .charset(UTF_8)
+     *      .glob(GLOB_WILDCARD)
+     *      .sharedFileSystem(false)
+     *      .buildWatcher((fileName, line) -> JsonUtil.beanFrom(line, type))
+     * }</pre>
      *
-     * @param factorySupplier supplier to obtain JMS connection factory
-     * @param name            the name of the queue
+     * <h3>Appending lines using an text editor</h3>
+     * If you're testing this source, you might think of using a text editor to
+     * append the lines. However, it might not work as expected because some
+     * editors write to a temp file and then rename it or append extra newline
+     * character at the end which gets overwritten if more text is added in the
+     * editor. The best way to append is to use {@code echo text >> yourFile}.
+     *
+     * See {@link #filesBuilder(String)}, {@link #fileWatcher(String)}.
+     *
+     * @since 4.2
      */
     @Nonnull
+    public static <T> StreamSource<T> jsonWatcher(@Nonnull String watchedDirectory, @Nonnull Class<T> type) {
+        return filesBuilder(watchedDirectory)
+                .buildWatcher((fileName, line) -> JsonUtil.beanFrom(line, type));
+    }
+
+    /**
+     * Convenience for {@link #jsonWatcher(String, Class)} which converts each
+     * line appended to the {@link Map} representation of the JSON string.
+     *
+     * @since 4.2
+     */
+    @Nonnull
+    public static StreamSource<Map<String, Object>> jsonWatcher(@Nonnull String watchedDirectory) {
+        return filesBuilder(watchedDirectory)
+                .buildWatcher((fileName, line) -> JsonUtil.mapFrom(line));
+    }
+
+    /**
+     * @deprecated see {@linkplain #jmsQueue(String, SupplierEx)}.
+     */
+    @Nonnull
+    @Deprecated
     public static StreamSource<Message> jmsQueue(
             @Nonnull SupplierEx<? extends ConnectionFactory> factorySupplier,
             @Nonnull String name
+    ) {
+        return jmsQueue(name, factorySupplier);
+    }
+
+    /**
+     * Shortcut equivalent to:
+     * <pre>
+     *         return jmsQueueBuilder(factorySupplier)
+     *                 .destinationName(name)
+     *                 .build();
+     * </pre>
+     *
+     * This version creates a connection without any authentication parameters.
+     * JMS {@link javax.jms.Message} objects are emitted to downstream.
+     * <p>
+     * <b>Note:</b> {@link javax.jms.Message} might not be serializable. In
+     * that case you can use {@linkplain #jmsQueueBuilder(SupplierEx) the
+     * builder} and add a projection.
+     *
+     * @param name            the name of the queue
+     * @param factorySupplier supplier to obtain JMS connection factory
+     *
+     * @since 4.1
+     */
+    @Nonnull
+    public static StreamSource<Message> jmsQueue(
+            @Nonnull String name,
+            @Nonnull SupplierEx<? extends ConnectionFactory> factorySupplier
     ) {
         return jmsQueueBuilder(factorySupplier)
                 .destinationName(name)
@@ -1060,20 +1149,20 @@ public final class Sources {
      * a custom JMS {@link StreamSource} for the Pipeline API. See javadoc on
      * {@link JmsSourceBuilder} methods for more details.
      * <p>
-     * This source uses the {@link Message#getJMSTimestamp() JMS' message
-     * timestamp} as the native timestamp, if {@linkplain
+     * This source uses the {@linkplain Message#getJMSTimestamp() JMS'
+     * message timestamp} as the native timestamp, if {@linkplain
      * StreamSourceStage#withNativeTimestamps(long) enabled}.
      * <p>
-     * The source does not save any state to snapshot. The source starts
-     * emitting items where it left from.
+     * This source supports exactly-once and at-least-once mode, see {@link
+     * JmsSourceBuilder#maxGuarantee(ProcessingGuarantee)} for more
+     * information.
      * <p>
-     * IO failures should be handled by the JMS provider. If any JMS operation
-     * throws an exception, the job will fail. Most of the providers offer a
-     * configuration parameter to enable auto-reconnection, refer to provider
-     * documentation for details.
+     * IO failures should be handled by the JMS provider. If any JMS
+     * operation throws an exception, the job will fail. Most of the providers
+     * offer a configuration parameter to enable auto-reconnection, refer to
+     * provider documentation for details.
      * <p>
-     * Default local parallelism for this processor is 4 (or less if less CPUs
-     * are available).
+     * The default local parallelism for this processor is 1.
      */
     @Nonnull
     public static JmsSourceBuilder jmsQueueBuilder(SupplierEx<? extends ConnectionFactory> factorySupplier) {
@@ -1081,22 +1170,43 @@ public final class Sources {
     }
 
     /**
-     * Convenience for {@link #jmsTopicBuilder(SupplierEx)}. This
-     * version creates a connection without any authentication parameters and
-     * uses non-transacted sessions with {@code Session.AUTO_ACKNOWLEDGE} mode.
-     * JMS {@link Message} objects are emitted to downstream.
-     * <p>
-     * <b>Note:</b> {@link javax.jms.Message} might not be serializable. In
-     * that case you can use {@linkplain #jmsTopicBuilder(SupplierEx)
-     * the builder} and add a projection.
-     *
-     * @param factorySupplier supplier to obtain JMS connection factory
-     * @param name            the name of the topic
+     * @deprecated see {@linkplain #jmsTopic(String, SupplierEx)}.
      */
     @Nonnull
+    @Deprecated
     public static StreamSource<Message> jmsTopic(
             @Nonnull SupplierEx<? extends ConnectionFactory> factorySupplier,
             @Nonnull String name
+    ) {
+        return jmsTopic(name, factorySupplier);
+    }
+
+    /**
+     * Shortcut equivalent to:
+     * <pre>
+     *         return jmsTopicBuilder(factorySupplier)
+     *                 .destinationName(name)
+     *                 .build();
+     * </pre>
+     *
+     * This version creates a connection without any authentication parameters.
+     * A non-durable, non-shared consumer is used, only one member will connect
+     * to the broker. JMS {@link javax.jms.Message} objects are emitted to
+     * downstream.
+     * <p>
+     * <b>Note:</b> {@link javax.jms.Message} might not be serializable. In
+     * that case you can use {@linkplain #jmsQueueBuilder(SupplierEx) the
+     * builder} and add a projection.
+     *
+     * @param name            the name of the queue
+     * @param factorySupplier supplier to obtain JMS connection factory
+     *
+     * @since 4.1
+     */
+    @Nonnull
+    public static StreamSource<Message> jmsTopic(
+            @Nonnull String name,
+            @Nonnull SupplierEx<? extends ConnectionFactory> factorySupplier
     ) {
         return jmsTopicBuilder(factorySupplier)
                 .destinationName(name)
@@ -1108,27 +1218,25 @@ public final class Sources {
      * a custom JMS {@link StreamSource} for the Pipeline API. See javadoc on
      * {@link JmsSourceBuilder} methods for more details.
      * <p>
-     * Topic is a non-distributed source: if messages are consumed by multiple
-     * consumers, all of them will get the same messages. Therefore the source
-     * operates on a single member and with local parallelism of 1. Setting
-     * local parallelism to a value other than 1 causes an {@code
-     * IllegalArgumentException}.
+     * By default, a non-shared consumer is used. This forces the source to
+     * run on only one member of the cluster. You can use {@link
+     * JmsSourceBuilder#consumerFn(FunctionEx)} to create a shared consumer.
      * <p>
-     * This source uses the {@link Message#getJMSTimestamp() JMS' message
-     * timestamp} as the native timestamp, if {@linkplain
+     * This source uses the {@linkplain Message#getJMSTimestamp() JMS'
+     * message timestamp} as the native timestamp, if {@linkplain
      * StreamSourceStage#withNativeTimestamps(long) enabled}.
      * <p>
-     * The source does not save any state to snapshot. Behavior of job restart
-     * changes according to the consumer. If it is a durable consumer and a
-     * unique client identifier is set for the connection then JMS provider
-     * persists items during restart and the source starts where it left from.
-     * If the consumer is non-durable then source emits the items published
-     * after the restart.
+     * This source supports exactly-once and at-least-once mode for durable
+     * topic subscriptions, see {@link
+     * JmsSourceBuilder#maxGuarantee(ProcessingGuarantee)} for more
+     * information.
      * <p>
-     * IO failures should be handled by the JMS provider. If any JMS operation
-     * throws an exception, the job will fail. Most of the providers offer a
-     * configuration parameter to enable auto-reconnection, refer to provider
-     * documentation for details.
+     * IO failures should be handled by the JMS provider. If any JMS
+     * operation throws an exception, the job will fail. Most of the providers
+     * offer a configuration parameter to enable auto-reconnection, refer to
+     * provider documentation for details.
+     * <p>
+     * The default local parallelism for this processor is 1.
      */
     @Nonnull
     public static JmsSourceBuilder jmsTopicBuilder(SupplierEx<? extends ConnectionFactory> factorySupplier) {

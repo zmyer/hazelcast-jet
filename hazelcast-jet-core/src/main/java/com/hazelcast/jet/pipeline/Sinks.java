@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,22 +24,27 @@ import com.hazelcast.function.BiFunctionEx;
 import com.hazelcast.function.BinaryOperatorEx;
 import com.hazelcast.function.FunctionEx;
 import com.hazelcast.function.SupplierEx;
+import com.hazelcast.jet.JetInstance;
+import com.hazelcast.jet.Observable;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.processor.SinkProcessors;
 import com.hazelcast.jet.impl.pipeline.SinkImpl;
+import com.hazelcast.jet.json.JsonUtil;
 import com.hazelcast.map.EntryProcessor;
 import com.hazelcast.map.IMap;
+import com.hazelcast.topic.ITopic;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.jms.ConnectionFactory;
+import javax.sql.CommonDataSource;
 import java.nio.charset.Charset;
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.SQLNonTransientException;
 import java.util.Map.Entry;
 
+import static com.hazelcast.client.HazelcastClient.newHazelcastClient;
 import static com.hazelcast.function.Functions.entryKey;
 import static com.hazelcast.function.Functions.entryValue;
 import static com.hazelcast.jet.core.ProcessorMetaSupplier.preferLocalParallelismOne;
@@ -56,6 +61,8 @@ import static com.hazelcast.jet.core.processor.SinkProcessors.writeRemoteCacheP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeRemoteListP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeRemoteMapP;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeSocketP;
+import static com.hazelcast.jet.impl.util.ImdgUtil.asClientConfig;
+import static com.hazelcast.jet.impl.util.ImdgUtil.asXmlString;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
@@ -88,7 +95,27 @@ public final class Sinks {
             @Nonnull String sinkName,
             @Nonnull ProcessorMetaSupplier metaSupplier
     ) {
-        return new SinkImpl<>(sinkName, metaSupplier, false, null);
+        return new SinkImpl<>(sinkName, metaSupplier);
+    }
+
+    /**
+     * Returns a sink constructed directly from the given Core API processor
+     * meta-supplier.
+     * <p>
+     * The default local parallelism for this source is specified inside the
+     * {@link ProcessorMetaSupplier#preferredLocalParallelism() metaSupplier}.
+     *
+     * @param sinkName user-friendly sink name
+     * @param metaSupplier the processor meta-supplier
+     * @param partitionKeyFn key extractor function for partitioning edges to sink
+     */
+    @Nonnull
+    public static <T> Sink<T> fromProcessor(
+            @Nonnull String sinkName,
+            @Nonnull ProcessorMetaSupplier metaSupplier,
+            @Nullable FunctionEx<? super T, ?> partitionKeyFn
+    ) {
+        return new SinkImpl<>(sinkName, metaSupplier, partitionKeyFn);
     }
 
     /**
@@ -104,7 +131,7 @@ public final class Sinks {
      */
     @Nonnull
     public static <K, V> Sink<Entry<K, V>> map(@Nonnull String mapName) {
-        return new SinkImpl<>("mapSink(" + mapName + ')', writeMapP(mapName), false, entryKey());
+        return map(mapName, Entry::getKey, Entry::getValue);
     }
 
     /**
@@ -128,6 +155,60 @@ public final class Sinks {
         return map(map.getName());
     }
 
+
+    /**
+     * Returns a sink that uses the supplied functions to extract the key
+     * and value with which to put to a Hazelcast {@code IMap} with the
+     * specified name.
+     * <p>
+     * This sink provides the exactly-once guarantee thanks to <i>idempotent
+     * updates</i>. It means that the value with the same key is not appended,
+     * but overwritten. After the job is restarted from snapshot, duplicate
+     * items will not change the state in the target map.
+     * <p>
+     * The default local parallelism for this sink is 1.
+     *
+     * @since 4.2
+     */
+    @Nonnull
+    public static <T, K, V> Sink<T> map(
+            @Nonnull String mapName,
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends V> toValueFn
+
+    ) {
+        return new SinkImpl<>("mapSink(" + mapName + ')',
+                writeMapP(mapName, toKeyFn, toValueFn), toKeyFn);
+    }
+
+    /**
+     * Returns a sink that uses the supplied functions to extract the key
+     * and value with which to put to given Hazelcast {@code IMap}.
+     * <p>
+     * <strong>NOTE:</strong> Jet only remembers the name of the map you supply
+     * and acquires a map with that name on the local cluster. If you supply a
+     * map instance from another cluster, no error will be thrown to indicate
+     * this.
+     * <p>
+     * This sink provides the exactly-once guarantee thanks to <i>idempotent
+     * updates</i>. It means that the value with the same key is not appended,
+     * but overwritten. After the job is restarted from snapshot, duplicate
+     * items will not change the state in the target map.
+     * <p>
+     * The default local parallelism for this sink is 1.
+     *
+     * @since 4.2
+     */
+    @Nonnull
+    public static <T, K, V> Sink<T> map(
+            @Nonnull IMap<? super K, ? super V> map,
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends V> toValueFn
+
+    ) {
+        return map(map.getName(), toKeyFn, toValueFn);
+    }
+
     /**
      * Returns a sink that puts {@code Map.Entry}s it receives into a Hazelcast
      * {@code IMap} with the specified name in a remote cluster identified by
@@ -142,7 +223,33 @@ public final class Sinks {
      */
     @Nonnull
     public static <K, V> Sink<Entry<K, V>> remoteMap(@Nonnull String mapName, @Nonnull ClientConfig clientConfig) {
-        return fromProcessor("remoteMapSink(" + mapName + ')', writeRemoteMapP(mapName, clientConfig));
+        return remoteMap(mapName, clientConfig, Entry::getKey, Entry::getValue);
+    }
+
+    /**
+     * Returns a sink that uses the supplied functions to extract the key
+     * and value with which to put to a Hazelcast {@code IMap} in a remote
+     * cluster identified by the supplied {@code ClientConfig}.
+     * <p>
+     * This sink provides the exactly-once guarantee thanks to <i>idempotent
+     * updates</i>. It means that the value with the same key is not appended,
+     * but overwritten. After the job is restarted from snapshot, duplicate
+     * items will not change the state in the target map.
+     * <p>
+     * The default local parallelism for this sink is 1.
+     *
+     * @since 4.2
+     */
+    @Nonnull
+    public static <T, K, V> Sink<T> remoteMap(
+            @Nonnull String mapName,
+            @Nonnull ClientConfig clientConfig,
+            @Nonnull FunctionEx<? super T, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super T, ? extends V> toValueFn
+    ) {
+        return fromProcessor("remoteMapSink(" + mapName + ')',
+                writeRemoteMapP(mapName, clientConfig, toKeyFn, toValueFn),
+                toKeyFn);
     }
 
     /**
@@ -195,7 +302,7 @@ public final class Sinks {
             @Nonnull BinaryOperatorEx<V> mergeFn
     ) {
         return new SinkImpl<>("mapWithMergingSink(" + mapName + ')',
-                mergeMapP(mapName, toKeyFn, toValueFn,  mergeFn), false, toKeyFn);
+                mergeMapP(mapName, toKeyFn, toValueFn,  mergeFn), toKeyFn);
     }
 
     /**
@@ -259,7 +366,7 @@ public final class Sinks {
      * but for a map in a remote Hazelcast cluster identified by the supplied
      * {@code ClientConfig}.
      * <p>
-     * Due to the used API, the remote cluster must be at least 3.11.
+     * Due to the used API, the remote cluster must be at least version 4.0.
      */
     @Nonnull
     public static <T, K, V> Sink<T> remoteMapWithMerging(
@@ -270,7 +377,8 @@ public final class Sinks {
             @Nonnull BinaryOperatorEx<V> mergeFn
     ) {
         return fromProcessor("remoteMapWithMergingSink(" + mapName + ')',
-                mergeRemoteMapP(mapName, clientConfig, toKeyFn, toValueFn, mergeFn));
+                mergeRemoteMapP(mapName, clientConfig, toKeyFn, toValueFn, mergeFn),
+                toKeyFn);
     }
 
     /**
@@ -355,7 +463,7 @@ public final class Sinks {
             @Nonnull BiFunctionEx<? super V, ? super T, ? extends V> updateFn
     ) {
         return new SinkImpl<>("mapWithUpdatingSink(" + mapName + ')',
-                updateMapP(mapName, toKeyFn, updateFn), false, toKeyFn);
+                updateMapP(mapName, toKeyFn, updateFn), toKeyFn);
     }
 
     /**
@@ -413,7 +521,7 @@ public final class Sinks {
      * in a remote Hazelcast cluster identified by the supplied {@code
      * ClientConfig}.
      * <p>
-     * Due to the used API, the remote cluster must be at least 3.11.
+     * Due to the used API, the remote cluster must be at least version 4.0.
      */
     @Nonnull
     public static <T, K, V> Sink<T> remoteMapWithUpdating(
@@ -423,7 +531,8 @@ public final class Sinks {
             @Nonnull BiFunctionEx<? super V, ? super T, ? extends V> updateFn
     ) {
         return fromProcessor("remoteMapWithUpdatingSink(" + mapName + ')',
-                updateRemoteMapP(mapName, clientConfig, toKeyFn, updateFn));
+                updateRemoteMapP(mapName, clientConfig, toKeyFn, updateFn),
+                toKeyFn);
     }
 
     /**
@@ -466,6 +575,21 @@ public final class Sinks {
     }
 
     /**
+     * Convenience for {@link #mapWithEntryProcessor(int, String, FunctionEx, FunctionEx)}
+     * when the maximum number of async operations is not specified.
+     */
+    @Nonnull
+    public static <E, K, V, R> Sink<E> mapWithEntryProcessor(
+            @Nonnull String mapName,
+            @Nonnull FunctionEx<? super E, ? extends K> toKeyFn,
+            @Nonnull FunctionEx<? super E, ? extends EntryProcessor<K, V, R>> toEntryProcessorFn
+    ) {
+        return fromProcessor("mapWithEntryProcessorSink(" + mapName + ')',
+                updateMapP(mapName, toKeyFn, toEntryProcessorFn),
+                toKeyFn);
+    }
+
+    /**
      * Returns a sink that uses the items it receives to create {@code
      * EntryProcessor}s it submits to a Hazelcast {@code IMap} with the
      * specified name. For each received item it applies {@code toKeyFn} to
@@ -495,6 +619,8 @@ public final class Sinks {
      * <p>
      * The default local parallelism for this sink is 1.
      *
+     * @param maxParallelAsyncOps  maximum number of simultaneous entry
+     *                             processors affecting the map
      * @param mapName  name of the map
      * @param toKeyFn  function that extracts the key from the input item
      * @param toEntryProcessorFn function that returns the {@code EntryProcessor}
@@ -505,12 +631,14 @@ public final class Sinks {
      */
     @Nonnull
     public static <E, K, V, R> Sink<E> mapWithEntryProcessor(
+            int maxParallelAsyncOps,
             @Nonnull String mapName,
             @Nonnull FunctionEx<? super E, ? extends K> toKeyFn,
             @Nonnull FunctionEx<? super E, ? extends EntryProcessor<K, V, R>> toEntryProcessorFn
     ) {
         return fromProcessor("mapWithEntryProcessorSink(" + mapName + ')',
-                updateMapP(mapName, toKeyFn, toEntryProcessorFn));
+                updateMapP(maxParallelAsyncOps, mapName, toKeyFn, toEntryProcessorFn),
+                toKeyFn);
     }
 
     /**
@@ -577,7 +705,8 @@ public final class Sinks {
             @Nonnull FunctionEx<? super E, ? extends EntryProcessor<K, V, R>> toEntryProcessorFn
     ) {
         return fromProcessor("remoteMapWithEntryProcessorSink(" + mapName + ')',
-                updateRemoteMapP(mapName, clientConfig, toKeyFn, toEntryProcessorFn));
+                updateRemoteMapP(mapName, clientConfig, toKeyFn, toEntryProcessorFn),
+                toKeyFn);
     }
 
     /**
@@ -589,12 +718,12 @@ public final class Sinks {
      * but overwritten. After the job is restarted from snapshot, duplicate
      * items will not change the state in the target map.
      * <p>
-     * The default local parallelism for this sink is 1.
+     * The default local parallelism for this sink is 2.
      */
     @Nonnull
     public static <T extends Entry> Sink<T> cache(@Nonnull String cacheName) {
         //noinspection Convert2MethodRef (provokes a javac 9 bug)
-        return new SinkImpl<>("cacheSink(" + cacheName + ')', writeCacheP(cacheName), false, en -> en.getKey());
+        return new SinkImpl<>("cacheSink(" + cacheName + ')', writeCacheP(cacheName), en -> en.getKey());
     }
 
     /**
@@ -607,7 +736,7 @@ public final class Sinks {
      * but overwritten. After the job is restarted from snapshot, duplicate
      * items will not change the state in the target map.
      * <p>
-     * The default local parallelism for this sink is 1.
+     * The default local parallelism for this sink is 2.
      */
     @Nonnull
     public static <T extends Entry> Sink<T> remoteCache(
@@ -633,8 +762,8 @@ public final class Sinks {
     }
 
     /**
-     * Returns a sink that adds the items it receives to a Hazelcast {@code
-     * IList} with the specified name.
+     * Returns a sink that adds the items it receives to the specified
+     * Hazelcast {@code IList}.
      * <p>
      * <strong>NOTE:</strong> Jet only remembers the name of the list you
      * supply and acquires a list with that name on the local cluster. If you
@@ -666,6 +795,69 @@ public final class Sinks {
     @Nonnull
     public static <T> Sink<T> remoteList(@Nonnull String listName, @Nonnull ClientConfig clientConfig) {
         return fromProcessor("remoteListSink(" + listName + ')', writeRemoteListP(listName, clientConfig));
+    }
+
+    /**
+     * Returns a sink which publishes the items it receives to a distributed
+     * reliable topic with the specified name.
+     * <p>
+     * No state is saved to snapshot for this sink. After the job is restarted,
+     * the items will likely be duplicated, providing an <i>at-least-once</i>
+     * guarantee.
+     * <p>
+     * Local parallelism for this sink is 1.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    public static <T> Sink<T> reliableTopic(@Nonnull String reliableTopicName) {
+        return SinkBuilder.<ITopic<T>>sinkBuilder("reliableTopicSink(" + reliableTopicName + "))",
+                ctx -> ctx.jetInstance().getReliableTopic(reliableTopicName))
+                .<T>receiveFn(ITopic::publish)
+                .build();
+    }
+
+    /**
+     * Returns a sink which publishes the items it receives to the provided
+     * distributed reliable topic. More precisely, it takes the <em>name</em>
+     * of the given {@code ITopic} and then independently retrieves the {@code
+     * ITopic} with the same name from the cluster where the job is running. To
+     * prevent surprising behavior, make sure you have obtained the {@code
+     * ITopic} from the same cluster to which you will submit the pipeline.
+     * <p>
+     * No state is saved to snapshot for this sink. After the job is restarted,
+     * the items will likely be duplicated, providing an <i>at-least-once</i>
+     * guarantee.
+     * <p>
+     * Local parallelism for this sink is 1.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    public static <T> Sink<T> reliableTopic(@Nonnull ITopic<Object> reliableTopic) {
+        return reliableTopic(reliableTopic.getName());
+    }
+
+    /**
+     * Returns a sink which publishes the items it receives to a distributed
+     * reliable topic with the provided name in a remote cluster identified by
+     * the supplied {@code ClientConfig}.
+     * <p>
+     * No state is saved to snapshot for this sink. After the job is restarted,
+     * the items will likely be duplicated, providing an <i>at-least-once</i>
+     * guarantee.
+     * <p>
+     * Local parallelism for this sink is 1.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    public static <T> Sink<T> remoteReliableTopic(@Nonnull String reliableTopicName, @Nonnull ClientConfig clientConfig) {
+        String clientXml = asXmlString(clientConfig); //conversion needed for serializibility
+        return SinkBuilder.<ITopic<T>>sinkBuilder("reliableTopicSink(" + reliableTopicName + "))",
+                ctx -> newHazelcastClient(asClientConfig(clientXml)).getReliableTopic(reliableTopicName))
+                .<T>receiveFn(ITopic::publish)
+                .build();
     }
 
     /**
@@ -716,19 +908,71 @@ public final class Sinks {
 
     /**
      * Returns a builder object that offers a step-by-step fluent API to build
-     * a custom file sink for the Pipeline API. See javadoc of methods in {@link
-     * FileSinkBuilder} for more details.
+     * a custom file sink for the Pipeline API. See javadoc of methods in
+     * {@link FileSinkBuilder} for more details.
      * <p>
-     * The sink writes the items it receives to files. Each
-     * processor will write to its own file whose name is equal to the
-     * processor's global index (an integer unique to each processor of the
-     * vertex), but a single pathname is used to resolve the containing
-     * directory of all files, on all cluster members.
+     * The sink writes the items it receives to files. Each processor will
+     * write to its own files whose names contain the processor's global index
+     * (an integer unique to each processor of the vertex), but a single
+     * directory is used for all files, on all cluster members. That directory
+     * can be a shared in a network - the global processor index is different
+     * on each member and the members won't overwrite each other's files.
+     *
+     * <h3>Fault tolerance</h3>
+     * If the job is running in <i>exactly-once</i> mode, Jet writes the items
+     * to temporary files (ending with a {@value
+     * FileSinkBuilder#TEMP_FILE_SUFFIX} suffix). When Jet commits a snapshot,
+     * it atomically renames the file to remove this suffix. Thanks to the
+     * two-phase commit of the snapshot the sink provides exactly-once
+     * guarantee. Because Jet starts a new file each time it snapshots the
+     * state, the sink will likely produce many more small files, depending on
+     * the snapshot interval.
      * <p>
-     * No state is saved to snapshot for this sink. If the job is restarted and
-     * {@linkplain FileSinkBuilder#append(boolean) appending} is enabled, the
-     * items will likely be duplicated, providing an <i>at-least-once</i>
-     * guarantee.
+     * If you want to avoid the temporary files or the high number of files but
+     * need to have exactly-once for other processors in the job, call {@link
+     * FileSinkBuilder#exactlyOnce(boolean) exactlyOnce(false)} on the returned
+     * builder. This will give you <i>at-least-once</i> guarantee for the
+     * source and unchanged guarantee for other processors.
+     *
+     * <h3>File name structure</h3>
+     * <pre>{@code
+     * [<date>-]<global processor index>[-<sequence>][".tmp"]
+     * }</pre>
+     *
+     * Description (parts in {@code []} are optional):
+     * <ul>
+     *     <li>{@code <date>}: the current date and time, see {@link
+     *          FileSinkBuilder#rollByDate(String)}. Not present if rolling by
+     *          date is not used
+     *
+     *     <li>{@code <global processor index>}: a processor index ensuring
+     *          that each parallel processor writes to its own file
+     *
+     *     <li>{@code <sequence>}: a sequence number starting from 0. Used if
+     *          either:<ul>
+     *              <li>running in <i>exactly-once</i> mode
+     *              <li>{@linkplain FileSinkBuilder#rollByFileSize(long)
+     *                    maximum file size} is set
+     *          </ul>
+     *          The sequence is reset to 0 when the {@code <date>} changes.
+     *
+     *     <li>{@code ".tmp"}: the {@link FileSinkBuilder#TEMP_FILE_SUFFIX},
+     *          used if the file is not yet committed
+     * </ul>
+     *
+     * <h3>Notes</h3>
+     *
+     * The target directory is not deleted before the job start. If file names
+     * clash, they are appended to. This is needed to ensure at-least-once
+     * behavior. In exactly-once mode the file names never clash thanks to the
+     * sequence number in file name: a number higher than the highest sequence
+     * number found in the directory is always chosen.
+     * <p>
+     * For performance, the processor doesn't delete old files from the
+     * directory. If you have frequent snapshots, you should delete the old
+     * files from time to time to avoid having huge number of files in the
+     * directory. Jet lists the files in the directory after a restart to find
+     * out the sequence number to use.
      * <p>
      * The default local parallelism for this sink is 1.
      *
@@ -746,6 +990,16 @@ public final class Sinks {
     @Nonnull
     public static <T> Sink<T> files(@Nonnull String directoryName) {
         return Sinks.<T>filesBuilder(directoryName).build();
+    }
+
+    /**
+     * Convenience for {@link #filesBuilder} with the UTF-8 charset and with
+     * overwriting of existing files. The sink converts each item to a JSON
+     * string adds it to the file as a line.
+     */
+    @Nonnull
+    public static <T> Sink<T> json(@Nonnull String directoryName) {
+        return Sinks.<T>filesBuilder(directoryName).toStringFn(JsonUtil::toJson).build();
     }
 
     /**
@@ -787,41 +1041,68 @@ public final class Sinks {
 
     /**
      * Convenience for {@link #jmsQueueBuilder(SupplierEx)}. Creates a
-     * connection without any authentication parameters and uses non-transacted
-     * sessions with {@code Session.AUTO_ACKNOWLEDGE} mode. If a received item
-     * is not an instance of {@code javax.jms.Message}, the sink wraps {@code
+     * connection without any authentication parameters. If a received item is
+     * not an instance of {@code javax.jms.Message}, the sink wraps {@code
      * item.toString()} into a {@link javax.jms.TextMessage}.
      *
+     * @param queueName the name of the queue
      * @param factorySupplier supplier to obtain JMS connection factory
-     * @param name            the name of the queue
      */
     @Nonnull
     public static <T> Sink<T> jmsQueue(
-            @Nonnull SupplierEx<ConnectionFactory> factorySupplier,
-            @Nonnull String name
+            @Nonnull String queueName,
+            @Nonnull SupplierEx<ConnectionFactory> factorySupplier
     ) {
         return Sinks.<T>jmsQueueBuilder(factorySupplier)
-                .destinationName(name)
+                .destinationName(queueName)
                 .build();
     }
 
     /**
      * Returns a builder object that offers a step-by-step fluent API to build
-     * a custom JMS queue sink for the Pipeline API. See javadoc on {@link
+     * a custom JMS queue sink for the Pipeline API. See javadoc for {@link
      * JmsSinkBuilder} methods for more details.
      * <p>
-     * Behavior on job restart: the processor is stateless. If the job is
-     * restarted, duplicate events can occur. If you need exactly-once behavior,
-     * you must ensure idempotence on the application level.
+     * In <b>exactly-once mode</b> the processor uses two-phase XA transactions
+     * to guarantee exactly-once delivery. The supplier is expected to return
+     * an {@link javax.jms.XAConnectionFactory}. The transaction is committed
+     * after all processors finished processing the items and stored all data
+     * to the snapshot. Processor is also able to finish the commit after a
+     * restart, should the job fail mid-way of the commit process. This mode
+     * significantly increases latency because produced messages are visible
+     * only after they are committed; if you want to avoid it, you can reduce
+     * the guarantee just for this sink. To do so call {@link
+     * JmsSinkBuilder#exactlyOnce(boolean) exactlyOnce(false)} on the returned
+     * builder. If your messages have a unique identifier, some JMS brokers
+     * have deduplication functionality - you can use this to avoid the latency
+     * penalty.
+     * <p>
+     * In <b>at-least-once mode</b> or when the <b>guarantee is off</b>, the
+     * produced records are acknowledged immediately. We use transactions to
+     * produce messages in batches, but those transactions have very short
+     * duration.
      * <p>
      * IO failures should be handled by the JMS provider. If any JMS operation
      * throws an exception, the job will fail. Most of the providers offer a
      * configuration parameter to enable auto-reconnection, refer to provider
      * documentation for details.
      * <p>
-     * Default local parallelism for this processor is 4 (or less if less CPUs
-     * are available).
+     * <b>Test the XA support of your broker</b>
+     * <p>
+     * The JMS is an API, some brokers don't implement the XA transactions
+     * correctly. We run our stress tests with RabbitMQ and ActiveMQ. The most
+     * common flaw is that a prepared transaction is rolled back if the client
+     * disconnects. To check your broker, you can run the code in <a
+     * href="https://github.com/hazelcast/hazelcast-jet-contrib/xa-test">
+     * https://github.com/hazelcast/hazelcast-jet-contrib/xa-test</a>
+     * <p>
+     * <b>Notes</b>
+     * <p>
+     * The default local parallelism for this processor is 1.
      *
+     * @param factorySupplier supplier to obtain JMS connection factory. For
+     *      exactly-once the factory must implement {@link
+     *      javax.jms.XAConnectionFactory}
      * @param <T> type of the items the sink accepts
      */
     @Nonnull
@@ -830,22 +1111,27 @@ public final class Sinks {
     }
 
     /**
-     * Convenience for {@link #jmsTopicBuilder(SupplierEx)}. Creates a
-     * connection without any authentication parameters and uses non-transacted
-     * sessions with {@code Session.AUTO_ACKNOWLEDGE} mode. If a received item
-     * is not an instance of {@code javax.jms.Message}, the sink wraps {@code
-     * item.toString()} into a {@link javax.jms.TextMessage}.
+     * Shortcut for:
+     * <pre>{@code
+     *      jmsTopicBuilder(factorySupplier)
+     *                 .destinationName(topicName)
+     *                 .build();
+     * }</pre>
      *
-     * @param factorySupplier supplier to obtain JMS connection factory
-     * @param name            the name of the queue
+     * See {@link #jmsTopicBuilder(SupplierEx)} for more details.
+     *
+     * @param topicName the name of the queue
+     * @param factorySupplier supplier to obtain JMS connection factory. For
+     *      exactly-once the factory must implement {@link
+     *      javax.jms.XAConnectionFactory}
      */
     @Nonnull
     public static <T> Sink<T> jmsTopic(
-            @Nonnull SupplierEx<ConnectionFactory> factorySupplier,
-            @Nonnull String name
+            @Nonnull String topicName,
+            @Nonnull SupplierEx<ConnectionFactory> factorySupplier
     ) {
         return Sinks.<T>jmsTopicBuilder(factorySupplier)
-                .destinationName(name)
+                .destinationName(topicName)
                 .build();
     }
 
@@ -854,17 +1140,39 @@ public final class Sinks {
      * a custom JMS topic sink for the Pipeline API. See javadoc on {@link
      * JmsSinkBuilder} methods for more details.
      * <p>
-     * Behavior on job restart: the processor is stateless. If the job is
-     * restarted, duplicate events can occur. If you need exactly-once behavior,
-     * you must ensure idempotence on the application level.
+     * In <b>exactly-once mode</b> the processor uses two-phase XA transactions
+     * to guarantee exactly-once delivery. The supplier is expected to return
+     * an {@link javax.jms.XAConnectionFactory}. The transaction is committed
+     * after all processors finished processing the items and stored all data
+     * to the snapshot. Processor is also able to finish the commit after a
+     * restart, should the job fail mid-way of the commit process. This mode
+     * significantly increases latency because produced messages are visible
+     * only after they are committed; if you want to avoid it, you can reduce
+     * the guarantee just for this sink. To do so call {@link
+     * JmsSinkBuilder#exactlyOnce(boolean) exactlyOnce(false)} on the returned
+     * builder.
+     * <p>
+     * In at-least-once mode or when the guarantee is off, the produced records
+     * are acknowledged immediately. We use transactions to produce messages in
+     * batches, but those transactions have very short duration.
      * <p>
      * IO failures should be handled by the JMS provider. If any JMS operation
      * throws an exception, the job will fail. Most of the providers offer a
      * configuration parameter to enable auto-reconnection, refer to provider
      * documentation for details.
      * <p>
-     * Default local parallelism for this processor is 4 (or less if less CPUs
-     * are available).
+     * <b>Test the XA support of your broker</b>
+     * <p>
+     * The JMS is an API, some brokers don't implement the XA transactions
+     * correctly. We run our stress tests with RabbitMQ and ActiveMQ. The most
+     * common flaw is that a prepared transaction is rolled back if the client
+     * disconnects. To check your broker, you can run the code in <a
+     * href="https://github.com/hazelcast/hazelcast-jet-contrib/xa-test">
+     * https://github.com/hazelcast/hazelcast-jet-contrib/xa-test</a>
+     * <p>
+     * <b>Notes</b>
+     * <p>
+     * The default local parallelism for this processor is 1.
      *
      * @param <T> type of the items the sink accepts
      */
@@ -874,68 +1182,174 @@ public final class Sinks {
     }
 
     /**
-     * Returns a sink that connects to the specified database using the given
-     * {@code newConnectionFn}, prepares a statement using the given {@code
-     * updateQuery} and inserts/updates the items.
-     * <p>
-     * The {@code updateQuery} should contain a parametrized query. The {@code
-     * bindFn} will receive a {@code PreparedStatement} created for this query
-     * and should bind parameters to it. It should not execute the query,
-     * call commit or any other method.
-     * <p>
-     * The records will be committed after each batch of records and a batch
-     * mode will be used (if the driver supports it). Auto-commit will be
-     * disabled on the connection.
-     * <p>
-     * Example:<pre>{@code
-     *     p.writeTo(Sinks.jdbc(
-     *             "REPLACE into table (id, name) values(?, ?)",
-     *             () -> return DriverManager.getConnection("jdbc:..."),
-     *             (stmt, item) -> {
-     *                 stmt.setInt(1, item.id);
-     *                 stmt.setInt(2, item.name);
-     *             }
-     *     ));
+     * A shortcut for:
+     * <pre>{@code
+     *     Sinks.<T>jdbcBuilder()
+     *             .updateQuery(updateQuery)
+     *             .dataSourceSupplier(dataSourceSupplier)
+     *             .bindFn(bindFn)
+     *             .build();
      * }</pre>
-     * <p>
-     * In case of an {@link SQLException} the processor will automatically try
-     * to reconnect and the job won't fail, except for the {@link
-     * SQLNonTransientException} subclass. The default local parallelism for
-     * this sink is 1.
-     * <p>
-     * No state is saved to snapshot for this sink. After the job is restarted,
-     * the items will likely be duplicated, providing an <i>at-least-once</i>
-     * guarantee. For this reason you should not use {@code INSERT} statement
-     * which can fail on duplicate primary key. Rather use an
-     * <em>insert-or-update</em> statement that can tolerate duplicate writes.
      *
-     * @param updateQuery the SQL query which will do the insert/update
-     * @param newConnectionFn the supplier of database connection
-     * @param bindFn the function to set the parameters of the statement for
-     *                 each item received
-     * @param <T> type of the items the sink accepts
+     * See {@link #jdbcBuilder()} for more information.
      */
     @Nonnull
     public static <T> Sink<T> jdbc(
             @Nonnull String updateQuery,
-            @Nonnull SupplierEx<Connection> newConnectionFn,
+            @Nonnull SupplierEx<? extends CommonDataSource> dataSourceSupplier,
             @Nonnull BiConsumerEx<PreparedStatement, T> bindFn
     ) {
-        return Sinks.fromProcessor("jdbcSink",
-                SinkProcessors.writeJdbcP(updateQuery, newConnectionFn, bindFn));
+        return Sinks.<T>jdbcBuilder()
+                .updateQuery(updateQuery)
+                .dataSourceSupplier(dataSourceSupplier)
+                .bindFn(bindFn)
+                .build();
     }
 
     /**
-     * Convenience for {@link Sinks#jdbc(String, SupplierEx,
-     * BiConsumerEx)}. The connection will be created from {@code
-     * connectionUrl}.
+     * A shortcut for:
+     * <pre>{@code
+     *     jdbcBuilder(updateQuery, bindFn)
+     *              .jdbcUrl(jdbcUrl)
+     *              .build()
+     * }</pre>
+     *
+     * See {@link #jdbcBuilder()} for more information.
      */
     @Nonnull
     public static <T> Sink<T> jdbc(
             @Nonnull String updateQuery,
-            @Nonnull String connectionUrl,
+            @Nonnull String jdbcUrl,
             @Nonnull BiConsumerEx<PreparedStatement, T> bindFn
     ) {
-        return Sinks.jdbc(updateQuery, () -> DriverManager.getConnection(connectionUrl), bindFn);
+        return Sinks.<T>jdbcBuilder()
+                .updateQuery(updateQuery)
+                .jdbcUrl(jdbcUrl)
+                .bindFn(bindFn)
+                .build();
     }
+
+    /**
+     * Returns a builder to build a sink that connects to a JDBC database,
+     * prepares an SQL statement and executes it for each item. On the returned
+     * builder you must specify a connection (either using a {@linkplain
+     * JdbcSinkBuilder#jdbcUrl(String) JDBC URL} or using a {@linkplain
+     * JdbcSinkBuilder#dataSourceSupplier(SupplierEx) datasource}), the
+     * {@linkplain JdbcSinkBuilder#updateQuery(String) SQL statement} and a
+     * {@linkplain JdbcSinkBuilder#bindFn(BiConsumerEx) bind function}.
+     * <p>
+     * <b>Example</b>
+     *
+     * <pre>{@code
+     * stage.writeTo(Sinks.<Entry<Integer, String>>jdbcBuilder()
+     *     .updateQuery("INSET INTO table (key, value) VALUES(?, ?)")
+     *     .bindFn((stmt, item) -> {
+     *         stmt.setInt(1, item.getKey());
+     *         stmt.setString(2, item.getValue());
+     *     })
+     *     .jdbcUrl("jdbc:...")
+     *     .build());
+     * }</pre>
+     * <p>
+     * <b>Commit behavior</b>
+     * <p>
+     * The commit behavior depends on the job guarantee:<ul>
+     *     <li><b>Exactly-once:</b> XA transactions will be used to commit the
+     *     work in phase two of the snapshot, that is after all other vertices
+     *     in the job have performed the snapshot. Very small state will be
+     *     saved to snapshot.
+     *
+     *     <li><b>At-least-once or no guarantee:</b> Records will be committed
+     *     in batches. A batch is created from records that are readily available
+     *     at the sink.
+     * </ul>
+     * <p>
+     * If the job is in exactly-once mode, the overhead in the database and the
+     * output latency are higher. This is caused by the fact that Jet will not
+     * commit the transaction until the next snapshot occurs and the number of
+     * uncommitted records in the transactions can be very high. Latency is
+     * high because the changes are visible only after the transactions are
+     * committed. Configure the snapshot interval accordingly.
+     * <p>
+     * If your driver doesn't support XA transactions or if you want to avoid
+     * the performance or latency penalty, you can decrease the guarantee just
+     * for this sink by calling {@link JdbcSinkBuilder#exactlyOnce(boolean)
+     * exactlyOnce(false)} on the returned builder.
+     * <p>
+     * <b>Notes</b>
+     * <p>
+     * In non-XA mode, in case of an {@link SQLException} the processor will
+     * transparently reconnect and the job won't fail, except for an {@link
+     * SQLNonTransientException} subclass. In XA mode the job will fail
+     * immediately.
+     * <p>
+     * <b>Test the XA support of your database</b>
+     * <p>
+     *  The JDBC is an API, some brokers don't implement the XA transactions
+     *  correctly. We run our stress tests with PostgreSQL. The most common
+     *  flaw is that a prepared transaction is rolled back if the client
+     *  disconnects. To check your database, you can run the code in <a
+     *  href="https://github.com/hazelcast/hazelcast-jet-contrib/xa-test">
+     *  https://github.com/hazelcast/hazelcast-jet-contrib/xa-test</a>
+     * <p>
+     * <b>Notes</b>
+     * <p>
+     * The default local parallelism for this sink is 1.
+     *
+     * @param <T> type of the items the sink accepts
+     * @since 4.1
+     */
+    @Nonnull
+    public static <T> JdbcSinkBuilder<T> jdbcBuilder() {
+        return new JdbcSinkBuilder<>();
+    }
+
+    /**
+     * Returns a sink that publishes to the {@link Observable} with the
+     * provided name. The records that are sent to the observable can be
+     * read through first getting a handle to it through
+     * {@link JetInstance#getObservable(String)} and then subscribing to
+     * the events using the methods on {@link Observable}.
+     * <p>
+     * The {@code Observable} should be destroyed after using it. For the full
+     * description see {@link Observable the javadoc for Observable}.
+     * Example:<pre>{@code
+     *   Observable<Integer> observable = jet.newObservable();
+     *   CompletableFuture<List<Integer>> list = observable.toFuture(o -> o.collect(toList()));
+     *
+     *   pipeline.readFrom(TestSources.items(1, 2, 3, 4))
+     *           .writeTo(Sinks.observable(observable));
+     *
+     *   Job job = jet.newJob(pipeline);
+     *
+     *   System.out.println(list.get());
+     *   observable.destroy();
+     * }</pre>
+     * This sink is cooperative and uses a local parallelism of 1.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    public static <T> Sink<T> observable(String name) {
+        return Sinks.fromProcessor(String.format("observableSink(%s)", name),
+                SinkProcessors.writeObservableP(name));
+    }
+
+    /**
+     * Returns a sink that publishes to the provided {@link Observable}. More
+     * precisely, it takes the <em>name</em> of the given {@code Observable}
+     * and then independently retrieves an {@code Observable} with the same
+     * name from the cluster where the job is running. To prevent surprising
+     * behavior, make sure you have obtained the {@code Observable} from the
+     * same cluster to which you will submit the pipeline.
+     * <p>
+     * For more details refer to {@link #observable(String) observable(name)}.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    public static <T> Sink<T> observable(Observable<? super T> observable) {
+        return observable(observable.name());
+    }
+
 }

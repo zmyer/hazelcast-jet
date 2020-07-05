@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 package com.hazelcast.jet.pipeline.test;
 
 import com.hazelcast.jet.impl.util.Util;
-import com.hazelcast.spi.annotation.Beta;
 
 import java.io.Serializable;
 import java.util.Objects;
@@ -27,7 +26,6 @@ import java.util.Objects;
  *
  * @since 3.2
  */
-@Beta
 public class SimpleEvent implements Serializable {
 
     private final long timestamp;
@@ -57,7 +55,7 @@ public class SimpleEvent implements Serializable {
 
     @Override
     public String toString() {
-        return "(" +
+        return "SimpleEvent(" +
             "timestamp=" + Util.toLocalTime(timestamp) +
             ", sequence=" + sequence +
             ')';

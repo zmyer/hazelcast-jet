@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,54 +17,58 @@
 package com.hazelcast.jet.impl.connector;
 
 import com.hazelcast.collection.IList;
-import com.hazelcast.jet.JetInstance;
+import com.hazelcast.jet.SimpleTestInClusterSupport;
 import com.hazelcast.jet.Util;
-import com.hazelcast.jet.core.DAG;
-import com.hazelcast.jet.core.JetTestSupport;
-import com.hazelcast.jet.core.Vertex;
-import com.hazelcast.test.HazelcastParallelClassRunner;
+import com.hazelcast.jet.pipeline.BatchSource;
+import com.hazelcast.jet.pipeline.Pipeline;
+import com.hazelcast.jet.pipeline.Sinks;
+import com.hazelcast.jet.pipeline.Sources;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
-import org.junit.runner.RunWith;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.stream.IntStream;
 
 import static com.hazelcast.jet.Util.entry;
-import static com.hazelcast.jet.core.Edge.between;
-import static com.hazelcast.jet.core.processor.SinkProcessors.writeListP;
-import static com.hazelcast.jet.core.processor.SourceProcessors.readFilesP;
-import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
-@RunWith(HazelcastParallelClassRunner.class)
-public class ReadFilesPTest extends JetTestSupport {
+public class ReadFilesPTest extends SimpleTestInClusterSupport {
 
-    private JetInstance instance;
     private File directory;
     private IList<Entry<String, String>> list;
+    private IList<Object> listJson;
+
+    @BeforeClass
+    public static void beforeClass() {
+        initialize(1, null);
+    }
 
     @Before
     public void setup() throws Exception {
-        instance = createJetMember();
         directory = createTempDirectory();
-        list = instance.getList("writer");
+        list = instance().getList("writer");
+        listJson = instance().getList("writerJson");
     }
 
     @Test
     public void test_smallFiles() throws Exception {
-        DAG dag = buildDag(null);
+        Pipeline p = pipeline(null);
 
         File file1 = new File(directory, randomName());
         appendToFile(file1, "hello", "world");
         File file2 = new File(directory, randomName());
         appendToFile(file2, "hello2", "world2");
 
-        instance.newJob(dag).join();
+        instance().newJob(p).join();
 
         assertEquals(4, list.size());
 
@@ -73,27 +77,29 @@ public class ReadFilesPTest extends JetTestSupport {
 
     @Test
     public void test_largeFile() throws Exception {
-        DAG dag = buildDag(null);
+        Pipeline p = pipeline(null);
 
         File file1 = new File(directory, randomName());
         final int listLength = 10000;
         appendToFile(file1, IntStream.range(0, listLength).mapToObj(String::valueOf).toArray(String[]::new));
 
-        instance.newJob(dag).join();
+        instance().newJob(p).join();
 
         assertEquals(listLength, list.size());
+
+        finishDirectory(file1);
     }
 
     @Test
     public void when_glob_the_useGlob() throws Exception {
-        DAG dag = buildDag("file2.*");
+        Pipeline p = pipeline("file2.*");
 
         File file1 = new File(directory, "file1.txt");
         appendToFile(file1, "hello", "world");
         File file2 = new File(directory, "file2.txt");
         appendToFile(file2, "hello2", "world2");
 
-        instance.newJob(dag).join();
+        instance().newJob(p).join();
 
         assertEquals(Arrays.asList(entry("file2.txt", "hello2"), entry("file2.txt", "world2")), new ArrayList<>(list));
 
@@ -102,35 +108,145 @@ public class ReadFilesPTest extends JetTestSupport {
 
     @Test
     public void when_directory_then_ignore() {
-        DAG dag = buildDag(null);
+        Pipeline p = pipeline(null);
 
         File file1 = new File(directory, randomName());
         assertTrue(file1.mkdir());
 
-        instance.newJob(dag).join();
+        instance().newJob(p).join();
 
         assertEquals(0, list.size());
 
         finishDirectory(file1);
     }
 
-    private DAG buildDag(String glob) {
-        if (glob == null) {
-            glob = "*";
-        }
-
-        DAG dag = new DAG();
-        Vertex reader = dag.newVertex("reader", readFilesP(directory.getPath(), UTF_8, glob, false, Util::entry))
-                .localParallelism(1);
-        Vertex writer = dag.newVertex("writer", writeListP(list.getName())).localParallelism(1);
-        dag.edge(between(reader, writer));
-        return dag;
+    @Test
+    public void testJsonFilesOneLineItems_when_asObject_thenObjects() throws IOException {
+        testJsonFiles_when_asObject_thenObjects(false);
     }
 
-    private void finishDirectory(File ... files) {
+    @Test
+    public void testJsonFilesMultilineItems_when_asObject_thenObjects() throws IOException {
+        testJsonFiles_when_asObject_thenObjects(true);
+    }
+
+    @Test
+    public void testJsonFilesOneLineItems_when_asMap_thenMaps() throws IOException {
+        testJsonFiles_when_asMap_thenMaps(false);
+    }
+
+    @Test
+    public void testJsonFilesMultilineItems_when_asMap_thenMaps() throws IOException {
+        testJsonFiles_when_asMap_thenMaps(true);
+    }
+
+    private void testJsonFiles_when_asObject_thenObjects(boolean prettyPrinted) throws IOException {
+        File[] jsonFiles = createJsonFiles(prettyPrinted);
+
+        Pipeline p = pipelineJson(false);
+        instance().newJob(p).join();
+
+        assertEquals(4, listJson.size());
+        TestPerson testPerson = (TestPerson) listJson.get(0);
+        assertTrue(testPerson.name.startsWith("hello"));
+
+        finishDirectory(jsonFiles);
+    }
+
+    private void testJsonFiles_when_asMap_thenMaps(boolean prettyPrinted) throws IOException {
+        File[] jsonFiles = createJsonFiles(prettyPrinted);
+
+        Pipeline p = pipelineJson(true);
+        instance().newJob(p).join();
+
+        assertEquals(4, listJson.size());
+        Map<String, Object> testPersonMap = (Map) listJson.get(0);
+        assertTrue(testPersonMap.get("name").toString().startsWith("hello"));
+
+        finishDirectory(jsonFiles);
+    }
+
+    private File[] createJsonFiles(boolean prettyPrinted) throws IOException {
+        File file1 = new File(directory, randomName() + ".json");
+        String jsonItem1 = prettyPrinted
+                ? "{\n"
+                + "    \"name\": \"hello world\",\n"
+                + "    \"age\": 5,\n"
+                + "    \"status\": true\n"
+                + "}"
+                : "{\"name\": \"hello world\", \"age\": 5, \"status\": true}";
+        String jsonItem2 = prettyPrinted
+                ? "{\n"
+                + "    \"name\": \"hello jupiter\",\n"
+                + "    \"age\": 8,\n"
+                + "    \"status\": false\n"
+                + "}"
+                : "{\"name\": \"hello jupiter\", \"age\": 8, \"status\": false}";
+        appendToFile(file1, jsonItem1, jsonItem1);
+        File file2 = new File(directory, randomName() + ".json");
+        appendToFile(file2, jsonItem2, jsonItem2);
+        return new File[]{file1, file2};
+    }
+
+    private Pipeline pipeline(String glob) {
+        Pipeline p = Pipeline.create();
+        p.readFrom(Sources.filesBuilder(directory.getPath())
+                          .glob(glob == null ? "*" : glob)
+                          .build(Util::entry))
+         .writeTo(Sinks.list(list));
+
+        return p;
+    }
+
+    private Pipeline pipelineJson(boolean asMap) {
+        Pipeline p = Pipeline.create();
+        BatchSource<?> source  = asMap ? Sources.json(directory.getPath()) :
+                Sources.json(directory.getPath(), TestPerson.class);
+        p.readFrom(source)
+         .writeTo(Sinks.list(listJson));
+
+        return p;
+    }
+
+    private void finishDirectory(File... files) {
         for (File file : files) {
             assertTrue(file.delete());
         }
         assertTrue(directory.delete());
+    }
+
+    public static class TestPerson implements Serializable {
+
+        public String name;
+        public int age;
+        public boolean status;
+
+        public TestPerson() {
+        }
+
+        public TestPerson(String name, int age, boolean status) {
+            this.name = name;
+            this.age = age;
+            this.status = status;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            TestPerson that = (TestPerson) o;
+            return age == that.age &&
+                    status == that.status &&
+                    Objects.equals(name, that.name);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, age, status);
+        }
     }
 }

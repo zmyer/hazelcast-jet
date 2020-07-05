@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,31 +21,25 @@ import com.hazelcast.client.impl.clientside.HazelcastClientInstanceImpl;
 import com.hazelcast.client.impl.protocol.ClientMessage;
 import com.hazelcast.client.impl.protocol.codec.ClientGetDistributedObjectsCodec;
 import com.hazelcast.client.impl.spi.impl.ClientInvocation;
-import com.hazelcast.cluster.Address;
-import com.hazelcast.cluster.Cluster;
-import com.hazelcast.config.Config;
-import com.hazelcast.config.InMemoryXmlConfig;
 import com.hazelcast.internal.serialization.SerializationService;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.impl.client.protocol.codec.JetExistsDistributedObjectCodec;
-import com.hazelcast.jet.impl.client.protocol.codec.JetGetClusterMetadataCodec;
-import com.hazelcast.jet.impl.client.protocol.codec.JetGetClusterMetadataCodec.ResponseParameters;
 import com.hazelcast.jet.impl.client.protocol.codec.JetGetJobIdsByNameCodec;
 import com.hazelcast.jet.impl.client.protocol.codec.JetGetJobIdsCodec;
 import com.hazelcast.jet.impl.client.protocol.codec.JetGetJobSummaryListCodec;
-import com.hazelcast.jet.impl.client.protocol.codec.JetGetMemberXmlConfigurationCodec;
 import com.hazelcast.jet.impl.util.ExceptionUtil;
 import com.hazelcast.logging.ILogger;
 
 import javax.annotation.Nonnull;
 import java.util.List;
+import java.util.UUID;
 import java.util.function.Function;
 
 import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
-import static java.util.stream.Collectors.toList;
+import static com.hazelcast.jet.impl.util.Util.toList;
 
 /**
  * Client-side {@code JetInstance} implementation
@@ -72,17 +66,10 @@ public class JetClientInstanceImpl extends AbstractJetInstance {
     @Nonnull
     @Override
     public List<Job> getJobs() {
-        ClientInvocation invocation = new ClientInvocation(
-                client, JetGetJobIdsCodec.encodeRequest(), null, masterAddress(client.getCluster())
-        );
-
-        try {
-            ClientMessage response = invocation.invoke().get();
-            List<Long> jobs = JetGetJobIdsCodec.decodeResponse(response).response;
-            return jobs.stream().map(jobId -> new ClientJobProxy(this, jobId)).collect(toList());
-        } catch (Throwable t) {
-            throw rethrow(t);
-        }
+        return invokeRequestOnMasterAndDecodeResponse(JetGetJobIdsCodec.encodeRequest(), resp -> {
+            List<Long> jobs = JetGetJobIdsCodec.decodeResponse(resp).response;
+            return toList(jobs, jobId -> new ClientJobProxy(this, jobId));
+        });
     }
 
     /**
@@ -92,33 +79,6 @@ public class JetClientInstanceImpl extends AbstractJetInstance {
     public List<JobSummary> getJobSummaryList() {
         return invokeRequestOnMasterAndDecodeResponse(JetGetJobSummaryListCodec.encodeRequest(),
                 response -> JetGetJobSummaryListCodec.decodeResponse(response).response);
-    }
-
-    /**
-     * Returns summary of cluster details.
-     */
-    @Nonnull
-    public ClusterMetadata getClusterMetadata() {
-        return invokeRequestOnMasterAndDecodeResponse(JetGetClusterMetadataCodec.encodeRequest(),
-                response -> {
-                    ResponseParameters parameters = JetGetClusterMetadataCodec.decodeResponse(response);
-                    ClusterMetadata metadata = new ClusterMetadata();
-                    metadata.setClusterTime(parameters.clusterTime);
-                    metadata.setName(parameters.name);
-                    metadata.setState(parameters.state);
-                    metadata.setVersion(parameters.version);
-                    return metadata;
-                });
-    }
-
-    /**
-     * Returns the member configuration.
-     */
-    @Nonnull
-    public Config getHazelcastConfig() {
-        String configString = invokeRequestOnMasterAndDecodeResponse(JetGetMemberXmlConfigurationCodec.encodeRequest(),
-                response -> JetGetMemberXmlConfigurationCodec.decodeResponse(response).response);
-        return new InMemoryXmlConfig(configString);
     }
 
     @Nonnull
@@ -164,7 +124,8 @@ public class JetClientInstanceImpl extends AbstractJetInstance {
 
     private <S> S invokeRequestOnMasterAndDecodeResponse(ClientMessage request,
                                                          Function<ClientMessage, Object> decoder) {
-        return invokeRequestAndDecodeResponse(masterAddress(client.getCluster()), request, decoder);
+        UUID masterUuid = client.getClientClusterService().getMasterMember().getUuid();
+        return invokeRequestAndDecodeResponse(masterUuid, request, decoder);
     }
 
     private <S> S invokeRequestOnAnyMemberAndDecodeResponse(ClientMessage request,
@@ -172,9 +133,9 @@ public class JetClientInstanceImpl extends AbstractJetInstance {
         return invokeRequestAndDecodeResponse(null, request, decoder);
     }
 
-    private <S> S invokeRequestAndDecodeResponse(Address address, ClientMessage request,
+    private <S> S invokeRequestAndDecodeResponse(UUID uuid, ClientMessage request,
                                                  Function<ClientMessage, Object> decoder) {
-        ClientInvocation invocation = new ClientInvocation(client, request, null, address);
+        ClientInvocation invocation = new ClientInvocation(client, request, null, uuid);
         try {
             ClientMessage response = invocation.invoke().get();
             return serializationService.toObject(decoder.apply(response));
@@ -183,9 +144,4 @@ public class JetClientInstanceImpl extends AbstractJetInstance {
         }
     }
 
-    private static Address masterAddress(Cluster cluster) {
-        return cluster.getMembers().stream().findFirst()
-                      .orElseThrow(() -> new IllegalStateException("No members found in cluster"))
-                      .getAddress();
-    }
 }

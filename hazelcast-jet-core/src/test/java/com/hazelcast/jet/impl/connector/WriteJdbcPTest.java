@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,157 +18,210 @@ package com.hazelcast.jet.impl.connector;
 
 import com.hazelcast.function.BiConsumerEx;
 import com.hazelcast.function.SupplierEx;
-import com.hazelcast.jet.pipeline.PipelineTestSupport;
+import com.hazelcast.jet.SimpleTestInClusterSupport;
+import com.hazelcast.jet.pipeline.Pipeline;
+import com.hazelcast.jet.pipeline.Sink;
 import com.hazelcast.jet.pipeline.Sinks;
-import org.h2.tools.DeleteDbFiles;
+import com.hazelcast.jet.pipeline.test.TestSources;
 import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Rule;
+import org.junit.ClassRule;
 import org.junit.Test;
-import org.junit.rules.TestName;
+import org.postgresql.ds.PGSimpleDataSource;
+import org.postgresql.ds.common.BaseDataSource;
+import org.postgresql.xa.PGXADataSource;
+import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.io.Serializable;
+import javax.sql.CommonDataSource;
+import javax.sql.DataSource;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLNonTransientException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map.Entry;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
+import static com.hazelcast.jet.Util.entry;
 import static org.junit.Assert.assertEquals;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 
-public class WriteJdbcPTest extends PipelineTestSupport {
+public class WriteJdbcPTest extends SimpleTestInClusterSupport {
 
-    private static final String DIR = "~";
-    private static final String DB = WriteJdbcPTest.class.getSimpleName();
-    private static final String DB_CONNECTION_URL = "jdbc:h2:" + DIR + "/" + DB;
+    @ClassRule
+    @SuppressWarnings("rawtypes")
+    public static PostgreSQLContainer container = new PostgreSQLContainer<>("postgres:12.1")
+            .withCommand("postgres -c max_prepared_transactions=10");
+
     private static final int PERSON_COUNT = 10;
 
-    @Rule public TestName testName = new TestName();
-
+    private static AtomicInteger tableCounter = new AtomicInteger();
     private String tableName;
 
     @BeforeClass
     public static void setupClass() {
-        DeleteDbFiles.execute(DIR, DB, true);
+        initialize(2, null);
     }
 
     @Before
     public void setup() throws SQLException {
-        tableName = testName.getMethodName().replaceAll("\\[.*?\\]", "") + "_" + testMode.toString();
-        createTable();
+        tableName = "T" + tableCounter.incrementAndGet();
+        logger.info("Will use table: " + tableName);
+        try (Connection connection = ((DataSource) createDataSource(false)).getConnection()) {
+            connection.createStatement()
+                      .execute("CREATE TABLE " + tableName + "(id int, name varchar(255))");
+        }
     }
 
     @Test
     public void test() throws SQLException {
-        addToSrcList(sequence(PERSON_COUNT));
-        p.readFrom(source)
-         .map(item -> new Person((Integer) item, item.toString()))
-         .writeTo(Sinks.jdbc("INSERT INTO " + tableName + "(id, name) VALUES(?, ?)", DB_CONNECTION_URL,
+        Pipeline p = Pipeline.create();
+        p.readFrom(TestSources.items(IntStream.range(0, PERSON_COUNT).boxed().toArray(Integer[]::new)))
+         .map(item -> entry(item, item.toString()))
+         .writeTo(Sinks.jdbc("INSERT INTO " + tableName + " VALUES(?, ?)",
+                 () -> createDataSource(false),
                  (stmt, item) -> {
-                     stmt.setInt(1, item.id);
-                     stmt.setString(2, item.name);
+                     stmt.setInt(1, item.getKey());
+                     stmt.setString(2, item.getValue());
                  }
          ));
 
-        execute();
-
+        instance().newJob(p).join();
         assertEquals(PERSON_COUNT, rowCount());
     }
 
     @Test
     public void testReconnect() throws SQLException {
-        addToSrcList(sequence(PERSON_COUNT));
-        p.readFrom(source)
-         .map(item -> new Person((Integer) item, item.toString()))
-         .writeTo(Sinks.jdbc("INSERT INTO " + tableName + "(id, name) VALUES(?, ?)",
-                 failOnceConnectionSupplier(), failOnceBindFn()
+        Pipeline p = Pipeline.create();
+        p.readFrom(TestSources.items(IntStream.range(0, PERSON_COUNT).boxed().toArray(Integer[]::new)))
+         .map(item -> entry(item, item.toString()))
+         .writeTo(Sinks.jdbc("INSERT INTO " + tableName + " VALUES(?, ?)",
+                 failTwiceDataSourceSupplier(), failOnceBindFn()
          ));
 
-        execute();
-
+        instance().newJob(p).join();
         assertEquals(PERSON_COUNT, rowCount());
     }
 
     @Test(expected = CompletionException.class)
     public void testFailJob_withNonTransientException() {
-        addToSrcList(sequence(PERSON_COUNT));
-        p.readFrom(source)
-         .map(item -> new Person((Integer) item, item.toString()))
-         .writeTo(Sinks.jdbc("INSERT INTO " + tableName + "(id, name) VALUES(?, ?)", DB_CONNECTION_URL,
+        Pipeline p = Pipeline.create();
+        p.readFrom(TestSources.items(IntStream.range(0, PERSON_COUNT).boxed().toArray(Integer[]::new)))
+         .map(item -> entry(item, item.toString()))
+         .writeTo(Sinks.jdbc("INSERT INTO " + tableName + " VALUES(?, ?)",
+                 () -> createDataSource(false),
                  (stmt, item) -> {
                      throw new SQLNonTransientException();
                  }
          ));
 
-        execute();
+        instance().newJob(p).join();
     }
 
-    private void createTable() throws SQLException {
-        try (Connection connection = DriverManager.getConnection(DB_CONNECTION_URL);
-             Statement statement = connection.createStatement()) {
-            statement.execute("CREATE TABLE " + tableName + "(id int primary key, name varchar(255))");
+    @Test
+    public void test_transactional_withRestarts_graceful_exOnce() throws Exception {
+        test_transactional_withRestarts(true, true);
+    }
+
+    @Test
+    public void test_transactional_withRestarts_forceful_exOnce() throws Exception {
+        test_transactional_withRestarts(false, true);
+    }
+
+    @Test
+    public void test_transactional_withRestarts_graceful_atLeastOnce() throws Exception {
+        test_transactional_withRestarts(true, false);
+    }
+
+    @Test
+    public void test_transactional_withRestarts_forceful_atLeastOnce() throws Exception {
+        test_transactional_withRestarts(false, false);
+    }
+
+    private void test_transactional_withRestarts(boolean graceful, boolean exactlyOnce) throws Exception {
+        Sink<Integer> sink = Sinks.<Integer>jdbcBuilder()
+                                  .updateQuery("INSERT INTO " + tableName + " VALUES(?, ?)")
+                                  .dataSourceSupplier(() -> createDataSource(true))
+                                  .bindFn(
+                                          (stmt, item) -> {
+                                              stmt.setInt(1, item);
+                                              stmt.setString(2, "name-" + item);
+                                          })
+                                  .exactlyOnce(exactlyOnce)
+                                  .build();
+
+        try (Connection conn = ((DataSource) createDataSource(false)).getConnection();
+             PreparedStatement stmt = conn.prepareStatement("select id from " + tableName)
+        ) {
+            SinkStressTestUtil.test_withRestarts(instance(), logger, sink, graceful, exactlyOnce, () -> {
+                ResultSet resultSet = stmt.executeQuery();
+                List<Integer> actualRows = new ArrayList<>();
+                while (resultSet.next()) {
+                    actualRows.add(resultSet.getInt(1));
+                }
+                return actualRows;
+            });
         }
     }
 
     private int rowCount() throws SQLException {
-        try (Connection connection = DriverManager.getConnection(DB_CONNECTION_URL);
+        try (Connection connection = ((DataSource) createDataSource(false)).getConnection();
              Statement statement = connection.createStatement()) {
-            ResultSet resultSet = statement.executeQuery("SELECT COUNT(id) FROM " + tableName);
-            resultSet.next();
+            ResultSet resultSet = statement.executeQuery("SELECT COUNT(*) FROM " + tableName);
+            if (!resultSet.next()) {
+                return 0;
+            }
             return resultSet.getInt(1);
         }
     }
 
-    private static SupplierEx<Connection> failOnceConnectionSupplier() {
-        return new SupplierEx<Connection>() {
-            boolean exceptionThrown;
+    private static CommonDataSource createDataSource(boolean xa) {
+        BaseDataSource dataSource = xa ? new PGXADataSource() : new PGSimpleDataSource();
+        dataSource.setUrl(container.getJdbcUrl());
+        dataSource.setUser(container.getUsername());
+        dataSource.setPassword(container.getPassword());
+        dataSource.setDatabaseName(container.getDatabaseName());
+
+        return dataSource;
+    }
+
+    private static SupplierEx<DataSource> failTwiceDataSourceSupplier() {
+        return new SupplierEx<DataSource>() {
+            int remainingFailures = 2;
 
             @Override
-            public Connection getEx() throws SQLException {
-                if (!exceptionThrown) {
-                    exceptionThrown = true;
-                    throw new SQLException();
-                }
-                return DriverManager.getConnection(DB_CONNECTION_URL);
+            public DataSource getEx() throws SQLException {
+                DataSource realDs = (DataSource) createDataSource(false);
+                DataSource mockDs = mock(DataSource.class);
+                doAnswer(invocation -> {
+                    if (remainingFailures-- > 0) {
+                        throw new SQLException("connection failure");
+                    }
+                    return realDs.getConnection();
+                }).when(mockDs).getConnection();
+                return mockDs;
             }
         };
     }
 
-    private static BiConsumerEx<PreparedStatement, Person> failOnceBindFn() {
-        return new BiConsumerEx<PreparedStatement, Person>() {
-            boolean exceptionThrown;
+    private static BiConsumerEx<PreparedStatement, Entry<Integer, String>> failOnceBindFn() {
+        return new BiConsumerEx<PreparedStatement, Entry<Integer, String>>() {
+            int remainingFailures = 1;
 
             @Override
-            public void acceptEx(PreparedStatement stmt, Person item) throws SQLException {
-                if (!exceptionThrown) {
-                    exceptionThrown = true;
-                    throw new SQLException();
+            public void acceptEx(PreparedStatement stmt, Entry<Integer, String> item) throws SQLException {
+                if (remainingFailures-- > 0) {
+                    throw new SQLException("bindFn failure");
                 }
-                stmt.setInt(1, item.id);
-                stmt.setString(2, item.name);
+                stmt.setInt(1, item.getKey());
+                stmt.setString(2, item.getValue());
             }
         };
-    }
-
-    private static final class Person implements Serializable {
-
-        private final int id;
-        private final String name;
-
-        private Person(int id, String name) {
-            this.id = id;
-            this.name = name;
-        }
-
-        @Override
-        public String toString() {
-            return "Person{" +
-                    "id=" + id +
-                    ", name='" + name + '\'' +
-                    '}';
-        }
     }
 }

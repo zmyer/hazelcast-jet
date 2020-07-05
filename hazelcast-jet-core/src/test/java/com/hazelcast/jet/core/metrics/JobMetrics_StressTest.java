@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,10 +21,10 @@ import com.hazelcast.internal.metrics.Probe;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
+import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.JetTestSupport;
 import com.hazelcast.jet.core.JobStatus;
-import com.hazelcast.jet.core.Outbox;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
@@ -109,16 +109,16 @@ public class JobMetrics_StressTest extends JetTestSupport {
         return dag;
     }
 
-    private static final class IncrementingProcessor implements Processor {
+    private static final class IncrementingProcessor extends AbstractProcessor {
 
-        @Probe
+        @Probe(name = "initCount")
         static final AtomicInteger initCount = new AtomicInteger();
 
-        @Probe
+        @Probe(name = "completeCount")
         static final AtomicInteger completeCount = new AtomicInteger();
 
         @Override
-        public void init(@Nonnull Outbox outbox, @Nonnull Context context) {
+        protected void init(@Nonnull Context context) throws Exception {
             initCount.incrementAndGet();
         }
 

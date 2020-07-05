@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ package com.hazelcast.jet.impl.deployment;
 
 import com.hazelcast.internal.nio.IOUtil;
 import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.impl.JobRepository;
+import com.hazelcast.jet.impl.util.Util;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.map.IMap;
 import com.hazelcast.spi.impl.NodeEngine;
@@ -36,6 +38,8 @@ import java.util.function.Supplier;
 import java.util.zip.InflaterInputStream;
 
 import static com.hazelcast.jet.Util.idToString;
+import static com.hazelcast.jet.impl.JobRepository.classKeyName;
+import static com.hazelcast.jet.impl.util.ReflectionUtils.toClassResourceId;
 import static com.hazelcast.jet.impl.util.Util.uncheckCall;
 
 public class JetClassLoader extends ClassLoader {
@@ -50,16 +54,19 @@ public class JetClassLoader extends ClassLoader {
 
     private volatile boolean isShutdown;
 
-    public JetClassLoader(@Nonnull NodeEngine nodeEngine,
-                          @Nullable ClassLoader parent, @Nullable String jobName,
-                          long jobId, @Nonnull Supplier<IMap<String, byte[]>> resourcesSupplier
+    public JetClassLoader(
+            @Nonnull NodeEngine nodeEngine,
+            @Nullable ClassLoader parent,
+            @Nullable String jobName,
+            long jobId,
+            @Nonnull JobRepository jobRepository
     ) {
         super(parent == null ? JetClassLoader.class.getClassLoader() : parent);
         this.jobName = jobName;
         this.jobId = jobId;
-        this.resourcesSupplier = resourcesSupplier;
+        this.resourcesSupplier = Util.memoizeConcurrent(() -> jobRepository.getJobResources(jobId));
         this.logger = nodeEngine.getLogger(getClass());
-        jobResourceURLStreamHandler = new JobResourceURLStreamHandler();
+        this.jobResourceURLStreamHandler = new JobResourceURLStreamHandler();
     }
 
     @Override
@@ -67,7 +74,7 @@ public class JetClassLoader extends ClassLoader {
         if (isEmpty(name)) {
             return null;
         }
-        InputStream classBytesStream = resourceStream(name.replace('.', '/') + ".class");
+        InputStream classBytesStream = resourceStream(toClassResourceId(name));
         if (classBytesStream == null) {
             throw new ClassNotFoundException(name + ". Add it using " + JobConfig.class.getSimpleName()
                     + " or start all members with it on classpath");
@@ -78,19 +85,15 @@ public class JetClassLoader extends ClassLoader {
 
     @Override
     protected URL findResource(String name) {
-        if (!checkShutdown(name)) {
-            if (isEmpty(name) || !resourcesSupplier.get().containsKey(name)) {
-                return null;
-            }
-
-            try {
-                return new URL(JOB_URL_PROTOCOL, null, -1, name, jobResourceURLStreamHandler);
-            } catch (MalformedURLException e) {
-                // this should never happen with custom URLStreamHandler
-                throw new RuntimeException(e);
-            }
+        if (checkShutdown(name) || isEmpty(name) || !resourcesSupplier.get().containsKey(classKeyName(name))) {
+            return null;
         }
-        return null;
+        try {
+            return new URL(JOB_URL_PROTOCOL, null, -1, name, jobResourceURLStreamHandler);
+        } catch (MalformedURLException e) {
+            // this should never happen with custom URLStreamHandler
+            throw new RuntimeException(e);
+        }
     }
 
     @Override
@@ -106,32 +109,31 @@ public class JetClassLoader extends ClassLoader {
         return isShutdown;
     }
 
-    @SuppressWarnings("unchecked")
     private InputStream resourceStream(String name) {
-        if (!checkShutdown(name)) {
-            byte[] classData = resourcesSupplier.get().get(name);
-            if (classData == null) {
-                return null;
-            }
-            return new InflaterInputStream(new ByteArrayInputStream(classData));
+        if (checkShutdown(name)) {
+            return null;
         }
-        return null;
+        byte[] classData = resourcesSupplier.get().get(classKeyName(name));
+        if (classData == null) {
+            return null;
+        }
+        return new InflaterInputStream(new ByteArrayInputStream(classData));
     }
 
     private boolean checkShutdown(String resource) {
-        if (isShutdown) {
-            // This class loader is used as the thread context CL in several places. It's possible
-            // that another thread inherits this classloader since a Thread inherits the parent's
-            // context CL by default (see for example: https://bugs.java.com/bugdatabase/view_bug.do?bug_id=JDK-8172726)
-            // In these scenarios the thread might essentially hold a reference to an obsolete classloader.
-            // Rather than throwing an unexpected exception we instead print a warning.
-            String jobName = this.jobName == null ? idToString(jobId) : "'" + this.jobName + "'";
-            logger.warning("Classloader for job " + jobName + " tried to load '" + resource
-                    + "' after the job was completed. The classloader used for jobs is disposed after " +
-                    "job is completed");
-            return true;
+        if (!isShutdown) {
+            return false;
         }
-        return false;
+        // This class loader is used as the thread context CL in several places. It's possible
+        // that another thread inherits this classloader since a Thread inherits the parent's
+        // context CL by default (see for example: https://bugs.java.com/bugdatabase/view_bug.do?bug_id=JDK-8172726)
+        // In these scenarios the thread might essentially hold a reference to an obsolete classloader.
+        // Rather than throwing an unexpected exception we instead print a warning.
+        String jobName = this.jobName == null ? idToString(jobId) : "'" + this.jobName + "'";
+        logger.warning("Classloader for job " + jobName + " tried to load '" + resource
+                + "' after the job was completed. The classloader used for jobs is disposed after " +
+                "job is completed");
+        return true;
     }
 
     private static boolean isEmpty(String className) {

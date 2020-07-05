@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,17 +22,20 @@ import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.config.ProcessingGuarantee;
+import com.hazelcast.jet.impl.processor.MetaSupplierFromProcessorSupplier;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.partition.strategy.StringPartitioningStrategy;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 import static com.hazelcast.internal.util.UuidUtil.newUnsecureUuidString;
-import static java.util.Collections.singletonList;
+import static java.util.Collections.nCopies;
 
 /**
  * Factory of {@link ProcessorSupplier} instances. The starting point of
@@ -62,6 +65,18 @@ import static java.util.Collections.singletonList;
  */
 @FunctionalInterface
 public interface ProcessorMetaSupplier extends Serializable {
+
+    /**
+     * Returns the metadata on this supplier, a string-to-string map. There is
+     * no predefined metadata; this facility exists to allow the DAG vertices
+     * to contribute some information to the execution planning phase.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    default Map<String, String> getTags() {
+        return Collections.emptyMap();
+    }
 
     /**
      * Returns the local parallelism the vertex should be configured with.
@@ -99,7 +114,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      * Called on coordinator member after execution has finished on all
      * members, successfully or not. This method will be called after {@link
      * ProcessorSupplier#close(Throwable)} has been called on all
-     * <em>available</em> members.
+     * <em>available</em> members. The job can be restarted later.
      * <p>
      * If there is an exception during the creation of the execution plan, this
      * method will be called regardless of whether the {@link #init(Context)
@@ -125,7 +140,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      */
     @Nonnull
     static ProcessorMetaSupplier of(int preferredLocalParallelism, @Nonnull ProcessorSupplier procSupplier) {
-        return of((Address x) -> procSupplier, preferredLocalParallelism);
+        return new MetaSupplierFromProcessorSupplier(preferredLocalParallelism, procSupplier);
     }
 
     /**
@@ -144,13 +159,12 @@ public interface ProcessorMetaSupplier extends Serializable {
      * Specifically, returns a meta-supplier that will always return the
      * result of calling {@link ProcessorSupplier#of(SupplierEx)}.
      *
-     * @param procSupplier              the supplier of processors
      * @param preferredLocalParallelism the value to return from {@link #preferredLocalParallelism()}
+     * @param procSupplier              the supplier of processors
      */
     @Nonnull
     static ProcessorMetaSupplier of(
-            @Nonnull SupplierEx<? extends Processor> procSupplier,
-            int preferredLocalParallelism
+            int preferredLocalParallelism, @Nonnull SupplierEx<? extends Processor> procSupplier
     ) {
         return of(preferredLocalParallelism, ProcessorSupplier.of(procSupplier));
     }
@@ -165,7 +179,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      */
     @Nonnull
     static ProcessorMetaSupplier of(@Nonnull SupplierEx<? extends Processor> procSupplier) {
-        return of(procSupplier, Vertex.LOCAL_PARALLELISM_USE_DEFAULT);
+        return of(Vertex.LOCAL_PARALLELISM_USE_DEFAULT, procSupplier);
     }
 
     /**
@@ -173,13 +187,13 @@ public interface ProcessorMetaSupplier extends Serializable {
      * supplied function that maps a cluster member address to a {@link
      * ProcessorSupplier}.
      *
-     * @param addressToSupplier the mapping from address to ProcessorSupplier
      * @param preferredLocalParallelism the value to return from {@link #preferredLocalParallelism()}
+     * @param addressToSupplier the mapping from address to ProcessorSupplier
      */
     @Nonnull
     static ProcessorMetaSupplier of(
-            @Nonnull FunctionEx<? super Address, ? extends ProcessorSupplier> addressToSupplier,
-            int preferredLocalParallelism
+            int preferredLocalParallelism,
+            @Nonnull FunctionEx<? super Address, ? extends ProcessorSupplier> addressToSupplier
     ) {
         Vertex.checkLocalParallelism(preferredLocalParallelism);
         return new ProcessorMetaSupplier() {
@@ -205,7 +219,7 @@ public interface ProcessorMetaSupplier extends Serializable {
     static ProcessorMetaSupplier of(
             @Nonnull FunctionEx<? super Address, ? extends ProcessorSupplier> addressToSupplier
     ) {
-        return of(addressToSupplier, Vertex.LOCAL_PARALLELISM_USE_DEFAULT);
+        return of(Vertex.LOCAL_PARALLELISM_USE_DEFAULT, addressToSupplier);
     }
 
 
@@ -214,7 +228,7 @@ public interface ProcessorMetaSupplier extends Serializable {
      * will always return it. The {@link #preferredLocalParallelism()} of
      * the meta-supplier will be one, i.e., no local parallelization.
      * <p>
-     * The parallelism will be overriden if the {@link Vertex#localParallelism(int)} is
+     * The parallelism will be overridden if the {@link Vertex#localParallelism(int)} is
      * set to a specific value.
      */
     @Nonnull
@@ -288,7 +302,7 @@ public interface ProcessorMetaSupplier extends Serializable {
                 return addr -> addr.equals(ownerAddress) ?
                         supplier
                         :
-                        count -> singletonList(new AbstractProcessor() {
+                        count -> nCopies(count, new AbstractProcessor() {
                             @Override
                             protected boolean tryProcess(int ordinal, @Nonnull Object item) {
                                 throw new IllegalStateException(

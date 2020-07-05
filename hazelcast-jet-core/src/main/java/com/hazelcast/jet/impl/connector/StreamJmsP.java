@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,22 @@
 
 package com.hazelcast.jet.impl.connector;
 
-import com.hazelcast.function.ConsumerEx;
 import com.hazelcast.function.FunctionEx;
 import com.hazelcast.function.SupplierEx;
+import com.hazelcast.jet.JetException;
+import com.hazelcast.jet.RestartableException;
 import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.Traversers;
+import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.AbstractProcessor;
+import com.hazelcast.jet.core.BroadcastKey;
 import com.hazelcast.jet.core.EventTimeMapper;
 import com.hazelcast.jet.core.EventTimePolicy;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.processor.SourceProcessors;
+import com.hazelcast.jet.impl.util.Util;
+import com.hazelcast.jet.pipeline.JmsSourceBuilder;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -35,81 +41,78 @@ import javax.jms.Message;
 import javax.jms.MessageConsumer;
 import javax.jms.Session;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Map.Entry;
+import java.util.Set;
 import java.util.stream.Collectors;
 
+import static com.hazelcast.jet.Util.entry;
+import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
+import static com.hazelcast.jet.config.ProcessingGuarantee.NONE;
+import static com.hazelcast.jet.core.BroadcastKey.broadcastKey;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
+import static com.hazelcast.jet.impl.util.LoggingUtil.logFine;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
-import static com.hazelcast.jet.impl.util.Util.uncheckCall;
+import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.stream.IntStream.range;
+import static javax.jms.Session.DUPS_OK_ACKNOWLEDGE;
 
 /**
  * Private API. Access via {@link SourceProcessors#streamJmsQueueP} or {@link
  * SourceProcessors#streamJmsTopicP}
- * <p>
- * Since we use a non-blocking version of JMS consumer API, the processor is
- * marked as cooperative.
  */
 public class StreamJmsP<T> extends AbstractProcessor {
 
-    public static final int PREFERRED_LOCAL_PARALLELISM = 4;
+    public static final int PREFERRED_LOCAL_PARALLELISM = 1;
+    private static final BroadcastKey<String> SEEN_IDS_KEY = broadcastKey("seen");
+    private static final long RESTORED_IDS_TTL = MINUTES.toNanos(1);
 
     private final Connection connection;
-    private final FunctionEx<? super Connection, ? extends Session> newSessionFn;
     private final FunctionEx<? super Session, ? extends MessageConsumer> consumerFn;
-    private final ConsumerEx<? super Session> flushFn;
     private final FunctionEx<? super Message, ? extends T> projectionFn;
+    private final FunctionEx<? super Message, ?> messageIdFn;
     private final EventTimeMapper<? super T> eventTimeMapper;
+    private final ProcessingGuarantee guarantee;
+    private final Set<Object> seenIds;
+    private Set<Object> restoredIds;
+    private long restoredIdsExpiration = Long.MAX_VALUE;
 
     private Session session;
     private MessageConsumer consumer;
-    private Traverser<Object> traverser;
+    private Traverser<Object> pendingTraverser = Traversers.empty();
+    private boolean snapshotInProgress;
+    private Traverser<Entry<BroadcastKey<String>, Set<Object>>> snapshotTraverser;
 
     StreamJmsP(Connection connection,
-               FunctionEx<? super Connection, ? extends Session> newSessionFn,
                FunctionEx<? super Session, ? extends MessageConsumer> consumerFn,
-               ConsumerEx<? super Session> flushFn,
+               FunctionEx<? super Message, ?> messageIdFn,
                FunctionEx<? super Message, ? extends T> projectionFn,
-               EventTimePolicy<? super T> eventTimePolicy
+               EventTimePolicy<? super T> eventTimePolicy,
+               ProcessingGuarantee guarantee
     ) {
         this.connection = connection;
-        this.newSessionFn = newSessionFn;
         this.consumerFn = consumerFn;
-        this.flushFn = flushFn;
+        this.messageIdFn = messageIdFn;
         this.projectionFn = projectionFn;
+        this.guarantee = guarantee;
 
         eventTimeMapper = new EventTimeMapper<>(eventTimePolicy);
         eventTimeMapper.addPartitions(1);
-    }
-
-    /**
-     * Private API. Use {@link SourceProcessors#streamJmsQueueP} or {@link
-     * SourceProcessors#streamJmsTopicP} instead.
-     */
-    @Nonnull
-    public static <T> ProcessorSupplier supplier(
-            @Nonnull SupplierEx<? extends Connection> newConnectionFn,
-            @Nonnull FunctionEx<? super Connection, ? extends Session> newSessionFn,
-            @Nonnull FunctionEx<? super Session, ? extends MessageConsumer> consumerFn,
-            @Nonnull ConsumerEx<? super Session> flushFn,
-            @Nonnull FunctionEx<? super Message, ? extends T> projectionFn,
-            @Nonnull EventTimePolicy<? super T> eventTimePolicy
-    ) {
-        checkSerializable(newConnectionFn, "newConnectionFn");
-        checkSerializable(newSessionFn, "newSessionFn");
-        checkSerializable(consumerFn, "consumerFn");
-        checkSerializable(flushFn, "flushFn");
-        checkSerializable(projectionFn, "projectionFn");
-
-        return new Supplier<>(newConnectionFn, newSessionFn, consumerFn, flushFn, projectionFn, eventTimePolicy);
+        seenIds = guarantee == EXACTLY_ONCE ? new HashSet<>() : Collections.emptySet();
+        restoredIds = guarantee == EXACTLY_ONCE ? new HashSet<>() : Collections.emptySet();
     }
 
     @Override
-    protected void init(@Nonnull Context context) {
-        session = newSessionFn.apply(connection);
+    public boolean isCooperative() {
+        // if we commit, the commit() method isn't cooperative
+        return guarantee == NONE;
+    }
+
+    @Override
+    protected void init(@Nonnull Context context) throws JMSException {
+        session = connection.createSession(guarantee != NONE, DUPS_OK_ACKNOWLEDGE);
         consumer = consumerFn.apply(session);
-        traverser = ((Traverser<Message>) () -> uncheckCall(() -> consumer.receiveNoWait()))
-                .flatMap(t -> eventTimeMapper.flatMapEvent(projectionFn.apply(t), 0, handleJmsTimestamp(t)))
-                .peek(item -> flushFn.accept(session));
     }
 
     private static long handleJmsTimestamp(Message msg) {
@@ -123,48 +126,162 @@ public class StreamJmsP<T> extends AbstractProcessor {
 
     @Override
     public boolean complete() {
-        emitFromTraverser(traverser);
+        if (snapshotInProgress) {
+            return false;
+        }
+        while (emitFromTraverser(pendingTraverser)) {
+            try {
+                Message t = consumer.receiveNoWait();
+                if (t == null) {
+                    pendingTraverser = eventTimeMapper.flatMapIdle();
+                    break;
+                }
+                if (guarantee == EXACTLY_ONCE) {
+                    // We don't know whether the messages with the restored IDs were acknowledged in the previous
+                    // execution or not. They are acknowledged in phase-2 of the snapshot which might not be executed.
+                    // If we receive a message with a restored ID, we ignore it. But if we don't receive some ID,
+                    // we can never safely throw it out.
+                    // In order to avoid storing the restored IDs forever, we set a timeout after which we clear the
+                    // collection. We start the timeout after receiving the first message, at which time we know the
+                    // broker is working. We assume it will redeliver the messages promptly; if it doesn't, we assume
+                    // they were acknowledged in the previous execution or delivered to another processor in this
+                    // execution.
+                    if (restoredIdsExpiration == Long.MAX_VALUE) {
+                        restoredIdsExpiration = System.nanoTime() + RESTORED_IDS_TTL;
+                    } else if (!restoredIds.isEmpty() && restoredIdsExpiration <= System.nanoTime()) {
+                        restoredIds = Collections.emptySet();
+                    }
+                    Object msgId = messageIdFn.apply(t);
+                    if (msgId == null) {
+                        throw new JetException("Received a message without an ID. All messages must have an ID, " +
+                                "you can specify an extracting function using "
+                                + JmsSourceBuilder.class.getSimpleName() + ".messageIdFn()");
+                    }
+                    seenIds.add(msgId);
+                    if (restoredIds.remove(msgId)) {
+                        logFine(getLogger(), "Redelivered message dropped: %s", t);
+                        continue;
+                    }
+                }
+                pendingTraverser = eventTimeMapper.flatMapEvent(projectionFn.apply(t), 0, handleJmsTimestamp(t));
+            } catch (JMSException e) {
+                throw sneakyThrow(e);
+            }
+        }
         return false;
     }
 
     @Override
-    public void close() throws Exception {
-        consumer.close();
-        session.close();
+    public boolean snapshotCommitPrepare() {
+        if (!emitFromTraverser(pendingTraverser)) {
+            return false;
+        }
+        snapshotInProgress = guarantee != NONE;
+        if (guarantee != EXACTLY_ONCE) {
+            return true;
+        }
+        if (snapshotTraverser == null) {
+            snapshotTraverser = Traversers.traverseItems(seenIds, restoredIds)
+                    .filter(ids -> !ids.isEmpty())
+                    .map(ids -> entry(SEEN_IDS_KEY, ids))
+                    .onFirstNull(() -> snapshotTraverser = null);
+            logFine(getLogger(), "Saved %d seenIds and %d restoredIds to snapshot", seenIds.size(), restoredIds.size());
+        }
+        return emitFromTraverserToSnapshot(snapshotTraverser);
     }
 
-    private static final class Supplier<T> implements ProcessorSupplier {
+    @Override
+    public boolean snapshotCommitFinish(boolean success) {
+        if (guarantee == NONE) {
+            return true;
+        }
+        if (success) {
+            try {
+                session.commit();
+                getLogger().fine("Session committed");
+            } catch (JMSException e) {
+                throw sneakyThrow(e);
+            }
+            seenIds.clear();
+        } else if (guarantee == EXACTLY_ONCE) {
+            // We could tolerate snapshot failures, but if we did, the memory usage will grow without a bound.
+            // The `seenIds` and also unacknowledged messages in the session will grow without a limit.
+            throw new RestartableException("the snapshot failed");
+        }
+        snapshotInProgress = false;
+        return true;
+    }
+
+    @Override
+    protected void restoreFromSnapshot(@Nonnull Object key, @Nonnull Object value) {
+        if (!SEEN_IDS_KEY.equals(key)) {
+            throw new RuntimeException("Unexpected key received from snapshot: " + key);
+        }
+        // Ignore if not in ex-once mode. The user could cancelAndExportSnapshot() and restart with
+        // a lower guarantee.
+        // We could restore multiple collections: each processor saves up to two collections and it's restored to
+        // all processors because we can't control which processor receives which messages.
+        if (guarantee == EXACTLY_ONCE) {
+            @SuppressWarnings("unchecked")
+            Set<Object> castValue = (Set<Object>) value;
+            restoredIds.addAll(castValue);
+            logFine(getLogger(), "Restored %d seen IDs from snapshot", castValue.size());
+        }
+    }
+
+    @Override
+    public void close() throws Exception {
+        if (consumer != null) {
+            consumer.close();
+        }
+        if (session != null) {
+            session.close();
+        }
+    }
+
+    /**
+     * Private API. Use {@link SourceProcessors#streamJmsQueueP} or {@link
+     * SourceProcessors#streamJmsTopicP} instead.
+     */
+    public static final class Supplier<T> implements ProcessorSupplier {
 
         static final long serialVersionUID = 1L;
 
         private final SupplierEx<? extends Connection> newConnectionFn;
-        private final FunctionEx<? super Connection, ? extends Session> sessionFn;
         private final FunctionEx<? super Session, ? extends MessageConsumer> consumerFn;
-        private final ConsumerEx<? super Session> flushFn;
+        private final FunctionEx<? super Message, ?> messageIdFn;
         private final FunctionEx<? super Message, ? extends T> projectionFn;
         private final EventTimePolicy<? super T> eventTimePolicy;
+        private ProcessingGuarantee sourceGuarantee;
 
         private transient Connection connection;
 
-        private Supplier(SupplierEx<? extends Connection> newConnectionFn,
-                         FunctionEx<? super Connection, ? extends Session> sessionFn,
-                         FunctionEx<? super Session, ? extends MessageConsumer> consumerFn,
-                         ConsumerEx<? super Session> flushFn,
-                         FunctionEx<? super Message, ? extends T> projectionFn,
-                         EventTimePolicy<? super T> eventTimePolicy
+        public Supplier(
+                SupplierEx<? extends Connection> newConnectionFn,
+                FunctionEx<? super Session, ? extends MessageConsumer> consumerFn,
+                FunctionEx<? super Message, ?> messageIdFn,
+                FunctionEx<? super Message, ? extends T> projectionFn,
+                EventTimePolicy<? super T> eventTimePolicy,
+                ProcessingGuarantee sourceGuarantee
         ) {
+            checkSerializable(newConnectionFn, "newConnectionFn");
+            checkSerializable(consumerFn, "consumerFn");
+            checkSerializable(messageIdFn, "messageIdFn");
+            checkSerializable(projectionFn, "projectionFn");
+
             this.newConnectionFn = newConnectionFn;
-            this.sessionFn = sessionFn;
             this.consumerFn = consumerFn;
-            this.flushFn = flushFn;
+            this.messageIdFn = messageIdFn;
             this.projectionFn = projectionFn;
             this.eventTimePolicy = eventTimePolicy;
+            this.sourceGuarantee = sourceGuarantee;
         }
 
         @Override
         public void init(@Nonnull Context context) throws Exception {
             connection = newConnectionFn.get();
             connection.start();
+            sourceGuarantee = Util.min(sourceGuarantee, context.processingGuarantee());
         }
 
         @Override
@@ -174,12 +291,11 @@ public class StreamJmsP<T> extends AbstractProcessor {
             }
         }
 
-        @Nonnull
-        @Override
+        @Nonnull @Override
         public Collection<? extends Processor> get(int count) {
             return range(0, count)
-                    .mapToObj(i ->
-                            new StreamJmsP<>(connection, sessionFn, consumerFn, flushFn, projectionFn, eventTimePolicy))
+                    .mapToObj(i -> new StreamJmsP<>(
+                            connection, consumerFn, messageIdFn, projectionFn, eventTimePolicy, sourceGuarantee))
                     .collect(Collectors.toList());
         }
     }

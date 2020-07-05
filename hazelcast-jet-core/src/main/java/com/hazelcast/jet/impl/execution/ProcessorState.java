@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.impl.execution;
 
+import com.hazelcast.jet.core.Inbox;
 import com.hazelcast.jet.core.Processor;
 
 /**
@@ -30,9 +31,14 @@ enum ProcessorState {
     PROCESS_WATERMARK,
 
     /**
-     * Making calls to {@link Processor#tryProcess()} and {@link
-     * Processor#process(int, com.hazelcast.jet.core.Inbox)} until the inbox
-     * is empty.
+     * Making calls to the zero-argument {@link Processor#tryProcess()} method
+     * until it returns true.
+     */
+    NULLARY_PROCESS,
+
+    /**
+     * Making calls to {@link Processor#process(int, Inbox)} until the inbox is
+     * empty.
      */
     PROCESS_INBOX,
 
@@ -55,14 +61,54 @@ enum ProcessorState {
     SAVE_SNAPSHOT,
 
     /**
+     * Making calls to {@link Processor#snapshotCommitPrepare()} until it
+     * returns {@code true}.
+     */
+    SNAPSHOT_COMMIT_PREPARE,
+
+    /**
      * Waiting for the outbox to accept the {@link SnapshotBarrier}.
      */
     EMIT_BARRIER,
 
     /**
+     * Making calls to {@link Processor#snapshotCommitFinish(boolean)} until it
+     * returns {@code true} and then return to {@link #PROCESS_INBOX}. Used
+     * when phase-2 was initiated while in {@link #PROCESS_INBOX}.
+     */
+    SNAPSHOT_COMMIT_FINISH__PROCESS,
+
+    /**
+     * Making calls to {@link Processor#snapshotCommitFinish(boolean)} until it
+     * returns {@code true} and then return to {@link #COMPLETE}. Used when
+     * phase-2 was initiated while in {@link #COMPLETE}.
+     */
+    SNAPSHOT_COMMIT_FINISH__COMPLETE,
+
+    /**
+     * Making calls to {@link Processor#snapshotCommitFinish(boolean)} until it
+     * returns {@code true} and then proceed to {@link #EMIT_DONE_ITEM}. Used
+     * when phase-2 was initiated after {@code Processor.complete()} returned
+     * true.
+     */
+    SNAPSHOT_COMMIT_FINISH__FINAL,
+
+    /**
+     * Processor completed after a phase 1 of a snapshot and is not doing
+     * anything, but it cannot be done until a phase 2 is done - this state is
+     * waiting for a snapshot phase 2.
+     */
+    WAITING_FOR_SNAPSHOT_COMPLETED,
+
+    /**
      * Waiting for the outbox to accept the {@code DONE_ITEM}.
      */
     EMIT_DONE_ITEM,
+
+    /**
+     * Waiting until the close method completes in a separate thread.
+     */
+    CLOSE,
 
     /**
      * The processor is done.

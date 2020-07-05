@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,13 @@
 
 package com.hazelcast.jet.impl;
 
-import com.hazelcast.instance.impl.HazelcastInstanceImpl;
 import com.hazelcast.internal.nio.BufferObjectDataInput;
 import com.hazelcast.internal.serialization.InternalSerializationService;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.BroadcastKey;
 import com.hazelcast.jet.impl.execution.BroadcastEntry;
+import com.hazelcast.jet.impl.execution.init.Contexts.ProcCtx;
 import com.hazelcast.jet.impl.util.AsyncSnapshotWriterImpl.SnapshotDataKey;
 import com.hazelcast.jet.impl.util.AsyncSnapshotWriterImpl.SnapshotDataValueTerminator;
 
@@ -50,8 +50,7 @@ public class ExplodeSnapshotP extends AbstractProcessor {
 
     @Override
     protected void init(@Nonnull Context context) {
-        serializationService =
-                ((HazelcastInstanceImpl) context.jetInstance().getHazelcastInstance()).getSerializationService();
+        serializationService = ((ProcCtx) context).serializationService();
     }
 
     private Traverser<Object> traverser(byte[] data) {
@@ -76,8 +75,8 @@ public class ExplodeSnapshotP extends AbstractProcessor {
             // ignore the validation record
             return true;
         }
-        Entry<SnapshotDataKey, byte[]> casted = (Entry<SnapshotDataKey, byte[]>) item;
-        String vertexName = casted.getKey().vertexName();
+        Entry<SnapshotDataKey, byte[]> castItem = (Entry<SnapshotDataKey, byte[]>) item;
+        String vertexName = castItem.getKey().vertexName();
         FlatMapper<byte[], Object> flatMapper = vertexToFlatMapper.get(vertexName);
         if (flatMapper == null) {
             if (!vertexToFlatMapper.containsKey(vertexName)) {
@@ -87,12 +86,12 @@ public class ExplodeSnapshotP extends AbstractProcessor {
             }
             return true;
         }
-        long snapshotId = casted.getKey().snapshotId();
+        long snapshotId = castItem.getKey().snapshotId();
         if (snapshotId != expectedSnapshotId) {
             getLogger().warning("Data for unexpected snapshot ID encountered, ignoring. Expected="
                     + expectedSnapshotId + ", found=" + snapshotId);
             return true;
         }
-        return flatMapper.tryProcess(casted.getValue());
+        return flatMapper.tryProcess(castItem.getValue());
     }
 }

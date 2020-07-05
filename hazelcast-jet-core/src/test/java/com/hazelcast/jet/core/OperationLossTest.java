@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@ import com.hazelcast.jet.impl.JobExecutionRecord;
 import com.hazelcast.jet.impl.JobRepository;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.jet.impl.util.ImdgUtil;
-import com.hazelcast.spi.properties.GroupProperty;
+import com.hazelcast.spi.properties.ClusterProperty;
 import com.hazelcast.test.PacketFiltersUtil;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -57,7 +57,7 @@ public class OperationLossTest extends SimpleTestInClusterSupport {
     @BeforeClass
     public static void beforeClass() {
         JetConfig config = new JetConfig();
-        config.getHazelcastConfig().setProperty(GroupProperty.OPERATION_CALL_TIMEOUT_MILLIS.getName(), "1000");
+        config.getHazelcastConfig().setProperty(ClusterProperty.OPERATION_CALL_TIMEOUT_MILLIS.getName(), "1000");
 
         initialize(2, config);
     }
@@ -118,16 +118,13 @@ public class OperationLossTest extends SimpleTestInClusterSupport {
         assertJobStatusEventually(job, SUSPENDED);
         job.resume();
         assertJobStatusEventually(job, RUNNING);
-        job.cancel();
-        try {
-            job.join();
-        } catch (CancellationException ignored) { }
+        cancelAndJoin(job);
     }
 
     @Test
     public void when_snapshotOperationLost_then_retried() {
         PacketFiltersUtil.dropOperationsFrom(instance().getHazelcastInstance(), JetInitDataSerializerHook.FACTORY_ID,
-                singletonList(JetInitDataSerializerHook.SNAPSHOT_OPERATION));
+                singletonList(JetInitDataSerializerHook.SNAPSHOT_PHASE1_OPERATION));
         DAG dag = new DAG();
         Vertex v1 = dag.newVertex("v1", () -> new DummyStatefulP()).localParallelism(1);
         Vertex v2 = dag.newVertex("v2", mapP(identity())).localParallelism(1);
@@ -148,10 +145,7 @@ public class OperationLossTest extends SimpleTestInClusterSupport {
         logger.info("Lifting the packet filter...");
         PacketFiltersUtil.resetPacketFiltersFrom(instance().getHazelcastInstance());
         waitForFirstSnapshot(jobRepository, job.getId(), 10, false);
-        job.cancel();
-        try {
-            job.join();
-        } catch (CancellationException ignored) { }
+        cancelAndJoin(job);
     }
 
     @Test
@@ -204,7 +198,7 @@ public class OperationLossTest extends SimpleTestInClusterSupport {
     @Test
     public void when_terminalSnapshotOperationLost_then_jobRestarts() {
         PacketFiltersUtil.dropOperationsFrom(instance().getHazelcastInstance(), JetInitDataSerializerHook.FACTORY_ID,
-                singletonList(JetInitDataSerializerHook.SNAPSHOT_OPERATION));
+                singletonList(JetInitDataSerializerHook.SNAPSHOT_PHASE1_OPERATION));
         DAG dag = new DAG();
         Vertex v1 = dag.newVertex("v1", () -> new NoOutputSourceP()).localParallelism(1);
         Vertex v2 = dag.newVertex("v2", mapP(identity())).localParallelism(1);

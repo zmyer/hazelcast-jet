@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,7 +54,7 @@ public interface Job {
 
     /**
      * Returns the configuration this job was submitted with. Changes made to the
-     * returned config object will not have any affect.
+     * returned config object will not have any effect.
      */
     @Nonnull
     JobConfig getConfig();
@@ -88,11 +88,11 @@ public interface Job {
      * Returns a snapshot of the current values of all job-specific metrics.
      * <p>
      * While the job is running the metric values are updated periodically
-     * (see {@link MetricsConfig#setCollectionIntervalSeconds metrics
-     * collection interval}), assuming
-     * that both {@link MetricsConfig#setEnabled global metrics collection}
-     * and {@link JobConfig#isMetricsEnabled() per job metrics collection}
-     * are enabled. Otherwise empty metrics will be returned.
+     * (see {@linkplain MetricsConfig#setCollectionFrequencySeconds metrics
+     * collection frequency}), assuming that both {@linkplain
+     * MetricsConfig#setEnabled global metrics collection} and {@linkplain
+     * JobConfig#setMetricsEnabled per-job metrics collection} are enabled.
+     * Otherwise empty metrics will be returned.
      * <p>
      * Keep in mind that the collections may occur at different times on
      * each member, metrics from various members aren't from the same instant.
@@ -180,8 +180,8 @@ public interface Job {
     /**
      * Resumes a {@linkplain #suspend suspended} job. The job will resume from
      * the last known successful snapshot, if there is one.
-     *
-     * <p>If the job is not suspended, it does nothing.
+     * <p>
+     * If the job is not suspended, it does nothing.
      */
     void resume();
 
@@ -214,12 +214,17 @@ public interface Job {
      * and then cancels the job without processing any more data after the
      * barrier (graceful cancellation). It's similar to {@link #suspend()}
      * followed by a {@link #cancel()}, except that it won't process any more
-     * data data after the snapshot.
+     * data after the snapshot.
      * <p>
      * You can use the exported snapshot as a starting point for a new job. The
      * job doesn't need to execute the same Pipeline as the job that created it,
      * it must just be compatible with its state data. To achieve this, use
      * {@link JobConfig#setInitialSnapshotName(String)}.
+     * <p>
+     * Unlike {@link #exportSnapshot} method, when a snapshot is created using
+     * this method Jet will commit the external transactions because this
+     * snapshot is the last one created for the job and it's safe to use it to
+     * continue the processing.
      * <p>
      * If the terminal snapshot fails, Jet will suspend this job instead of
      * cancelling it.
@@ -252,7 +257,19 @@ public interface Job {
      * won't automatically delete the IMap it is exported into. You must
      * manually call {@linkplain JobStateSnapshot#destroy() snapshot.destroy()}
      * to delete it. If your state is large, make sure you have enough memory
-     * to store it.
+     * to store it. The snapshot created using this method will also not be
+     * used for automatic restart - should the job fail, the previous
+     * automatically saved snapshot will be used.
+     * <p>
+     * For transactional sources or sinks (that is those which use transactions
+     * to confirm reads or to commit writes), Jet will not commit the
+     * transactions when creating a snapshot using this method. The reason for
+     * this is that such connectors only achieve exactly-once guarantee if the
+     * job restarts from the latest snapshot. But, for example, if the job
+     * fails after exporting a snapshot but before it creates a new automatic
+     * one, the job would restart from the previous automatic snapshot and the
+     * stored internal and committed external state will be from a different
+     * point in time and a data loss will occur.
      * <p>
      * If a snapshot with the same name already exists, it will be
      * overwritten. If a snapshot is already in progress for this job (either
@@ -270,7 +287,7 @@ public interface Job {
      * snapshot, they will wait in a queue for this snapshot to complete.
      * Forceful job-control actions will interrupt the export procedure.
      * <p>
-     * You can access the exported state map using {@link
+     * You can access the exported state using {@link
      * JetInstance#getJobStateSnapshot(String)}.
      * <p>
      * The method call will block until it has fully exported the snapshot.

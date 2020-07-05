@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,8 @@ import com.hazelcast.jet.Job;
 import com.hazelcast.jet.core.Processor.Context;
 import org.junit.Test;
 
-import java.util.concurrent.CancellationException;
-
 import static com.hazelcast.jet.aggregate.AggregateOperations.counting;
-import static org.apache.activemq.transport.amqp.AmqpWireFormat.DEFAULT_IDLE_TIMEOUT;
+import static com.hazelcast.jet.core.EventTimePolicy.DEFAULT_IDLE_TIMEOUT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -40,7 +38,7 @@ public class StreamSourceTest extends PipelineTestSupport {
         test(500);
     }
 
-    private void test(int idleTimeout) {
+    private void test(long idleTimeout) {
         StreamSource<Object> source = SourceBuilder
                 .stream("src", Context::globalProcessorIndex)
                 .distributed(1)
@@ -74,10 +72,6 @@ public class StreamSourceTest extends PipelineTestSupport {
             fail("test not designed for idleTimeout=" + idleTimeout);
         }
 
-        job.cancel();
-        try {
-            job.join();
-        } catch (CancellationException ignored) {
-        }
+        cancelAndJoin(job);
     }
 }

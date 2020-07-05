@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import com.hazelcast.jet.pipeline.SinkBuilder;
 import com.hazelcast.jet.pipeline.Sources;
 import com.hazelcast.jet.pipeline.WindowDefinition;
 import com.hazelcast.map.IMap;
-import com.hazelcast.spi.properties.GroupProperty;
+import com.hazelcast.spi.properties.ClusterProperty;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -69,7 +69,7 @@ public class WatermarkCoalescer_TerminalSnapshotTest extends JetTestSupport {
 
         // number of partitions must match number of source processors for coalescing
         // to work correctly
-        config.setProperty(GroupProperty.PARTITION_COUNT.getName(), String.valueOf(PARTITION_COUNT));
+        config.setProperty(ClusterProperty.PARTITION_COUNT.getName(), String.valueOf(PARTITION_COUNT));
 
         instance = createJetMember(config);
         sourceMap = instance.getMap("test");

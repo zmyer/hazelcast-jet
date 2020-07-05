@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,11 @@ package com.hazelcast.jet.core.test;
 
 import com.hazelcast.jet.core.Inbox;
 
+import javax.annotation.Nonnull;
 import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.Iterator;
 
 /**
  * {@link Inbox} implementation suitable to be used in tests.
@@ -72,9 +74,15 @@ public final class TestInbox implements Inbox {
         queue.addAll(collection);
     }
 
+    @Nonnull @Override
+    public Iterator<Object> iterator() {
+        return queue.iterator();
+    }
+
     /**
      * Convenience for {@code inbox.queue().clear()}
      */
+    @Override
     public void clear() {
         queue.clear();
     }

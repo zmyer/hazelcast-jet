@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@ import com.hazelcast.logging.Logger;
 
 import javax.annotation.Nonnull;
 
+import static com.hazelcast.jet.config.ProcessingGuarantee.NONE;
+
 /**
  * {@link ProcessorMetaSupplier.Context} implementation suitable to be used
  * in tests.
@@ -42,7 +44,7 @@ public class TestProcessorMetaSupplierContext implements ProcessorMetaSupplier.C
     private int totalParallelism = 1;
     private int localParallelism = 1;
     private String vertexName = "testVertex";
-    private ProcessingGuarantee processingGuarantee;
+    private ProcessingGuarantee processingGuarantee = NONE;
 
     @Nonnull @Override
     public JetInstance jetInstance() {
@@ -175,7 +177,7 @@ public class TestProcessorMetaSupplierContext implements ProcessorMetaSupplier.C
      * Sets the processing guarantee.
      */
     @Nonnull
-    public TestProcessorMetaSupplierContext setProcessingGuarantee(ProcessingGuarantee processingGuarantee) {
+    public TestProcessorMetaSupplierContext setProcessingGuarantee(@Nonnull ProcessingGuarantee processingGuarantee) {
         this.processingGuarantee = processingGuarantee;
         return this;
     }

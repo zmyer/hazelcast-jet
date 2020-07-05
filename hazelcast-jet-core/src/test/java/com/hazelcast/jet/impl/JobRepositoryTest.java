@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.hazelcast.jet.impl;
 
 import com.hazelcast.core.DistributedObject;
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
@@ -32,13 +33,15 @@ import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.jet.pipeline.Sources;
-import com.hazelcast.nio.serialization.Data;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.io.File;
+import java.net.URL;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Properties;
 
 import static com.hazelcast.jet.core.JetProperties.JOB_RESULTS_MAX_SIZE;
@@ -90,7 +93,7 @@ public class JobRepositoryTest extends JetTestSupport {
         cleanup();
 
         assertNotNull(jobRepository.getJobRecord(jobId));
-        assertFalse("job repository should not be empty", jobRepository.getJobResources(jobId).get().isEmpty());
+        assertFalse("job repository should not be empty", jobRepository.getJobResources(jobId).isEmpty());
     }
 
     @Test
@@ -107,7 +110,7 @@ public class JobRepositoryTest extends JetTestSupport {
         cleanup();
 
         assertNotNull(jobRepository.getJobRecord(jobId));
-        assertFalse(jobRepository.getJobResources(jobId).get().isEmpty());
+        assertFalse(jobRepository.getJobResources(jobId).isEmpty());
     }
 
     @Test
@@ -118,12 +121,49 @@ public class JobRepositoryTest extends JetTestSupport {
 
         cleanup();
 
-        assertTrue(jobRepository.getJobResources(jobId).get().isEmpty());
+        assertTrue(jobRepository.getJobResources(jobId).isEmpty());
     }
 
     @Test
-    public void when_jobResourceUploadFails_then_jobResourcesCleanedUp() {
-        jobConfig.addResource("invalid path");
+    public void when_jobJarUploadFails_then_jobResourcesCleanedUp() throws Exception {
+        jobConfig.addJar(new URL("http://site/nonexistent"));
+        testResourceCleanup();
+    }
+
+    @Test
+    public void when_jobZipUploadFails_then_jobResourcesCleanedUp() throws Exception {
+        jobConfig.addJarsInZip(new URL("http://site/nonexistent"));
+        testResourceCleanup();
+    }
+
+    @Test
+    public void when_jobClasspathResourceUploadFails_then_jobResourcesCleanedUp() throws Exception {
+        jobConfig.addClasspathResource(new URL("http://site/nonexistent"));
+        testResourceCleanup();
+    }
+
+    @Test
+    public void when_jobFileUploadFails_then_jobResourcesCleanedUp() throws Exception {
+        jobConfig.attachFile(new URL("http://site/nonexistent"));
+        testResourceCleanup();
+    }
+
+    @Test
+    public void when_jobDirectoryUploadFails_then_jobResourcesCleanedUp() throws Exception {
+        // Given
+        File baseDir = createTempDirectory();
+
+        try {
+            jobConfig.attachDirectory(baseDir);
+        } finally { // Ensure dir deleted even if attachDirectory fails
+            // When
+            delete(baseDir);
+        }
+        // Then
+        testResourceCleanup();
+    }
+
+    private void testResourceCleanup() {
         try {
             jobRepository.uploadJobResources(jobConfig);
             fail();
@@ -131,6 +171,10 @@ public class JobRepositoryTest extends JetTestSupport {
             Collection<DistributedObject> objects = instance.getHazelcastInstance().getDistributedObjects();
             assertTrue(objects.stream().noneMatch(o -> o.getName().startsWith(JobRepository.RESOURCES_MAP_NAME_PREFIX)));
         }
+    }
+
+    private void delete(File file) {
+        assertTrue("Couldn't delete " + file, file.delete());
     }
 
     @Test
@@ -176,7 +220,7 @@ public class JobRepositoryTest extends JetTestSupport {
     }
 
     private JobRecord createJobRecord(long jobId, Data dag) {
-        return new JobRecord(jobId, System.currentTimeMillis(), dag, "", jobConfig);
+        return new JobRecord(jobId, dag, "", jobConfig, Collections.emptySet());
     }
 
     private void sleepUntilJobExpires() {

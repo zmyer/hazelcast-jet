@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,10 +50,6 @@ class CoreSerializerHooks {
                 }
 
                 @Override
-                public void destroy() {
-                }
-
-                @Override
                 public void write(ObjectDataOutput out, Watermark object) throws IOException {
                     out.writeLong(object.timestamp());
                 }
@@ -97,10 +93,6 @@ class CoreSerializerHooks {
                 @Override
                 public int getTypeId() {
                     return SerializerHookConstants.JET_EVENT;
-                }
-
-                @Override
-                public void destroy() {
                 }
             };
         }

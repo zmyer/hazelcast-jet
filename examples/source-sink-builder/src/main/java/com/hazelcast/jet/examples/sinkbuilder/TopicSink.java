@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -61,12 +61,7 @@ public class TopicSink {
      */
     public static void main(String[] args) {
         try {
-            System.out.println("Creating Jet instance 1");
-            JetInstance jet = Jet.newJetInstance();
-
-            System.out.println("Creating Jet instance 2");
-            Jet.newJetInstance();
-
+            JetInstance jet = Jet.bootstrappedInstance();
             System.out.println("Configure Topic Listener");
             ITopic<String> topic = jet.getHazelcastInstance().getTopic(TOPIC_NAME);
             addListener(topic, e -> System.out.println("Line starts with `The`: " + e));

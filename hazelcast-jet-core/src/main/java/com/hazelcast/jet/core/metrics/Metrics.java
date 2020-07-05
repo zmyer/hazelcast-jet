@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,9 @@ import com.hazelcast.jet.impl.metrics.MetricsImpl;
  * User-defined metrics are simple numeric values used to count or measure
  * things. A code submitted to Jet can use them to publish any custom run-time
  * values.
+ *
+ * @since 4.0
  */
-@SuppressWarnings("WeakerAccess")
 public final class Metrics {
 
     private Metrics() {
@@ -64,18 +65,15 @@ public final class Metrics {
      * <pre>
      * {@code
      *  p.readFrom(...)
-     *   .filterUsingServiceAsync(
-     *       ServiceFactory.withCreateFn(i -> "foo"),
+     *   .mapUsingServiceAsync(
+     *       nonSharedService(pctx -> 10L),
      *       (ctx, item) -> {
-     *           Metric dropped = Metrics.threadSafeMetric("dropCount", Unit.COUNT);
+     *           // need to use thread-safe metric since it will be mutated from another thread
+     *           Metric mapped = Metrics.threadSafeMetric("mapped", Unit.COUNT);
      *           return CompletableFuture.supplyAsync(
      *               () -> {
-     *                   // the callback runs on another thread
-     *                   boolean pass = item % 2L == 0;
-     *                   if (!pass) {
-     *                       dropped.increment();
-     *                   }
-     *                   return pass;
+     *                   mapped.increment();
+     *                   return item * ctx;
      *               }
      *           );
      *       }

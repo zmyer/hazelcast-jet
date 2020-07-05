@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,11 @@
 
 package com.hazelcast.jet.impl.pipeline;
 
+import com.hazelcast.function.BiFunctionEx;
 import com.hazelcast.function.BiPredicateEx;
 import com.hazelcast.function.FunctionEx;
 import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Traverser;
-import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.function.TriFunction;
 import com.hazelcast.jet.function.TriPredicate;
@@ -30,6 +30,7 @@ import com.hazelcast.jet.pipeline.StreamStageWithKey;
 import com.hazelcast.jet.pipeline.WindowDefinition;
 
 import javax.annotation.Nonnull;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 public class StreamStageWithKeyImpl<T, K> extends StageWithGroupingBase<T, K> implements StreamStageWithKey<T, K> {
@@ -93,7 +94,7 @@ public class StreamStageWithKeyImpl<T, K> extends StageWithGroupingBase<T, K> im
 
     @Nonnull @Override
     public <S, R> StreamStage<R> mapUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends R> mapFn
     ) {
         return attachMapUsingService(serviceFactory, mapFn);
@@ -101,45 +102,47 @@ public class StreamStageWithKeyImpl<T, K> extends StageWithGroupingBase<T, K> im
 
     @Nonnull @Override
     public <S, R> StreamStage<R> mapUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            int maxConcurrentOps,
+            boolean preserveOrder,
             @Nonnull TriFunction<? super S, ? super K, ? super T, CompletableFuture<R>> mapAsyncFn
     ) {
-        return attachTransformUsingServiceAsync("map", serviceFactory,
-                (s, k, t) -> mapAsyncFn.apply(s, k, t).thenApply(Traversers::singleton));
+        return attachMapUsingServiceAsync(serviceFactory, maxConcurrentOps, preserveOrder, mapAsyncFn);
+    }
+
+    @Nonnull @Override
+    public <S, R> StreamStage<R> mapUsingServiceAsyncBatched(
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            int maxBatchSize,
+            @Nonnull BiFunctionEx<? super S, ? super List<T>, ? extends CompletableFuture<List<R>>> mapAsyncFn
+    ) {
+        return attachMapUsingServiceAsyncBatched(serviceFactory, maxBatchSize, mapAsyncFn);
+    }
+
+    @Nonnull @Override
+    public <S, R> StreamStage<R> mapUsingServiceAsyncBatched(
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            int maxBatchSize,
+            @Nonnull TriFunction<? super S, ? super List<K>, ? super List<T>,
+                    ? extends CompletableFuture<List<R>>> mapAsyncFn
+    ) {
+        return attachMapUsingServiceAsyncBatched(serviceFactory, maxBatchSize, mapAsyncFn);
     }
 
     @Nonnull @Override
     public <S> StreamStage<T> filterUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull TriPredicate<? super S, ? super K, ? super T> filterFn
     ) {
         return attachFilterUsingService(serviceFactory, filterFn);
     }
 
     @Nonnull @Override
-    public <S> StreamStage<T> filterUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull TriFunction<? super S, ? super K, ? super T, CompletableFuture<Boolean>> filterAsyncFn
-    ) {
-        return attachTransformUsingServiceAsync("filter", serviceFactory,
-                (s, k, t) -> filterAsyncFn.apply(s, k, t).thenApply(passed -> passed ? Traversers.singleton(t) : null));
-    }
-
-    @Nonnull @Override
     public <S, R> StreamStage<R> flatMapUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull TriFunction<? super S, ? super K, ? super T, ? extends Traverser<R>> flatMapFn
     ) {
         return attachFlatMapUsingService(serviceFactory, flatMapFn);
-    }
-
-    @Nonnull @Override
-    public <S, R> StreamStage<R> flatMapUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull TriFunction<? super S, ? super K, ? super T, CompletableFuture<Traverser<R>>>
-                    flatMapAsyncFn
-    ) {
-        return attachTransformUsingServiceAsync("flatMap", serviceFactory, flatMapAsyncFn);
     }
 
     @Nonnull @Override

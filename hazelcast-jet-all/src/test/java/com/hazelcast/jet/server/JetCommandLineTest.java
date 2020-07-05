@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.jet.pipeline.Sources;
 import com.hazelcast.map.IMap;
 import com.hazelcast.test.HazelcastParallelClassRunner;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -83,10 +84,14 @@ public class JetCommandLineTest extends JetTestSupport {
 
     @BeforeClass
     public static void beforeClass() throws IOException {
-        testJobJarFile = Files.createTempFile("testjob-", ".jar");
-        IOUtil.copy(JetCommandLineTest.class.getResourceAsStream("testjob.jar"), testJobJarFile.toFile());
+        createJarFile();
         xmlConfiguration = new File(JetCommandLineTest.class.getResource("hazelcast-client-test.xml").getPath());
         yamlConfiguration = new File(JetCommandLineTest.class.getResource("hazelcast-client-test.yaml").getPath());
+    }
+
+    public static void createJarFile() throws IOException {
+        testJobJarFile = Files.createTempFile("testjob-", ".jar");
+        IOUtil.copy(JetCommandLineTest.class.getResourceAsStream("testjob.jar"), testJobJarFile.toFile());
     }
 
     @AfterClass
@@ -112,6 +117,16 @@ public class JetCommandLineTest extends JetTestSupport {
         sourceMap = jet.getMap(SOURCE_NAME);
         IntStream.range(0, ITEM_COUNT).forEach(i -> sourceMap.put(i, i));
         sinkList = jet.getList(SINK_NAME);
+        assertTrueEventually(() -> {
+            if (!isJarFileExists()) {
+                createJarFile();
+            }
+            assertTrue(isJarFileExists());
+        });
+    }
+
+    public boolean isJarFileExists() {
+        return Files.exists(testJobJarFile);
     }
 
     @After
@@ -447,11 +462,104 @@ public class JetCommandLineTest extends JetTestSupport {
     }
 
     @Test
+    public void test_submit_withClassname() {
+        run("submit", "--class", "com.hazelcast.jet.testjob.TestJob", testJobJarFile.toString());
+        assertTrueEventually(() -> assertEquals(1, jet.getJobs().size()), 5);
+        Job job = jet.getJobs().get(0);
+        assertJobStatusEventually(job, JobStatus.RUNNING);
+        assertNull(job.getName());
+    }
+
+    @Test
+    public void test_submit_withWrongClassname() {
+        exception.expectMessage("ClassNotFoundException");
+        run("submit", "--class", "com.hazelcast.jet.testjob.NonExisting", testJobJarFile.toString());
+    }
+
+    @Test
     public void test_submit_argsPassing() {
         run("submit", testJobJarFile.toString(), "--jobOption", "fooValue");
         // this list is created by the job in testjob.jar
         IList<String> args = jet.getList("args");
         assertTrueEventually(() -> assertContains(captureOut(), " with arguments [--jobOption, fooValue]"));
+    }
+
+    @Test
+    public void testTargetsMixin() {
+        String target = "foobar@127.0.0.1:5701,127.0.0.1:5702";
+
+        testTargetsCommand("cancel", "-t", target, "jobName");
+        testTargetsCommand("-t", target, "cancel", "jobName");
+
+        testTargetsCommand("cluster", "-t", target);
+        testTargetsCommand("-t", target, "cluster");
+
+        testTargetsCommand("delete-snapshot", "snapshotName", "-t", target);
+        testTargetsCommand("-t", target, "delete-snapshot", "snapshotName");
+
+        testTargetsCommand("list-jobs", "-t", target);
+        testTargetsCommand("-t", target, "list-jobs");
+
+        testTargetsCommand("list-snapshots", "-t", target);
+        testTargetsCommand("-t", target, "list-snapshots");
+
+        testTargetsCommand("restart", "jobName", "-t", target);
+        testTargetsCommand("-t", target, "restart", "jobName");
+
+        testTargetsCommand("resume", "jobName", "-t", target);
+        testTargetsCommand("-t", target, "resume", "jobName");
+
+        testTargetsCommand("save-snapshot", "jobName", "snapshotName", "-t", target);
+        testTargetsCommand("-t", target, "save-snapshot", "jobName", "snapshotName");
+
+        testTargetsCommand("submit", "-t", target, testJobJarFile.toString());
+        testTargetsCommand("-t", target, "submit", testJobJarFile.toString());
+
+        testTargetsCommand("suspend", "jobName", "-t", target);
+        testTargetsCommand("-t", target, "suspend", "jobName");
+    }
+
+    @Test
+    public void testTargetsAfterCommandTakesPrecedence() {
+        String target = "foobar@127.0.0.1:5701,127.0.0.1:5702";
+        testTargetsCommand("-t", "ignore@127.0.0.1:1234", "submit", "-t", target, testJobJarFile.toString());
+    }
+
+    @Test
+    public void testTargetsInvalidValue() {
+        run("submit", "-t", "@", testJobJarFile.toString());
+        String actual = captureErr();
+        assertContains(actual, "Invalid value for option '--targets':");
+    }
+
+    @Test
+    public void testTargetsClusterNameOptional() {
+        String target = "127.0.0.1:5701,127.0.0.1:5702";
+
+        testTargetsCommandCluster("jet", "list-jobs", "-t", target);
+        testTargetsCommandCluster("jet", "-t", target, "list-jobs");
+    }
+
+    private void testTargetsCommand(String... args) {
+        testTargetsCommandCluster("foobar", args);
+    }
+
+    private void testTargetsCommandCluster(String expectedClusterName, String... args) {
+        AtomicReference<ClientConfig> atomicConfig = new AtomicReference<>();
+        Function<ClientConfig, JetInstance> fnRunCommand = (config) -> {
+            atomicConfig.set(config);
+            return this.client;
+        };
+
+        try {
+            run(fnRunCommand, args);
+        } catch (Exception ignore) {
+            // ignore
+        }
+
+        ClientConfig config = atomicConfig.get();
+        assertEquals(expectedClusterName, config.getClusterName());
+        assertEquals("[127.0.0.1:5701, 127.0.0.1:5702]", config.getNetworkConfig().getAddresses().toString());
     }
 
     @Test

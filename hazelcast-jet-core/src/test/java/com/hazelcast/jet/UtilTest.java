@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ public class UtilTest extends JetTestSupport {
     }
 
     @Test
-    public void test_idToString() {
+    public void when_idToString() {
         assertEquals("0000-0000-0000-0000", idToString(0));
         assertEquals("0000-0000-0000-0001", idToString(1));
         assertEquals("7fff-ffff-ffff-ffff", idToString(Long.MAX_VALUE));
@@ -50,7 +50,7 @@ public class UtilTest extends JetTestSupport {
     }
 
     @Test
-    public void test_idFromString() {
+    public void when_idFromString() {
         assertEquals(0, idFromString("0000-0000-0000-0000"));
         assertEquals(1, idFromString("0000-0000-0000-0001"));
         assertEquals(Long.MAX_VALUE, idFromString("7fff-ffff-ffff-ffff"));

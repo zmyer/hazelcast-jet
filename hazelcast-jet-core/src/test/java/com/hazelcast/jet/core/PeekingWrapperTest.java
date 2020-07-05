@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,7 +25,7 @@ import com.hazelcast.jet.core.test.TestOutbox;
 import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.impl.JetEvent;
 import com.hazelcast.logging.ILogger;
-import com.hazelcast.test.HazelcastParallelParametersRunnerFactory;
+import com.hazelcast.test.HazelcastSerialParametersRunnerFactory;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -55,7 +55,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyZeroInteractions;
 
 @RunWith(Parameterized.class)
-@Parameterized.UseParametersRunnerFactory(HazelcastParallelParametersRunnerFactory.class)
+@Parameterized.UseParametersRunnerFactory(HazelcastSerialParametersRunnerFactory.class)
 public class PeekingWrapperTest {
 
     private static final JetEvent<Integer> TEST_JET_EVENT = jetEvent(123, 2);
@@ -99,7 +99,7 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekInputWithPeekingProcessor_supplier() throws Exception {
+    public void when_peekInputWithPeekingProcessorSupplier() throws Exception {
         // Given
         SupplierEx<Processor> wrappedSupplier = procSupplier(TestPeekRemoveProcessor.class);
         peekP = (toStringFn == null
@@ -112,9 +112,22 @@ public class PeekingWrapperTest {
     }
 
     @Test
-    public void when_peekInputWithPollingProcessor_supplier() throws Exception {
+    public void when_peekInputWithPollingProcessorSupplier() throws Exception {
         // Given
         SupplierEx<Processor> passThroughPSupplier = procSupplier(TestPollProcessor.class);
+        peekP = (toStringFn == null
+                ? peekInputP(passThroughPSupplier)
+                : peekInputP(toStringFn, shouldLogFn, passThroughPSupplier)
+        ).get();
+
+        // When+Then
+        assertPeekInput();
+    }
+
+    @Test
+    public void when_peekInputWithIteratingProcessorSupplier() throws Exception {
+        // Given
+        SupplierEx<Processor> passThroughPSupplier = procSupplier(TestIteratingProcessor.class);
         peekP = (toStringFn == null
                 ? peekInputP(passThroughPSupplier)
                 : peekInputP(toStringFn, shouldLogFn, passThroughPSupplier)
@@ -184,10 +197,10 @@ public class PeekingWrapperTest {
     @Test
     public void when_peekOutput_metaSupplier() throws Exception {
         // Given
-        ProcessorMetaSupplier passThroughPSupplier = ProcessorMetaSupplier.of(peekOutputProcessorSupplier());
+        ProcessorMetaSupplier sourceSupplier = ProcessorMetaSupplier.of(peekOutputProcessorSupplier());
         ProcessorMetaSupplier peekingMetaSupplier = toStringFn == null
-                ? peekOutputP(passThroughPSupplier)
-                : peekOutputP(toStringFn, shouldLogFn, passThroughPSupplier);
+                ? peekOutputP(sourceSupplier)
+                : peekOutputP(toStringFn, shouldLogFn, sourceSupplier);
         peekP = supplierFrom(peekingMetaSupplier).get();
 
         // When+Then
@@ -270,7 +283,7 @@ public class PeekingWrapperTest {
         TestOutbox outbox = new TestOutbox(1, 1);
         peekP.init(outbox, context);
 
-        Watermark wm = new Watermark(3);
+        Watermark wm = new Watermark(1);
         peekP.tryProcessWatermark(wm);
         verify(logger).info("Output to ordinal 0: " + wm);
         verify(logger).info("Output to ordinal 1: " + wm);
@@ -352,15 +365,15 @@ public class PeekingWrapperTest {
     }
 
     /**
-     * A processor that will pass through inbox to outbox using inbox.peek() + inbox.remove()
+     * A processor that will process the inbox using inbox.peek() +
+     * inbox.remove().
      */
     static class TestPeekRemoveProcessor extends TestProcessor {
         @Override
         public void process(int ordinal, @Nonnull Inbox inbox) {
             for (Object o; (o = inbox.peek()) != null; ) {
-                assertNotNull("Inbox returned null object", o);
                 assertEquals("second peek didn't return the same object", inbox.peek(), o);
-                assertEquals("remove didn't return the same object", inbox.poll(), o);
+                inbox.remove();
             }
             assertNull(inbox.peek());
             try {
@@ -377,16 +390,32 @@ public class PeekingWrapperTest {
     }
 
     /**
-     * A processor that will pass through inbox to outbox using inbox.poll()
+     * A processor that will process the inbox using inbox.poll().
      */
     static class TestPollProcessor extends TestProcessor {
         @Override
         public void process(int ordinal, @Nonnull Inbox inbox) {
-            for (Object o; (o = inbox.poll()) != null; ) {
+            while (inbox.poll() != null) {
+            }
+        }
+
+        @Override
+        public boolean tryProcessWatermark(@Nonnull Watermark watermark) {
+            return true;
+        }
+    }
+
+    /**
+     * A processor that will process the inbox using inbox.iterator() +
+     * inbox.clear().
+     */
+    static class TestIteratingProcessor extends TestProcessor {
+        @Override
+        public void process(int ordinal, @Nonnull Inbox inbox) {
+            for (Object o : inbox) {
                 assertNotNull("Inbox returned null object", o);
             }
-
-            assertNull(inbox.poll());
+            inbox.clear();
         }
 
         @Override

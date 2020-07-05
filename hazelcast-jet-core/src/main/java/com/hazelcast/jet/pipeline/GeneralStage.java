@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,15 +29,20 @@ import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.function.TriFunction;
+import com.hazelcast.jet.impl.pipeline.ComputeStageImplBase;
+import com.hazelcast.jet.impl.processor.AbstractAsyncTransformUsingServiceP;
 import com.hazelcast.map.IMap;
 import com.hazelcast.replicatedmap.ReplicatedMap;
 
 import javax.annotation.Nonnull;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 import static com.hazelcast.function.PredicateEx.alwaysTrue;
+import static com.hazelcast.jet.impl.processor.AbstractAsyncTransformUsingServiceP.DEFAULT_MAX_CONCURRENT_OPS;
+import static com.hazelcast.jet.impl.processor.AbstractAsyncTransformUsingServiceP.DEFAULT_PRESERVE_ORDER;
 
 /**
  * The common aspect of {@link BatchStage batch} and {@link StreamStage
@@ -94,7 +99,7 @@ public interface GeneralStage<T> extends Stage {
      * This sample takes a stream of sentences and outputs a stream of
      * individual words in them:
      * <pre>{@code
-     * stage.map(sentence -> traverseArray(sentence.split("\\W+")))
+     * stage.flatMap(sentence -> traverseArray(sentence.split("\\W+")))
      * }</pre>
      *
      * @param flatMapFn a stateless flatmapping function, whose result type is
@@ -265,7 +270,7 @@ public interface GeneralStage<T> extends Stage {
      * field on them by looking up from a registry:
      * <pre>{@code
      * stage.mapUsingService(
-     *     ServiceFactory.withCreateFn(jet -> new ItemDetailRegistry(jet)),
+     *     ServiceFactories.sharedService(ctx -> new ItemDetailRegistry(ctx.jetInstance())),
      *     (reg, item) -> item.setDetail(reg.fetchDetail(item))
      * )
      * }</pre>
@@ -287,13 +292,19 @@ public interface GeneralStage<T> extends Stage {
      */
     @Nonnull
     <S, R> GeneralStage<R> mapUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
     );
 
     /**
      * Asynchronous version of {@link #mapUsingService}: the {@code mapAsyncFn}
      * returns a {@code CompletableFuture<R>} instead of just {@code R}.
+     * <p>
+     * Uses default values for some extra parameters, so the maximum number
+     * of concurrent async operations per processor will be limited to
+     * {@value AbstractAsyncTransformUsingServiceP#DEFAULT_MAX_CONCURRENT_OPS} and
+     * whether or not the order of input items should be preserved will be
+     * {@value AbstractAsyncTransformUsingServiceP#DEFAULT_PRESERVE_ORDER}.
      * <p>
      * The function can return a null future or the future can return a null
      * result: in both cases it will act just like a filter.
@@ -305,9 +316,9 @@ public interface GeneralStage<T> extends Stage {
      * field on them by looking up from a registry:
      * <pre>{@code
      * stage.mapUsingServiceAsync(
-     *     ServiceFactory.withCreateFn(jet -> new ItemDetailRegistry(jet)),
+     *     ServiceFactories.sharedService(ctx -> new ItemDetailRegistry(ctx.jetInstance())),
      *     (reg, item) -> reg.fetchDetailAsync(item)
-     *                       .thenApply(detail -> item.setDetail(detail)
+     *                       .thenApply(detail -> item.setDetail(detail))
      * )
      * }</pre>
      *
@@ -324,13 +335,117 @@ public interface GeneralStage<T> extends Stage {
      * @param mapAsyncFn a stateless mapping function. Can map to null (return
      *      a null future)
      * @param <S> type of service object
-     * @param <R> the future's result type of the mapping function
+     * @param <R> the future result type of the mapping function
+     * @return the newly attached stage
+     */
+    @Nonnull
+    default <S, R> GeneralStage<R> mapUsingServiceAsync(
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
+    ) {
+        return mapUsingServiceAsync(serviceFactory, DEFAULT_MAX_CONCURRENT_OPS, DEFAULT_PRESERVE_ORDER, mapAsyncFn);
+    }
+
+    /**
+     * Asynchronous version of {@link #mapUsingService}: the {@code mapAsyncFn}
+     * returns a {@code CompletableFuture<R>} instead of just {@code R}.
+     * <p>
+     * The function can return a null future or the future can return a null
+     * result: in both cases it will act just like a filter.
+     * <p>
+     * The latency of the async call will add to the total latency of the
+     * output.
+     * <p>
+     * This sample takes a stream of stock items and sets the {@code detail}
+     * field on them by looking up from a registry:
+     * <pre>{@code
+     * stage.mapUsingServiceAsync(
+     *     ServiceFactories.sharedService(ctx -> new ItemDetailRegistry(ctx.jetInstance())),
+     *     (reg, item) -> reg.fetchDetailAsync(item)
+     *                       .thenApply(detail -> item.setDetail(detail))
+     * )
+     * }</pre>
+     *
+     * <h3>Interaction with fault-tolerant unbounded jobs</h3>
+     *
+     * If you use this stage in a fault-tolerant unbounded job, keep in mind
+     * that any state the service object maintains doesn't participate in Jet's
+     * fault tolerance protocol. If the state is local, it will be lost after a
+     * job restart; if it is saved to some durable storage, the state of that
+     * storage won't be rewound to the last checkpoint, so you'll perform
+     * duplicate updates.
+     *
+     * @param serviceFactory the service factory
+     * @param maxConcurrentOps maximum number of concurrent async operations per processor
+     * @param preserveOrder whether the ordering of the input items should be preserved
+     * @param mapAsyncFn a stateless mapping function. Can map to null (return
+     *      a null future)
+     * @param <S> type of service object
+     * @param <R> the future result type of the mapping function
      * @return the newly attached stage
      */
     @Nonnull
     <S, R> GeneralStage<R> mapUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            int maxConcurrentOps,
+            boolean preserveOrder,
             @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
+    );
+
+    /**
+     * Batched version of {@link #mapUsingServiceAsync}: {@code mapAsyncFn} takes
+     * a list of input items and returns a {@code CompletableFuture<List<R>>}.
+     * The size of the input list is limited by the given {@code maxBatchSize}.
+     * <p>
+     * The number of in-flight batches being completed asynchronously is
+     * limited to {@value ComputeStageImplBase#MAX_CONCURRENT_ASYNC_BATCHES}
+     * and this mapping operation always preserves the order of input elements.
+     * <p>
+     * This transform can perform filtering by putting {@code null} elements into
+     * the output list.
+     * <p>
+     * The latency of the async call will add to the total latency of the
+     * output.
+     * <p>
+     * This sample takes a stream of stock items and sets the {@code detail}
+     * field on them by performing batched lookups from a registry. The max
+     * size of the items to lookup is specified as {@code 100}:
+     * <pre>{@code
+     * stage.mapUsingServiceAsyncBatched(
+     *     ServiceFactories.sharedService(ctx -> new ItemDetailRegistry(ctx.jetInstance())),
+     *     100,
+     *     (reg, itemList) -> reg
+     *             .fetchDetailsAsync(itemList)
+     *             .thenApply(detailList -> {
+     *                 for (int i = 0; i < itemList.size(); i++) {
+     *                     itemList.get(i).setDetail(detailList.get(i))
+     *                 }
+     *             })
+     * )
+     * }</pre>
+     *
+     * <h3>Interaction with fault-tolerant unbounded jobs</h3>
+     *
+     * If you use this stage in a fault-tolerant unbounded job, keep in mind
+     * that any state the service object maintains doesn't participate in Jet's
+     * fault tolerance protocol. If the state is local, it will be lost after a
+     * job restart; if it is saved to some durable storage, the state of that
+     * storage won't be rewound to the last checkpoint, so you'll perform
+     * duplicate updates.
+     *
+     * @param serviceFactory the service factory
+     * @param maxBatchSize max size of the input list
+     * @param mapAsyncFn a stateless mapping function
+     * @param <S> type of service object
+     * @param <R> the future result type of the mapping function
+     * @return the newly attached stage
+     * @since 4.0
+     */
+    @Nonnull
+    <S, R> GeneralStage<R> mapUsingServiceAsyncBatched(
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            int maxBatchSize,
+            @Nonnull BiFunctionEx<? super S, ? super List<T>, ? extends CompletableFuture<List<R>>> mapAsyncFn
     );
 
     /**
@@ -344,7 +459,7 @@ public interface GeneralStage<T> extends Stage {
      * about their contents, and keeps only photos of cats:
      * <pre>{@code
      * photos.filterUsingService(
-     *     ServiceFactory.withCreateFn(jet -> new ImageClassifier(jet)),
+     *     ServiceFactories.sharedService(ctx -> new ImageClassifier(ctx.jetInstance())),
      *     (classifier, photo) -> classifier.classify(photo).equals("cat")
      * )
      * }</pre>
@@ -365,48 +480,8 @@ public interface GeneralStage<T> extends Stage {
      */
     @Nonnull
     <S> GeneralStage<T> filterUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull BiPredicateEx<? super S, ? super T> filterFn
-    );
-
-    /**
-     * Asynchronous version of {@link #filterUsingService}: the {@code
-     * filterAsyncFn} returns a {@code CompletableFuture<Boolean>} instead of
-     * just a {@code boolean}.
-     * <p>
-     * The function must not return a null future.
-     * <p>
-     * The latency of the async call will add to the total latency of the
-     * output.
-     * <p>
-     * This sample takes a stream of photos, uses an image classifier to reason
-     * about their contents, and keeps only photos of cats:
-     * <pre>{@code
-     * photos.filterUsingServiceAsync(
-     *     ServiceFactory.withCreateFn(jet -> new ImageClassifier(jet)),
-     *     (classifier, photo) -> reg.classifyAsync(photo)
-     *                               .thenApply(it -> it.equals("cat"))
-     * )
-     * }</pre>
-     *
-     * <h3>Interaction with fault-tolerant unbounded jobs</h3>
-     *
-     * If you use this stage in a fault-tolerant unbounded job, keep in mind
-     * that any state the service object maintains doesn't participate in Jet's
-     * fault tolerance protocol. If the state is local, it will be lost after a
-     * job restart; if it is saved to some durable storage, the state of that
-     * storage won't be rewound to the last checkpoint, so you'll perform
-     * duplicate updates.
-     *
-     * @param serviceFactory the service factory
-     * @param filterAsyncFn a stateless filtering function
-     * @param <S> type of service object
-     * @return the newly attached stage
-     */
-    @Nonnull
-    <S> GeneralStage<T> filterUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
     );
 
     /**
@@ -421,7 +496,7 @@ public interface GeneralStage<T> extends Stage {
      * of all the parts that go into making them:
      * <pre>{@code
      * StreamStage<Part> parts = products.flatMapUsingService(
-     *     ServiceFactory.withCreateFn(jet -> new PartRegistryCtx()),
+     *     ServiceFactories.sharedService(ctx -> new PartRegistryCtx()),
      *     (registry, product) -> Traversers.traverseIterable(
      *                                registry.fetchParts(product))
      * );
@@ -446,61 +521,14 @@ public interface GeneralStage<T> extends Stage {
      */
     @Nonnull
     <S, R> GeneralStage<R> flatMapUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<R>> flatMapFn
     );
 
     /**
-     * Asynchronous version of {@link #flatMapUsingService}: the {@code
-     * flatMapAsyncFn} returns a {@code CompletableFuture<Traverser<R>>}
-     * instead of just {@code Traverser<R>}.
-     * <p>
-     * The function can return a null future or the future can return a null
-     * traverser: in both cases it will act just like a filter.
-     * <p>
-     * The latency of the async call will add to the total latency of the
-     * output.
-     * <p>
-     * This sample takes a stream of products and outputs an "exploded" stream
-     * of all the parts that go into making them:
-     * <pre>{@code
-     * StreamStage<Part> parts = products.flatMapUsingServiceAsync(
-     *     ServiceFactory.withCreateFn(jet -> new PartRegistryCtx()),
-     *     (registry, product) -> registry
-     *          .fetchPartsAsync(product)
-     *          .thenApply(parts -> Traversers.traverseIterable(parts))
-     * );
-     * }</pre>
-     *
-     * <h3>Interaction with fault-tolerant unbounded jobs</h3>
-     *
-     * If you use this stage in a fault-tolerant unbounded job, keep in mind
-     * that any state the service object maintains doesn't participate in Jet's
-     * fault tolerance protocol. If the state is local, it will be lost after a
-     * job restart; if it is saved to some durable storage, the state of that
-     * storage won't be rewound to the last checkpoint, so you'll perform
-     * duplicate updates.
-     *
-     * @param serviceFactory the service factory
-     * @param flatMapAsyncFn a stateless flatmapping function. Can map to null
-     *      (return a null future). The future must not return a null
-     *      traverser, but can return an {@linkplain Traversers#empty() empty
-     *      traverser}.
-     * @param <S> type of service object
-     * @param <R> the type of the returned stage
-     * @return the newly attached stage
-     */
-    @Nonnull
-    <S, R> GeneralStage<R> flatMapUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Traverser<R>>>
-                    flatMapAsyncFn
-    );
-
-    /**
-     * Attaches a mapping stage where for each item a lookup in the
-     * {@code ReplicatedMap} with the supplied name is performed and the
-     * result of the lookup is merged with the item and emitted.
+     * Attaches a mapping stage where for each item a lookup in the {@code
+     * ReplicatedMap} with the supplied name is performed and the result of the
+     * lookup is merged with the item and emitted.
      * <p>
      * If the result of the mapping is {@code null}, it emits nothing.
      * Therefore this stage can be used to implement filtering semantics as
@@ -524,8 +552,8 @@ public interface GeneralStage<T> extends Stage {
      * }</pre>
      *
      * @param mapName name of the {@code ReplicatedMap}
-     * @param lookupKeyFn a function which returns the key to look up in the
-     *          map. Must not return null
+     * @param lookupKeyFn a function which returns the key to look up in the map. Must not return
+     *                    null
      * @param mapFn the mapping function
      * @param <K> type of the key in the {@code ReplicatedMap}
      * @param <V> type of the value in the {@code ReplicatedMap}
@@ -544,12 +572,13 @@ public interface GeneralStage<T> extends Stage {
     }
 
     /**
-     * Attaches a mapping stage where for each item a lookup in the
-     * supplied {@code ReplicatedMap} is performed and the result of the
-     * lookup is merged with the item and emitted.
+     * Attaches a mapping stage where for each item a lookup in the supplied
+     * {@code ReplicatedMap} is performed and the result of the lookup is
+     * merged with the item and emitted.
      * <p>
      * If the result of the mapping is {@code null}, it emits nothing.
-     * Therefore this stage can be used to implement filtering semantics as well.
+     * Therefore this stage can be used to implement filtering semantics as
+     * well.
      * <p>
      * The mapping logic is equivalent to:
      * <pre>{@code
@@ -569,8 +598,8 @@ public interface GeneralStage<T> extends Stage {
      * }</pre>
      *
      * @param replicatedMap the {@code ReplicatedMap} to lookup from
-     * @param lookupKeyFn a function which returns the key to look up in the
-     *          map. Must not return null
+     * @param lookupKeyFn a function which returns the key to look up in the map. Must not return
+     *                    null.
      * @param mapFn the mapping function
      * @param <K> type of the key in the {@code ReplicatedMap}
      * @param <V> type of the value in the {@code ReplicatedMap}
@@ -587,16 +616,16 @@ public interface GeneralStage<T> extends Stage {
     }
 
     /**
-     * Attaches a mapping stage where for each item a lookup in the
-     * {@code IMap} with the supplied name is performed and the
-     * result of the lookup is merged with the item and emitted.
+     * Attaches a mapping stage where for each item a lookup in the {@code IMap}
+     * with the supplied name is performed and the result of the lookup is
+     * merged with the item and emitted.
      * <p>
      * If the result of the mapping is {@code null}, it emits nothing.
-     * Therefore this stage can be used to implement filtering semantics as well.
+     * Therefore this stage can be used to implement filtering semantics as
+     * well.
      * <p>
      * The mapping logic is equivalent to:
-     *
-     * <pre>{@code
+     *<pre>{@code
      * K key = lookupKeyFn.apply(item);
      * V value = map.get(key);
      * return mapFn.apply(item, value);
@@ -612,12 +641,12 @@ public interface GeneralStage<T> extends Stage {
      * )
      * }</pre>
      *
-     * See also {@link GeneralStageWithKey#mapUsingIMap} for a partitioned version of
-     * this operation.
+     * See also {@link GeneralStageWithKey#mapUsingIMap} for a partitioned
+     * version of this operation.
      *
      * @param mapName name of the {@code IMap}
-     * @param lookupKeyFn a function which returns the key to look up in the
-     *          map. Must not return null
+     * @param lookupKeyFn a function which returns the key to look up in the map. Must not return
+     *                    null
      * @param mapFn the mapping function
      * @param <K> type of the key in the {@code IMap}
      * @param <V> type of the value in the {@code IMap}
@@ -630,18 +659,23 @@ public interface GeneralStage<T> extends Stage {
             @Nonnull FunctionEx<? super T, ? extends K> lookupKeyFn,
             @Nonnull BiFunctionEx<? super T, ? super V, ? extends R> mapFn
     ) {
-        GeneralStage<R> res = mapUsingServiceAsync(ServiceFactories.<K, V>iMapService(mapName), (map, t) ->
-                map.getAsync(lookupKeyFn.apply(t)).toCompletableFuture().thenApply(e -> mapFn.apply(t, e)));
+        GeneralStage<R> res = mapUsingServiceAsync(
+                ServiceFactories.<K, V>iMapService(mapName),
+                DEFAULT_MAX_CONCURRENT_OPS,
+                DEFAULT_PRESERVE_ORDER,
+                (map, t) -> map.getAsync(lookupKeyFn.apply(t)).toCompletableFuture().thenApply(e -> mapFn.apply(t, e))
+        );
         return res.setName("mapUsingIMap");
     }
 
     /**
-     * Attaches a mapping stage where for each item a lookup in the
-     * supplied {@code IMap} is performed and the result of the
-     * lookup is merged with the item and emitted.
+     * Attaches a mapping stage where for each item a lookup in the supplied
+     * {@code IMap} is performed and the result of the lookup is merged with
+     * the item and emitted.
      * <p>
      * If the result of the mapping is {@code null}, it emits nothing.
-     * Therefore this stage can be used to implement filtering semantics as well.
+     * Therefore this stage can be used to implement filtering semantics as
+     * well.
      * <p>
      * The mapping logic is equivalent to:
      *
@@ -661,12 +695,12 @@ public interface GeneralStage<T> extends Stage {
      * )
      * }</pre>
      *
-     * See also {@link GeneralStageWithKey#mapUsingIMap} for a partitioned version of
-     * this operation.
+     * See also {@link GeneralStageWithKey#mapUsingIMap} for a partitioned
+     * version of this operation.
      *
      * @param iMap the {@code IMap} to lookup from
-     * @param lookupKeyFn a function which returns the key to look up in the
-     *          map. Must not return null
+     * @param lookupKeyFn a function which returns the key to look up in the map. Must not return
+     *                    null.
      * @param mapFn the mapping function
      * @param <K> type of the key in the {@code IMap}
      * @param <V> type of the value in the {@code IMap}
@@ -719,6 +753,49 @@ public interface GeneralStage<T> extends Stage {
     );
 
     /**
+     * Attaches to both this and the supplied stage an inner hash-joining stage
+     * and returns it. This stage plays the role of the <em>primary stage</em>
+     * in the hash-join. Please refer to the {@link com.hazelcast.jet.pipeline
+     * package javadoc} for a detailed description of the hash-join transform.
+     * <p>
+     * This sample joins a stream of users to a stream of countries and outputs
+     * a stream of users with the {@code country} field set:
+     * <pre>{@code
+     * // Types of the input stages:
+     * BatchStage<User> users;
+     * BatchStage<Map.Entry<Long, Country>> idAndCountry;
+     *
+     * users.innerHashJoin(
+     *     idAndCountry,
+     *     JoinClause.joinMapEntries(User::getCountryId),
+     *     (user, country) -> user.setCountry(country)
+     * )
+     * }</pre>
+     *
+     * <p>
+     * This method is similar to {@link #hashJoin} method, but it guarantees
+     * that both input items will be not-null. Nulls will be filtered out
+     * before reaching {@code #mapToOutputFn}.
+     *
+     * @param stage1        the stage to hash-join with this one
+     * @param joinClause1   specifies how to join the two streams
+     * @param mapToOutputFn function to map the joined items to the output value
+     * @param <K>           the type of the join key
+     * @param <T1_IN>       the type of {@code stage1} items
+     * @param <T1>          the result type of projection on {@code stage1} items
+     * @param <R>           the resulting output type
+     * @return the newly attached stage
+     *
+     * @since 4.1
+     */
+    @Nonnull
+    <K, T1_IN, T1, R> GeneralStage<R> innerHashJoin(
+            @Nonnull BatchStage<T1_IN> stage1,
+            @Nonnull JoinClause<K, ? super T, ? super T1_IN, ? extends T1> joinClause1,
+            @Nonnull BiFunctionEx<T, T1, R> mapToOutputFn
+    );
+
+    /**
      * Attaches to this and the two supplied stages a hash-joining stage and
      * returns it. This stage plays the role of the <em>primary stage</em> in
      * the hash-join. Please refer to the {@link com.hazelcast.jet.pipeline
@@ -733,7 +810,7 @@ public interface GeneralStage<T> extends Stage {
      * BatchStage<Map.Entry<Long, Country>> idAndCountry;
      * BatchStage<Map.Entry<Long, Company>> idAndCompany;
      *
-     * users.hashJoin(
+     * users.hashJoin2(
      *     idAndCountry, JoinClause.joinMapEntries(User::getCountryId),
      *     idAndCompany, JoinClause.joinMapEntries(User::getCompanyId),
      *     (user, country, company) -> user.setCountry(country).setCompany(company)
@@ -756,6 +833,58 @@ public interface GeneralStage<T> extends Stage {
      */
     @Nonnull
     <K1, K2, T1_IN, T2_IN, T1, T2, R> GeneralStage<R> hashJoin2(
+            @Nonnull BatchStage<T1_IN> stage1,
+            @Nonnull JoinClause<K1, ? super T, ? super T1_IN, ? extends T1> joinClause1,
+            @Nonnull BatchStage<T2_IN> stage2,
+            @Nonnull JoinClause<K2, ? super T, ? super T2_IN, ? extends T2> joinClause2,
+            @Nonnull TriFunction<T, T1, T2, R> mapToOutputFn
+    );
+
+    /**
+     * Attaches to this and the two supplied stages a inner hash-joining stage
+     * and returns it. This stage plays the role of the <em>primary stage</em>
+     * in the hash-join. Please refer to the {@link com.hazelcast.jet.pipeline
+     * package javadoc} for a detailed description of the hash-join transform.
+     * <p>
+     * This sample joins a stream of users to streams of countries and
+     * companies, and outputs a stream of users with the {@code country} and
+     * {@code company} fields set:
+     * <pre>{@code
+     * // Types of the input stages:
+     * BatchStage<User> users;
+     * BatchStage<Map.Entry<Long, Country>> idAndCountry;
+     * BatchStage<Map.Entry<Long, Company>> idAndCompany;
+     *
+     * users.innerHashJoin2(
+     *     idAndCountry, JoinClause.joinMapEntries(User::getCountryId),
+     *     idAndCompany, JoinClause.joinMapEntries(User::getCompanyId),
+     *     (user, country, company) -> user.setCountry(country).setCompany(company)
+     * )
+     * }</pre>
+     *
+     * <p>
+     * This method is similar to {@link #hashJoin2} method, but it guarantees
+     * that both input items will be not-null. Nulls will be filtered out
+     * before reaching {@code #mapToOutputFn}.
+     *
+     * @param stage1        the first stage to join
+     * @param joinClause1   specifies how to join with {@code stage1}
+     * @param stage2        the second stage to join
+     * @param joinClause2   specifies how to join with {@code stage2}
+     * @param mapToOutputFn function to map the joined items to the output value
+     * @param <K1>          the type of key for {@code stage1}
+     * @param <T1_IN>       the type of {@code stage1} items
+     * @param <T1>          the result type of projection of {@code stage1} items
+     * @param <K2>          the type of key for {@code stage2}
+     * @param <T2_IN>       the type of {@code stage2} items
+     * @param <T2>          the result type of projection of {@code stage2} items
+     * @param <R>           the resulting output type
+     * @return the newly attached stage
+     *
+     * @since 4.1
+     */
+    @Nonnull
+    <K1, K2, T1_IN, T2_IN, T1, T2, R> GeneralStage<R> innerHashJoin2(
             @Nonnull BatchStage<T1_IN> stage1,
             @Nonnull JoinClause<K1, ? super T, ? super T1_IN, ? extends T1> joinClause1,
             @Nonnull BatchStage<T2_IN> stage2,
@@ -813,6 +942,127 @@ public interface GeneralStage<T> extends Stage {
      */
     @Nonnull
     <K> GeneralStageWithKey<T, K> groupingKey(@Nonnull FunctionEx<? super T, ? extends K> keyFn);
+
+    /**
+     * Returns a new stage that applies data rebalancing to the output of this
+     * stage. By default, Jet prefers to process the data locally, on the
+     * cluster member where it was originally received. This is generally a
+     * good option because it eliminates unneeded network traffic. However, if
+     * the data volume is highly skewed across members, for example when using
+     * a non-distributed data source, you can tell Jet to rebalance the data by
+     * sending some to the other members.
+     * <p>
+     * To implement rebalancing, Jet uses a <em>distributed unicast</em> data
+     * routing pattern on the DAG edge from this stage's vertex to the next one.
+     * It routes the data in a round-robin fashion, sending each item to the
+     * next member (member list includes the local one as well). If a given
+     * member's queue is overloaded and applying backpressure, it skips it and
+     * retries in the next round. With this scheme you get perfectly balanced
+     * item counts on each member under light load, but under heavier load it
+     * favors throughput: if the network becomes a bottleneck, most data may
+     * stay local.
+     * <p>
+     * These are some basic invariants:
+     * <ol><li>
+     *     The rebalancing stage does not transform data, it just changes the
+     *     physical layout of computation.
+     * </li><li>
+     *     If rebalancing is inapplicable due to the nature of the downstream
+     *     stage (for example, a non-parallelizable operation like stateful
+     *     mapping), the rebalancing stage is removed from the execution plan.
+     * </li><li>
+     *     If the downstream stage already does rebalancing for correctness (e.g.,
+     *     grouping by key implies partitioning by that key), this rebalancing
+     *     stage is optimized away.
+     * </li></ol>
+     * Aggregation is a special case because it is implemented with two
+     * vertices at the Core DAG level. The first vertex accumulates local
+     * partial results and the second one combines them globally. There are two
+     * cases:
+     * <ol><li>
+     *     {@code stage.rebalance().groupingKey(keyFn).aggregate(...)}: here Jet
+     *     removes the first (local) aggregation vertex and goes straight to
+     *     distributed aggregation without combining. The data is rebalanced
+     *     through partitioning.
+     * </li><li>
+     *     {@code stage.rebalance().aggregate(...)}: in this case the second vertex
+     *     is non-parallelizable and must execute on a single member. Therefore Jet
+     *     keeps both vertices and applies rebalancing before the first one.
+     * </li></ol>
+     *
+     * @return a new stage using the same transform as this one, only with a
+     *         rebalancing flag raised that will affect data routing into the next
+     *         stage.
+     * @since 4.2
+     */
+    @Nonnull
+    GeneralStage<T> rebalance();
+
+    /**
+     * Returns a new stage that applies data rebalancing to the output of this
+     * stage. By default, Jet prefers to process the data locally, on the
+     * cluster member where it was originally received. This is generally a
+     * good option because it eliminates unneeded network traffic. However, if
+     * the data volume is highly skewed across members, for example when using
+     * a non-distributed data source, you can tell Jet to rebalance the data by
+     * sending some to the other members.
+     * <p>
+     * With partitioned rebalancing, you supply your own function that decides
+     * (indirectly) where to send each data item. Jet first applies your
+     * partition key function to the data item and then its own partitioning
+     * function to the key. The result is that all items with the same key go
+     * to the same Jet processor and different keys are distributed
+     * pseudo-randomly across the processors.
+     * <p>
+     * Compared to non-partitioned balancing, partitioned balancing enforces
+     * the same data distribution across members regardless of any bottlenecks.
+     * If a given member is overloaded and applies backpressure, Jet doesn't
+     * reroute the data to other members, but propagates the backpressure to
+     * the upstream. If you choose a partitioning key that has a skewed
+     * distribution (some keys being much more frequent), this will result in
+     * an imbalanced data flow.
+     * <p>
+     * These are some basic invariants:
+     * <ol><li>
+     *     The rebalancing stage does not transform data, it just changes the
+     *     physical layout of computation.
+     * </li><li>
+     *     If rebalancing is inapplicable due to the nature of the downstream
+     *     stage (for example, a non-parallelizable operation like stateful
+     *     mapping), the rebalancing stage is removed from the execution plan.
+     * </li><li>
+     *     If the downstream stage already does rebalancing for correctness (e.g.,
+     *     grouping by key implies partitioning by that key), this rebalancing
+     *     stage is optimized away.
+     * </li></ol>
+     * Aggregation is a special case because it is implemented with two
+     * vertices at the Core DAG level. The first vertex accumulates local
+     * partial results and the second one combines them globally. There are two
+     * cases:
+     * <ol><li>
+     *     {@code stage.rebalance(rebalanceKeyFn).groupingKey(groupKeyFn).aggregate(...)}:
+     *     here Jet removes the first (local) aggregation vertex and goes straight
+     *     to distributed aggregation without combining. Grouped aggregation
+     *     requires the data to be partitioned by the grouping key and therefore
+     *     Jet must ignore the rebalancing key you supplied. We recommend that you
+     *     remove it and use the parameterless {@link #rebalance() stage.rebalance()}
+     *     because the end result is identical.
+     * </li><li>
+     *     {@code stage.rebalance().aggregate(...)}: in this case the second vertex
+     *     is non-parallelizable and must execute on a single member. Therefore Jet
+     *     keeps both vertices and applies partitioned rebalancing before the first
+     *     one.
+     * </li></ol>
+     *
+     * @param keyFn the partitioning key function
+     * @param <K> type of the key
+     * @return a new stage using the same transform as this one, only with a
+     *         rebalancing flag raised that will affect data routing into the next
+     *         stage.
+     * @since 4.2
+     */
+    @Nonnull
+    <K> GeneralStage<T> rebalance(@Nonnull FunctionEx<? super T, ? extends K> keyFn);
 
     /**
      * Adds a timestamp to each item in the stream using the supplied function
@@ -1019,6 +1269,9 @@ public interface GeneralStage<T> extends Stage {
     @Nonnull
     <R> GeneralStage<R> customTransform(
             @Nonnull String stageName, @Nonnull ProcessorMetaSupplier procSupplier);
+
+    @Nonnull @Override
+    GeneralStage<T> setLocalParallelism(int localParallelism);
 
     @Nonnull @Override
     GeneralStage<T> setName(@Nonnull String name);

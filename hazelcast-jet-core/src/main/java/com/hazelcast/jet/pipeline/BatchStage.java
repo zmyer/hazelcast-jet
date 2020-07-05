@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ import com.hazelcast.map.IMap;
 import com.hazelcast.replicatedmap.ReplicatedMap;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static com.hazelcast.function.Functions.wholeItem;
@@ -57,8 +57,14 @@ public interface BatchStage<T> extends GeneralStage<T> {
     /**
      * {@inheritDoc}
      */
-    @Nonnull
+    @Nonnull @Override
     <K> BatchStageWithKey<T, K> groupingKey(@Nonnull FunctionEx<? super T, ? extends K> keyFn);
+
+    @Nonnull @Override
+    <K> BatchStage<T> rebalance(@Nonnull FunctionEx<? super T, ? extends K> keyFn);
+
+    @Nonnull @Override
+    BatchStage<T> rebalance();
 
     @Nonnull @Override
     <R> BatchStage<R> map(@Nonnull FunctionEx<? super T, ? extends R> mapFn);
@@ -92,39 +98,43 @@ public interface BatchStage<T> extends GeneralStage<T> {
 
     @Nonnull @Override
     <S, R> BatchStage<R> mapUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
     );
 
     @Nonnull @Override
+    default <S, R> BatchStage<R> mapUsingServiceAsync(
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
+    ) {
+        return (BatchStage<R>) GeneralStage.super.mapUsingServiceAsync(serviceFactory, mapAsyncFn);
+    }
+
+    @Nonnull @Override
     <S, R> BatchStage<R> mapUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            int maxConcurrentOps,
+            boolean preserveOrder,
             @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<R>> mapAsyncFn
     );
 
     @Nonnull @Override
     <S> BatchStage<T> filterUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull BiPredicateEx<? super S, ? super T> filterFn
     );
 
     @Nonnull @Override
-    <S> BatchStage<T> filterUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Boolean>> filterAsyncFn
-    );
-
-    @Nonnull @Override
     <S, R> BatchStage<R> flatMapUsingService(
-            @Nonnull ServiceFactory<S> serviceFactory,
+            @Nonnull ServiceFactory<?, S> serviceFactory,
             @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<R>> flatMapFn
     );
 
     @Nonnull @Override
-    <S, R> BatchStage<R> flatMapUsingServiceAsync(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull BiFunctionEx<? super S, ? super T, ? extends CompletableFuture<Traverser<R>>>
-                    flatMapAsyncFn
+    <S, R> BatchStage<R> mapUsingServiceAsyncBatched(
+            @Nonnull ServiceFactory<?, S> serviceFactory,
+            int maxBatchSize,
+            @Nonnull BiFunctionEx<? super S, ? super List<T>, ? extends CompletableFuture<List<R>>> mapAsyncFn
     );
 
     @Nonnull @Override
@@ -194,7 +204,23 @@ public interface BatchStage<T> extends GeneralStage<T> {
     );
 
     @Nonnull @Override
+    <K, T1_IN, T1, R> BatchStage<R> innerHashJoin(
+            @Nonnull BatchStage<T1_IN> stage1,
+            @Nonnull JoinClause<K, ? super T, ? super T1_IN, ? extends T1> joinClause1,
+            @Nonnull BiFunctionEx<T, T1, R> mapToOutputFn
+    );
+
+    @Nonnull @Override
     <K1, K2, T1_IN, T2_IN, T1, T2, R> BatchStage<R> hashJoin2(
+            @Nonnull BatchStage<T1_IN> stage1,
+            @Nonnull JoinClause<K1, ? super T, ? super T1_IN, ? extends T1> joinClause1,
+            @Nonnull BatchStage<T2_IN> stage2,
+            @Nonnull JoinClause<K2, ? super T, ? super T2_IN, ? extends T2> joinClause2,
+            @Nonnull TriFunction<T, T1, T2, R> mapToOutputFn
+    );
+
+    @Nonnull @Override
+    <K1, K2, T1_IN, T2_IN, T1, T2, R> BatchStage<R> innerHashJoin2(
             @Nonnull BatchStage<T1_IN> stage1,
             @Nonnull JoinClause<K1, ? super T, ? super T1_IN, ? extends T1> joinClause1,
             @Nonnull BatchStage<T2_IN> stage2,
@@ -537,5 +563,5 @@ public interface BatchStage<T> extends GeneralStage<T> {
     BatchStage<T> setLocalParallelism(int localParallelism);
 
     @Nonnull @Override
-    BatchStage<T> setName(@Nullable String name);
+    BatchStage<T> setName(@Nonnull String name);
 }

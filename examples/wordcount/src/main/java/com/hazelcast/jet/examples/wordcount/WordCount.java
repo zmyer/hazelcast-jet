@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
 import com.hazelcast.jet.pipeline.Sources;
-import com.hazelcast.map.IMap;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -29,7 +28,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -64,7 +62,7 @@ public class WordCount {
         return p;
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         new WordCount().go();
     }
 
@@ -74,27 +72,21 @@ public class WordCount {
     private void go() {
         try {
             setup();
-            System.out.print("\nCounting words... ");
+            System.out.println("\nCounting words... ");
             long start = System.nanoTime();
             Pipeline p = buildPipeline();
             jet.newJob(p).join();
-            System.out.print("done in " + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) + " milliseconds.");
-            printResults();
-            IMap<String, Long> counts = jet.getMap(COUNTS);
-            if (counts.get("the") != 27_843) {
-                throw new AssertionError("Wrong count of 'the'");
-            }
-            System.out.println("Count of 'the' is valid");
+            System.out.println("done in " + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) + " milliseconds.");
+            Map<String, Long> results = jet.getMap(COUNTS);
+            checkResults(results);
+            printResults(results);
         } finally {
             Jet.shutdownAll();
         }
     }
 
     private void setup() {
-        System.out.println("Creating Jet instance 1");
-        jet = Jet.newJetInstance();
-        System.out.println("Creating Jet instance 2");
-        Jet.newJetInstance();
+        jet = Jet.bootstrappedInstance();
         System.out.println("Loading The Complete Works of William Shakespeare");
         try {
             long[] lineNum = {0};
@@ -109,17 +101,27 @@ public class WordCount {
         }
     }
 
-    private void printResults() {
+    private static Map<String, Long> checkResults(Map<String, Long> counts) {
+        if (counts.get("the") != 27_843) {
+            throw new AssertionError("Wrong count of 'the'");
+        }
+        System.out.println("Count of 'the' is valid");
+        return counts;
+    }
+
+    private static void printResults(Map<String, Long> counts) {
         final int limit = 100;
-        System.out.format(" Top %d entries are:%n", limit);
-        final Map<String, Long> counts = jet.getMap(COUNTS);
-        System.out.println("/-------+---------\\");
-        System.out.println("| Count | Word    |");
-        System.out.println("|-------+---------|");
+
+        StringBuilder sb = new StringBuilder(String.format(" Top %d entries are:%n", limit));
+        sb.append("/-------+---------\\\n");
+        sb.append("| Count | Word    |\n");
+        sb.append("|-------+---------|\n");
         counts.entrySet().stream()
-              .sorted(comparingLong(Entry<String, Long>::getValue).reversed())
-              .limit(limit)
-              .forEach(e -> System.out.format("|%6d | %-8s|%n", e.getValue(), e.getKey()));
-        System.out.println("\\-------+---------/");
+                .sorted(comparingLong(Map.Entry<String, Long>::getValue).reversed())
+                .limit(limit)
+                .forEach(e -> sb.append(String.format("|%6d | %-8s|%n", e.getValue(), e.getKey())));
+        sb.append("\\-------+---------/\n");
+
+        System.out.println(sb.toString());
     }
 }

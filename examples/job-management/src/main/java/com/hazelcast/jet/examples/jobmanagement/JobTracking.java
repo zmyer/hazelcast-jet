@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -70,7 +70,8 @@ public class JobTracking {
             System.out.println("Job is cancelled.");
         }
 
-        // let's query the job status again. Now the status is COMPLETED
+        // Let's query the job status again. Now the status is FAILED.
+        // It is expected status for streaming jobs when they are cancelled.
         System.out.println("Status: " + trackedJob1.getStatus());
 
         // running or completed jobs can be also queried by name

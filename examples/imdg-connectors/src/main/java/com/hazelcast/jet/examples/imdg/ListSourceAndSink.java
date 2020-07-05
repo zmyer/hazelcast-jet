@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,8 +39,7 @@ public class ListSourceAndSink {
     private static final String INPUT_LIST = "inputList";
     private static final String RESULT_LIST = "resultList";
 
-    public static void main(String[] args) throws Exception {
-        System.setProperty("hazelcast.logging.type", "log4j");
+    public static void main(String[] args) {
         JetInstance jet = Jet.newJetInstance();
 
         try {

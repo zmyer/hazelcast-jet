@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,9 +60,9 @@ import java.util.function.Supplier;
 
 import static com.hazelcast.function.FunctionEx.identity;
 import static com.hazelcast.jet.core.TimestampKind.EVENT;
+import static com.hazelcast.jet.impl.util.Util.toList;
 import static java.util.Collections.nCopies;
 import static java.util.Collections.singletonList;
-import static java.util.stream.Collectors.toList;
 
 /**
  * Static utility class with factory methods for Jet processors. These are
@@ -577,9 +577,7 @@ public final class Processors {
     ) {
         return () -> new SlidingWindowP<>(
                 keyFns,
-                timestampFns.stream()
-                            .map(f -> toFrameTimestampFn(f, timestampKind, winPolicy))
-                            .collect(toList()),
+                toList(timestampFns, f -> toFrameTimestampFn(f, timestampKind, winPolicy)),
                 winPolicy,
                 earlyResultsPeriod,
                 aggrOp,
@@ -853,8 +851,7 @@ public final class Processors {
      * Therefore it can be used to implement filtering semantics as well.
      * <p>
      * Unlike {@link #mapStatefulP} (with the "{@code Keyed}" part),
-     * this method creates one service object per processor (or per member, if
-     * {@linkplain ServiceFactory#withLocalSharing() shared}).
+     * this method creates one service object per processor.
      * <p>
      * While it's allowed to store some local state in the service object, it
      * won't be saved to the snapshot and will misbehave in a fault-tolerant
@@ -862,16 +859,17 @@ public final class Processors {
      *
      * @param serviceFactory the service factory
      * @param mapFn a stateless mapping function
+     * @param <C> type of context object
      * @param <S> type of service object
      * @param <T> type of received item
      * @param <R> type of emitted item
      */
     @Nonnull
-    public static <S, T, R> ProcessorSupplier mapUsingServiceP(
-            @Nonnull ServiceFactory<S> serviceFactory,
+    public static <C, S, T, R> ProcessorSupplier mapUsingServiceP(
+            @Nonnull ServiceFactory<C, S> serviceFactory,
             @Nonnull BiFunctionEx<? super S, ? super T, ? extends R> mapFn
     ) {
-        return TransformUsingServiceP.<S, T, R>supplier(serviceFactory, (singletonTraverser, context, item) -> {
+        return TransformUsingServiceP.<C, S, T, R>supplier(serviceFactory, (singletonTraverser, context, item) -> {
             singletonTraverser.accept(mapFn.apply(context, item));
             return singletonTraverser;
         });
@@ -891,19 +889,31 @@ public final class Processors {
      * edge, you can use any key, for example {@code Object::hashCode}.
      *
      * @param serviceFactory the service factory
+     * @param maxConcurrentOps maximum number of concurrent async operations per processor
+     * @param preserveOrder whether the async responses are ordered or not
      * @param extractKeyFn a function to extract snapshot keys
      * @param mapAsyncFn a stateless mapping function
+     * @param <C> type of context object
      * @param <S> type of service object
      * @param <T> type of received item
+     * @param <K> type of key
+     * @param <R> type of result item
      */
     @Nonnull
-    public static <S, T, K, R> ProcessorSupplier mapUsingServiceAsyncP(
-            @Nonnull ServiceFactory<S> serviceFactory,
+    public static <C, S, T, K, R> ProcessorSupplier mapUsingServiceAsyncP(
+            @Nonnull ServiceFactory<C, S> serviceFactory,
+            int maxConcurrentOps,
+            boolean preserveOrder,
             @Nonnull FunctionEx<T, K> extractKeyFn,
             @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<R>> mapAsyncFn
     ) {
-        return flatMapUsingServiceAsyncP(serviceFactory, extractKeyFn,
-                (s, t) -> mapAsyncFn.apply(s, t).thenApply(Traversers::singleton));
+        BiFunctionEx<S, T, CompletableFuture<Traverser<R>>> flatMapAsyncFn = (s, t) ->
+                mapAsyncFn.apply(s, t).thenApply(Traversers::singleton);
+        return preserveOrder
+                ? AsyncTransformUsingServiceOrderedP.supplier(
+                        serviceFactory, maxConcurrentOps, flatMapAsyncFn)
+                : AsyncTransformUsingServiceUnorderedP.supplier(
+                        serviceFactory, maxConcurrentOps, flatMapAsyncFn, extractKeyFn);
     }
 
     /**
@@ -918,47 +928,19 @@ public final class Processors {
      *
      * @param serviceFactory the service factory
      * @param filterFn a stateless predicate to test each received item against
+     * @param <C> type of context object
      * @param <S> type of service object
      * @param <T> type of received item
      */
     @Nonnull
-    public static <S, T> ProcessorSupplier filterUsingServiceP(
-            @Nonnull ServiceFactory<S> serviceFactory,
+    public static <C, S, T> ProcessorSupplier filterUsingServiceP(
+            @Nonnull ServiceFactory<C, S> serviceFactory,
             @Nonnull BiPredicateEx<? super S, ? super T> filterFn
     ) {
-        return TransformUsingServiceP.<S, T, T>supplier(serviceFactory, (singletonTraverser, context, item) -> {
+        return TransformUsingServiceP.<C, S, T, T>supplier(serviceFactory, (singletonTraverser, context, item) -> {
             singletonTraverser.accept(filterFn.test(context, item) ? item : null);
             return singletonTraverser;
         });
-    }
-
-    /**
-     * Asynchronous version of {@link #mapUsingServiceP}: the {@code
-     * filterAsyncFn} returns a {@code CompletableFuture<Boolean>} instead of
-     * just a {@code boolean}.
-     * <p>
-     * The function can return a null future, but the future must not return
-     * null {@code Boolean}.
-     * <p>
-     * The {@code extractKeyFn} is used to extract keys under which to save
-     * in-flight items to the snapshot. If the input to this processor is over
-     * a partitioned edge, you should use the same key. If it's a round-robin
-     * edge, you can use any key, for example {@code Object::hashCode}.
-     *
-     * @param serviceFactory the service factory
-     * @param extractKeyFn a function to extract snapshot keys
-     * @param filterAsyncFn a stateless predicate to test each received item against
-     * @param <S> type of service object
-     * @param <T> type of received item
-     */
-    @Nonnull
-    public static <S, T, K> ProcessorSupplier filterUsingServiceAsyncP(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull FunctionEx<T, K> extractKeyFn,
-            @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<Boolean>> filterAsyncFn
-    ) {
-        return flatMapUsingServiceAsyncP(serviceFactory, extractKeyFn,
-                (s, t) -> filterAsyncFn.apply(s, t).thenApply(passed -> passed ? Traversers.singleton(t) : null));
     }
 
     /**
@@ -976,50 +958,18 @@ public final class Processors {
      * @param serviceFactory the service factory
      * @param flatMapFn a stateless function that maps the received item to a traverser over
      *                  the output items
+     * @param <C> type of context object
      * @param <S> type of service object
-     * @param <T> received item type
-     * @param <R> emitted item type
+     * @param <T> type of input item
+     * @param <R> type of result item
      */
     @Nonnull
-    public static <S, T, R> ProcessorSupplier flatMapUsingServiceP(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<? extends R>> flatMapFn
+    public static <C, S, T, R> ProcessorSupplier flatMapUsingServiceP(
+            @Nonnull ServiceFactory<C, S> serviceFactory,
+            @Nonnull BiFunctionEx<? super S, ? super T, ? extends Traverser<R>> flatMapFn
     ) {
-        return TransformUsingServiceP.<S, T, R>supplier(serviceFactory,
-                (singletonTraverser, context, item) -> flatMapFn.apply(context, item));
-    }
-
-    /**
-     * Asynchronous version of {@link #flatMapUsingServiceP}: the {@code
-     * flatMapAsyncFn} returns a {@code CompletableFuture<Traverser<R>>}
-     * instead of just a {@code Traverser<R>}.
-     * <p>
-     * The function can return a null future and the future can return a null
-     * traverser: in both cases it will act just like a filter. The traverser
-     * can't return null items - null is a terminator in {@link Traverser}, see
-     * its documentation.
-     * <p>
-     * The {@code extractKeyFn} is used to extract keys under which to save
-     * in-flight items to the snapshot. If the input to this processor is over
-     * a partitioned edge, you should use the same key. If it's a round-robin
-     * edge, you can use any key, for example {@code Object::hashCode}.
-     *
-     * @param serviceFactory the service factory
-     * @param extractKeyFn a function to extract snapshot keys
-     * @param flatMapAsyncFn  a stateless function that maps the received item
-     *      to a future returning a traverser over the output items
-     * @param <S> type of service object
-     * @param <T> type of received item
-     */
-    @Nonnull
-    public static <S, T, K, R> ProcessorSupplier flatMapUsingServiceAsyncP(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull FunctionEx<? super T, ? extends K> extractKeyFn,
-            @Nonnull BiFunctionEx<? super S, ? super T, CompletableFuture<Traverser<R>>> flatMapAsyncFn
-    ) {
-        return serviceFactory.hasOrderedAsyncResponses()
-                ? AsyncTransformUsingServiceOrderedP.supplier(serviceFactory, flatMapAsyncFn)
-                : AsyncTransformUsingServiceUnorderedP.supplier(serviceFactory, flatMapAsyncFn, extractKeyFn);
+        return TransformUsingServiceP.<C, S, T, R>supplier(serviceFactory,
+                (singletonTraverser, service, item) -> flatMapFn.apply(service, item));
     }
 
     /**

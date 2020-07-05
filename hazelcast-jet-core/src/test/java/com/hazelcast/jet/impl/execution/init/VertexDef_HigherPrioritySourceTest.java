@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,11 +19,12 @@ package com.hazelcast.jet.impl.execution.init;
 import com.hazelcast.internal.cluster.MemberInfo;
 import com.hazelcast.internal.cluster.impl.ClusterServiceImpl;
 import com.hazelcast.internal.cluster.impl.MembersView;
+import com.hazelcast.internal.serialization.InternalSerializationService;
 import com.hazelcast.jet.SimpleTestInClusterSupport;
 import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.Edge;
-import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorMetaSupplier;
 import com.hazelcast.jet.core.Vertex;
 import com.hazelcast.jet.impl.MasterJobContext;
@@ -36,6 +37,7 @@ import org.junit.Test;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Set;
 
 import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
 import static com.hazelcast.jet.core.Edge.between;
@@ -125,9 +127,11 @@ public class VertexDef_HigherPrioritySourceTest extends SimpleTestInClusterSuppo
                 createExecutionPlans(nodeEngineImpl, membersView, dag, 0, 0, new JobConfig(), 0);
         ExecutionPlan plan = executionPlans.values().iterator().next();
         SnapshotContext ssContext = new SnapshotContext(mock(ILogger.class), "job", 0, EXACTLY_ONCE);
-        plan.initialize(nodeEngineImpl, 0, 0, ssContext);
+        plan.initialize(nodeEngineImpl, 0, 0, ssContext, null,
+                (InternalSerializationService) nodeEngineImpl.getSerializationService());
+        Set<Integer> higherPriorityVertices = VertexDef.getHigherPriorityVertices(plan.getVertices());
         String actualHigherPriorityVertices = plan.getVertices().stream()
-                .filter(VertexDef::isHigherPrioritySource)
+                .filter(v -> higherPriorityVertices.contains(v.vertexId()))
                 .map(VertexDef::name)
                 .sorted()
                 .collect(joining("\n"));
@@ -135,6 +139,6 @@ public class VertexDef_HigherPrioritySourceTest extends SimpleTestInClusterSuppo
         assertEquals(expectedVertices, actualHigherPriorityVertices);
     }
 
-    private static class DummyProcessor implements Processor {
+    private static class DummyProcessor extends AbstractProcessor {
     }
 }

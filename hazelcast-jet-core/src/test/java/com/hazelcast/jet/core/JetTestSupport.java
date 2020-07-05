@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,26 +16,29 @@
 
 package com.hazelcast.jet.core;
 
-import com.hazelcast.cache.ICache;
 import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.cluster.Address;
 import com.hazelcast.collection.IList;
+import com.hazelcast.core.DistributedObject;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.instance.impl.Node;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.JetTestInstanceFactory;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.config.JetConfig;
+import com.hazelcast.jet.function.RunnableEx;
 import com.hazelcast.jet.impl.JetService;
 import com.hazelcast.jet.impl.JobExecutionRecord;
+import com.hazelcast.jet.impl.JobExecutionService;
 import com.hazelcast.jet.impl.JobRepository;
-import com.hazelcast.jet.impl.util.Util.RunnableExc;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.logging.Logger;
 import com.hazelcast.map.IMap;
 import com.hazelcast.spi.impl.NodeEngineImpl;
 import com.hazelcast.test.HazelcastTestSupport;
 import org.junit.After;
+import org.junit.ClassRule;
+import org.junit.rules.Timeout;
 
 import javax.annotation.Nonnull;
 import java.io.File;
@@ -44,18 +47,18 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Map;
+import java.util.Collection;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
-import org.junit.ClassRule;
-import org.junit.rules.Timeout;
 
 import static com.hazelcast.jet.Util.idToString;
+import static com.hazelcast.jet.core.JobStatus.RUNNING;
+import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public abstract class JetTestSupport extends HazelcastTestSupport {
 
@@ -117,15 +120,6 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         return instance.getMap(randomName());
     }
 
-    protected static <K, V> ICache<K, V> getCache(JetInstance instance) {
-        return instance.getCacheManager().getCache(randomName());
-    }
-
-    protected static void fillMapWithInts(IMap<Integer, Integer> map, int count) {
-        Map<Integer, Integer> vals = IntStream.range(0, count).boxed().collect(Collectors.toMap(m -> m, m -> m));
-        map.putAll(vals);
-    }
-
     protected static void fillListWithInts(IList<Integer> list, int count) {
         for (int i = 0; i < count; i++) {
             list.add(i);
@@ -153,6 +147,46 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
 
     public static void assertJobStatusEventually(Job job, JobStatus expected) {
         assertJobStatusEventually(job, expected, ASSERT_TRUE_EVENTUALLY_TIMEOUT);
+    }
+
+    /**
+     * Asserts that a job status is eventually RUNNING. When it's running,
+     * checks that the execution ID is different from the given {@code
+     * ignoredExecutionId}, if not, tries again.
+     * <p>
+     * This is useful when checking that the job is running after a restart:
+     * <pre>{@code
+     *     job.restart();
+     *     // This is racy, we might see the previous execution running.
+     *     // Subsequent steps can fail because the job is restarting.
+     *     assertJobStatusEventually(job, RUNNING);
+     * }</pre>
+     *
+     * This method allows an equivalent code:
+     * <pre>{@code
+     *     long oldExecutionId = assertJobRunningEventually(instance, job, null);
+     *     // now we're sure the job is safe to restart - restart fails if the job isn't running
+     *     job.restart();
+     *     assertJobRunningEventually(instance, job, oldExecutionId);
+     *     // now we're sure that a new execution is running
+     * }</pre>
+     *
+     * @param ignoredExecutionId If job is running and has this execution ID,
+     *      wait longer. If null, no execution ID is ignored.
+     * @return the execution ID of the new execution or 0 if {@code
+     *      ignoredExecutionId == null}
+     */
+    public static long assertJobRunningEventually(JetInstance instance, Job job, Long ignoredExecutionId) {
+        Long executionId;
+        JobExecutionService service = getNodeEngineImpl(instance)
+                .<JetService>getService(JetService.SERVICE_NAME)
+                .getJobExecutionService();
+        do {
+            assertJobStatusEventually(job, RUNNING);
+            // executionId can be null if the execution just terminated
+            executionId = service.getExecutionIdForJobId(job.getId());
+        } while (executionId == null || executionId.equals(ignoredExecutionId));
+        return executionId;
     }
 
     public static void assertJobStatusEventually(Job job, JobStatus expected, int timeoutSeconds) {
@@ -193,11 +227,15 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         instanceFactory.terminate(instance);
     }
 
-    public Future spawnSafe(RunnableExc r) {
+    /**
+     * Runs the given Runnable in a new thread, if you're not interested in the
+     * execution failure, any errors are logged at WARN level.
+     */
+    public Future spawnSafe(RunnableEx r) {
         return spawn(() -> {
             try {
-                r.run();
-            } catch (Exception e) {
+                r.runEx();
+            } catch (Throwable e) {
                 logger.warning("Spawned Runnable failed", e);
             }
         });
@@ -220,19 +258,37 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         logger.info("First snapshot found (id=" + snapshotId[0] + ")");
     }
 
-    public void waitForNextSnapshot(JobRepository jr, long jobId, int timeoutSeconds) {
+    public void waitForNextSnapshot(JobRepository jr, long jobId, int timeoutSeconds, boolean allowEmptySnapshot) {
         long originalSnapshotId = jr.getJobExecutionRecord(jobId).snapshotId();
         // wait until there is at least one more snapshot
         long[] snapshotId = {-1};
+        long start = System.nanoTime();
         assertTrueEventually(() -> {
             JobExecutionRecord record = jr.getJobExecutionRecord(jobId);
             assertNotNull("jobExecutionRecord is null", record);
             snapshotId[0] = record.snapshotId();
             assertTrue("No more snapshots produced after restart in " + timeoutSeconds + " seconds",
                     snapshotId[0] > originalSnapshotId);
-            assertTrue("stats are 0", record.snapshotStats().numBytes() > 0);
+            assertTrue("stats are 0", allowEmptySnapshot || record.snapshotStats().numBytes() > 0);
         }, timeoutSeconds);
-        logger.info("Next snapshot found (id=" + snapshotId[0] + ", previous id=" + originalSnapshotId + ")");
+        logger.info("Next snapshot found after " + NANOSECONDS.toMillis(System.nanoTime() - start) + " ms (id="
+                + snapshotId[0] + ", previous id=" + originalSnapshotId + ")");
+    }
+
+    /**
+     * Clean up the cluster and make it ready to run a next test. If we fail
+     * to, shut it down so that next tests don't run on a messed-up cluster.
+     *
+     * @param instances cluster instances, must contain at least
+     *                            one instance
+     */
+    public void cleanUpCluster(JetInstance ... instances) {
+        for (Job job : instances[0].getJobs()) {
+            ditchJob(job, instances);
+        }
+        for (DistributedObject o : instances[0].getHazelcastInstance().getDistributedObjects()) {
+            o.destroy();
+        }
     }
 
     /**
@@ -243,6 +299,16 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
     public void ditchJob(@Nonnull Job job, @Nonnull JetInstance... instancesToShutDown) {
         int numAttempts;
         for (numAttempts = 0; numAttempts < 10; numAttempts++) {
+            JobStatus status = null;
+            try {
+                status = job.getStatus();
+                if (status == JobStatus.FAILED || status == JobStatus.COMPLETED) {
+                    return;
+                }
+            } catch (Exception e) {
+                logger.warning("Failure to read job status: " + e, e);
+            }
+
             Exception cancellationFailure;
             try {
                 job.cancel();
@@ -258,15 +324,6 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
             }
 
             sleepMillis(500);
-            JobStatus status = null;
-            try {
-                status = job.getStatus();
-                if (status == JobStatus.FAILED || status == JobStatus.COMPLETED) {
-                    return;
-                }
-            } catch (Exception e) {
-                logger.warning("Failure to read job status: " + e, e);
-            }
             logger.warning("Failed to cancel the job and it is " + status + ", retrying. Failure: " + cancellationFailure,
                     cancellationFailure);
         }
@@ -277,5 +334,24 @@ public abstract class JetTestSupport extends HazelcastTestSupport {
         for (JetInstance instance : instancesToShutDown) {
             instance.getHazelcastInstance().getLifecycleService().terminate();
         }
+    }
+
+    /**
+     * Cancel the job and wait until it cancels using Job.join(), ignoring the
+     * CancellationException.
+     */
+    public static void cancelAndJoin(@Nonnull Job job) {
+        job.cancel();
+        try {
+            job.join();
+            fail("join didn't fail with CancellationException");
+        } catch (CancellationException ignored) {
+        }
+    }
+
+    public static <T> void assertCollection(Collection<T> expected, Collection<T> actual) {
+        assertEquals(String.format("Expected collection: `%s`, actual collection: `%s`", expected, actual),
+                expected.size(), actual.size());
+        assertContainsAll(expected, actual);
     }
 }

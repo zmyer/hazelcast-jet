@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,10 @@ package com.hazelcast.jet.impl.util;
 
 import com.hazelcast.jet.core.Inbox;
 
+import javax.annotation.Nonnull;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Iterator;
 
 /**
  * An {@link Inbox} implementation backed by an {@link ArrayDeque}.
@@ -41,6 +43,11 @@ public final class ArrayDequeInbox implements Inbox {
         return queue.isEmpty();
     }
 
+    @Nonnull @Override
+    public Iterator<Object> iterator() {
+        return queue.iterator();
+    }
+
     @Override
     public Object peek() {
         return queue.peek();
@@ -56,6 +63,12 @@ public final class ArrayDequeInbox implements Inbox {
     @Override
     public void remove() {
         queue.remove();
+        progTracker.madeProgress();
+    }
+
+    @Override
+    public void clear() {
+        queue.clear();
         progTracker.madeProgress();
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,19 +20,21 @@ import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.EdgeConfig;
 import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.DAG;
 import com.hazelcast.jet.core.Vertex;
 import com.hazelcast.jet.core.Watermark;
+import com.hazelcast.jet.function.RunnableEx;
 import com.hazelcast.jet.impl.JetEvent;
 import com.hazelcast.jet.impl.JetService;
 import com.hazelcast.logging.ILogger;
+import com.hazelcast.nio.serialization.DataSerializable;
 import com.hazelcast.spi.impl.NodeEngine;
 
 import javax.annotation.CheckReturnValue;
 import javax.annotation.Nonnull;
-import java.io.ByteArrayOutputStream;
+import javax.annotation.Nullable;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.InvalidClassException;
 import java.io.NotSerializableException;
 import java.io.ObjectOutputStream;
@@ -49,12 +51,13 @@ import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.ToIntFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.Util.idToString;
@@ -66,12 +69,9 @@ import static java.lang.Math.abs;
 import static java.util.Collections.emptyList;
 import static java.util.stream.Collectors.groupingBy;
 import static java.util.stream.Collectors.mapping;
-import static java.util.stream.Collectors.toList;
 import static java.util.stream.IntStream.range;
 
 public final class Util {
-
-    static final int BUFFER_SIZE = 1 << 15;
 
     private static final DateTimeFormatter LOCAL_TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
     private static final Pattern TRAILING_NUMBER_PATTERN = Pattern.compile("(.*)-([0-9]+)");
@@ -95,12 +95,8 @@ public final class Util {
         }
     }
 
-    public static void uncheckRun(@Nonnull RunnableExc r) {
-        try {
-            r.run();
-        } catch (Exception e) {
-            throw sneakyThrow(e);
-        }
+    public static void uncheckRun(@Nonnull RunnableEx r) {
+        r.run();
     }
 
     /**
@@ -124,23 +120,8 @@ public final class Util {
         return true;
     }
 
-    public interface RunnableExc<T extends Exception> {
-        void run() throws T;
-    }
-
     public static JetInstance getJetInstance(NodeEngine nodeEngine) {
         return nodeEngine.<JetService>getService(JetService.SERVICE_NAME).getJetInstance();
-    }
-
-    @Nonnull
-    public static byte[] readFully(@Nonnull InputStream in) throws IOException {
-        try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            byte[] b = new byte[BUFFER_SIZE];
-            for (int len; (len = in.read(b)) != -1; ) {
-                out.write(b, 0, len);
-            }
-            return out.toByteArray();
-        }
     }
 
     public static long addClamped(long a, long b) {
@@ -178,17 +159,25 @@ public final class Util {
     }
 
     /**
-     * Checks that the {@code object} implements {@link Serializable} and is
-     * correctly serializable by actually trying to serialize it. This will
-     * reveal some non-serializable field early.
+     * Checks that the {@code object} implements {@link Serializable} or {@link
+     * DataSerializable}. In case of {@code Serializable}, it additionally
+     * checks it is correctly serializable by actually trying to serialize it.
+     * This will reveal a non-serializable field early.
      *
      * @param object     object to check
      * @param objectName object description for the exception
+     * @return given object
      * @throws IllegalArgumentException if {@code object} is not serializable
      */
-    public static void checkSerializable(Object object, String objectName) {
+    @Nullable
+    public static <T> T checkSerializable(@Nullable T object, @Nonnull String objectName) {
         if (object == null) {
-            return;
+            return null;
+        }
+        if (object instanceof DataSerializable) {
+            // hz-serialization is implemented, but we cannot actually check it - we don't have a
+            // SerializationService at hand.
+            return object;
         }
         if (!(object instanceof Serializable)) {
             throw new IllegalArgumentException('"' + objectName + "\" must implement Serializable");
@@ -201,26 +190,56 @@ public final class Util {
             // never really thrown, as the underlying stream never throws it
             throw new JetException(e);
         }
+        return object;
     }
 
     /**
-     * Distributes the owned partitions to processors in a round-robin fashion.
-     * If owned partition size is smaller than processor count, an empty list
-     * is put for the rest of the processors.
+     * Checks that the {@code object} is not null and implements
+     * {@link Serializable} and is correctly serializable by actually
+     * trying to serialize it. This will reveal some non-serializable
+     * field early.
+     * <p>
+     * Usage:
+     * <pre>{@code
+     * void setValue(@Nonnull Object value) {
+     *     this.value = checkNonNullAndSerializable(value, "value");
+     * }
+     * }</pre>
      *
-     * @param count count of processors
-     * @param ownedPartitions list of owned partitions
-     * @return a map of which has partition index as key and list of partition ids as value
+     * @param object     object to check
+     * @param objectName object description for the exception
+     * @return given object
+     * @throws IllegalArgumentException if {@code object} is not serializable
      */
-    public static Map<Integer, List<Integer>> processorToPartitions(int count, List<Integer> ownedPartitions) {
-        Map<Integer, List<Integer>> processorToPartitions = range(0, ownedPartitions.size())
-                .mapToObj(i -> entry(i, ownedPartitions.get(i)))
-                .collect(groupingBy(e -> e.getKey() % count, mapping(Map.Entry::getValue, toList())));
-
-        for (int processor = 0; processor < count; processor++) {
-            processorToPartitions.putIfAbsent(processor, emptyList());
+    @Nonnull
+    public static <T> T checkNonNullAndSerializable(@Nonnull T object, @Nonnull String objectName) {
+        //noinspection ConstantConditions
+        if (object == null) {
+            throw new IllegalArgumentException('"' + objectName + "\" must not be null");
         }
-        return processorToPartitions;
+        checkSerializable(object, objectName);
+        return object;
+    }
+
+    /**
+     * Distributes the {@code objects} to {@code count} processors in a
+     * round-robin fashion. If the object count is smaller than processor
+     * count, an empty list is put for the rest of the processors.
+     *
+     * @param count   count of processors
+     * @param objects list of objects to distribute
+     * @return a map which has the processor index as the key and a list of objects as
+     * the value
+     */
+    public static <T> Map<Integer, List<T>> distributeObjects(int count, List<T> objects) {
+        Map<Integer, List<T>> processorToObjects = range(0, objects.size())
+                .mapToObj(i -> entry(i, objects.get(i)))
+                .collect(groupingBy(e -> e.getKey() % count, mapping(Map.Entry::getValue, Collectors.toList())));
+
+        for (int i = 0; i < count; i++) {
+            processorToObjects.putIfAbsent(i, emptyList());
+        }
+        return processorToObjects;
     }
 
     /**
@@ -235,8 +254,8 @@ public final class Util {
      * It's used to assign partitions to processors.
      *
      * @param objectCount total number of objects to distribute
-     * @param count total number of subsets
-     * @param index index of the requested subset
+     * @param count       total number of subsets
+     * @param index       index of the requested subset
      * @return an array with assigned objects
      */
     public static int[] roundRobinPart(int objectCount, int count, int index) {
@@ -346,21 +365,8 @@ public final class Util {
         return gcd(b, a % b);
     }
 
-    public static void lazyIncrement(AtomicLong counter) {
-        lazyAdd(counter, 1);
-    }
-
     public static void lazyIncrement(AtomicLongArray counters, int index) {
         lazyAdd(counters, index, 1);
-    }
-
-    /**
-     * Adds {@code addend} to the counter, using {@code lazySet}. Useful for
-     * incrementing {@linkplain com.hazelcast.internal.metrics.Probe probes}
-     * if only one thread is updating the value.
-     */
-    public static void lazyAdd(AtomicLong counter, long addend) {
-        counter.lazySet(counter.get() + addend);
     }
 
     /**
@@ -432,7 +438,7 @@ public final class Util {
         return name.replace('.', '_');
     }
 
-    public static <T extends Exception> void doWithClassLoader(ClassLoader cl, RunnableExc<T> action) throws T {
+    public static void doWithClassLoader(ClassLoader cl, RunnableEx action) {
         Thread currentThread = Thread.currentThread();
         ClassLoader previousCl = currentThread.getContextClassLoader();
         currentThread.setContextClassLoader(cl);
@@ -443,4 +449,19 @@ public final class Util {
         }
     }
 
+    /**
+     * Returns the lower of the given guarantees.
+     */
+    public static ProcessingGuarantee min(ProcessingGuarantee g1, ProcessingGuarantee g2) {
+        return g1.ordinal() < g2.ordinal() ? g1 : g2;
+    }
+
+    /**
+     * Returns elements of the given {@code coll} in a new {@code List}, mapped
+     * using the given {@code mapFn}.
+     */
+    @Nonnull
+    public static <T, R> List<R> toList(@Nonnull Collection<T> coll, Function<? super T, ? extends R> mapFn) {
+        return coll.stream().map(mapFn).collect(Collectors.toList());
+    }
 }

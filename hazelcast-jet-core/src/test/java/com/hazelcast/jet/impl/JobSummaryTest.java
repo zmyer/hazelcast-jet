@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -175,7 +175,7 @@ public class JobSummaryTest extends JetTestSupport {
         assertEquals(1, list.size());
         JobSummary jobSummary = list.get(0);
 
-        assertEquals(msg, new JetException(jobSummary.getFailureText()).toString());
+        assertContains(new JetException(jobSummary.getFailureText()).toString(), msg);
         assertNotEquals(0, jobSummary.getCompletionTime());
     }
 

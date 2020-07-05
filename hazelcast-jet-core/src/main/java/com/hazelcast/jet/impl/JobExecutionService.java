@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,9 +25,14 @@ import com.hazelcast.internal.cluster.impl.operations.TriggerMemberListPublishOp
 import com.hazelcast.internal.metrics.DynamicMetricsProvider;
 import com.hazelcast.internal.metrics.MetricDescriptor;
 import com.hazelcast.internal.metrics.MetricsCollectionContext;
+import com.hazelcast.internal.metrics.MetricsRegistry;
+import com.hazelcast.internal.metrics.Probe;
+import com.hazelcast.internal.util.counters.Counter;
+import com.hazelcast.internal.util.counters.MwCounter;
 import com.hazelcast.jet.Util;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.TopologyChangedException;
+import com.hazelcast.jet.core.metrics.MetricNames;
 import com.hazelcast.jet.core.metrics.MetricTags;
 import com.hazelcast.jet.impl.deployment.JetClassLoader;
 import com.hazelcast.jet.impl.execution.ExecutionContext;
@@ -80,12 +85,31 @@ public class JobExecutionService implements DynamicMetricsProvider {
     // key: jobId
     private final ConcurrentHashMap<Long, JetClassLoader> classLoaders = new ConcurrentHashMap<>();
 
+    @Probe(name = MetricNames.JOB_EXECUTIONS_STARTED)
+    private final Counter executionStarted = MwCounter.newMwCounter();
+    @Probe(name = MetricNames.JOB_EXECUTIONS_COMPLETED)
+    private final Counter executionCompleted = MwCounter.newMwCounter();
+
     JobExecutionService(NodeEngineImpl nodeEngine, TaskletExecutionService taskletExecutionService,
                         JobRepository jobRepository) {
         this.nodeEngine = nodeEngine;
         this.logger = nodeEngine.getLogger(getClass());
         this.taskletExecutionService = taskletExecutionService;
         this.jobRepository = jobRepository;
+
+        // register metrics
+        MetricsRegistry registry = nodeEngine.getMetricsRegistry();
+        MetricDescriptor descriptor = registry.newMetricDescriptor()
+                .withTag(MetricTags.MODULE, "jet");
+        registry.registerStaticMetrics(descriptor, this);
+    }
+
+    public Long getExecutionIdForJobId(long jobId) {
+        return executionContexts.values().stream()
+                                .filter(ec -> ec.jobId() == jobId)
+                                .findAny()
+                                .map(ExecutionContext::executionId)
+                                .orElse(null);
     }
 
     public ClassLoader getClassLoader(JobConfig config, long jobId) {
@@ -95,9 +119,7 @@ public class JobExecutionService implements DynamicMetricsProvider {
                             ClassLoader parent = config.getClassLoaderFactory() != null
                                     ? config.getClassLoaderFactory().getJobClassLoader()
                                     : nodeEngine.getConfigClassLoader();
-                            return new JetClassLoader(
-                                    nodeEngine, parent, config.getName(), jobId, jobRepository.getJobResources(jobId)
-                            );
+                            return new JetClassLoader(nodeEngine, parent, config.getName(), jobId, jobRepository);
                         }));
     }
 
@@ -313,18 +335,26 @@ public class JobExecutionService implements DynamicMetricsProvider {
         return executionContext;
     }
 
+    public void beforeCompleteExecution(long executionId) {
+        ExecutionContext executionContext = executionContexts.get(executionId);
+        if (executionContext != null) {
+            executionContext.setCompletionTime();
+        }
+    }
+
     /**
      * Completes and cleans up execution of the given job
      */
     public void completeExecution(long executionId, Throwable error) {
         ExecutionContext executionContext = executionContexts.remove(executionId);
         if (executionContext != null) {
-            JetClassLoader removed = classLoaders.remove(executionContext.jobId());
+            JetClassLoader removedClassLoader = classLoaders.remove(executionContext.jobId());
             try {
-                com.hazelcast.jet.impl.util.Util.doWithClassLoader(removed, () ->
+                com.hazelcast.jet.impl.util.Util.doWithClassLoader(removedClassLoader, () ->
                     executionContext.completeExecution(error));
             } finally {
-                removed.shutdown();
+                executionCompleted.inc();
+                removedClassLoader.shutdown();
                 executionContextJobIds.remove(executionContext.jobId());
                 logger.fine("Completed execution of " + executionContext.jobNameAndExecutionId());
             }
@@ -343,6 +373,7 @@ public class JobExecutionService implements DynamicMetricsProvider {
     public CompletableFuture<Void> beginExecution(Address coordinator, long jobId, long executionId) {
         ExecutionContext execCtx = assertExecutionContext(coordinator, jobId, executionId, "ExecuteJobOperation");
         logger.info("Start execution of " + execCtx.jobNameAndExecutionId() + " from coordinator " + coordinator);
+        executionStarted.inc();
         CompletableFuture<Void> future = execCtx.beginExecution();
         future.whenComplete(withTryCatch(logger, (i, e) -> {
             if (e instanceof CancellationException) {

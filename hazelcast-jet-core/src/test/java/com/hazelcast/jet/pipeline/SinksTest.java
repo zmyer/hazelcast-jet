@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import com.hazelcast.config.Config;
 import com.hazelcast.config.MapConfig;
 import com.hazelcast.config.PartitioningStrategyConfig;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.core.HazelcastJsonValue;
 import com.hazelcast.function.FunctionEx;
 import com.hazelcast.instance.impl.HazelcastInstanceFactory;
 import com.hazelcast.jet.Job;
@@ -37,6 +38,7 @@ import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.core.test.TestProcessorSupplierContext;
 import com.hazelcast.jet.core.test.TestSupport;
 import com.hazelcast.jet.datamodel.KeyedWindowResult;
+import com.hazelcast.jet.json.JsonUtil;
 import com.hazelcast.jet.pipeline.test.TestSources;
 import com.hazelcast.map.EntryProcessor;
 import com.hazelcast.map.IMap;
@@ -49,21 +51,26 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.IntStream;
 
+import static com.hazelcast.jet.TestContextSupport.adaptSupplier;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.impl.pipeline.AbstractStage.transformOf;
+import static com.hazelcast.jet.json.JsonUtil.hazelcastJsonValue;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.Collectors.toMap;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public class SinksTest extends PipelineTestSupport {
+
     private static HazelcastInstance remoteHz;
     private static ClientConfig clientConfig;
 
@@ -114,7 +121,7 @@ public class SinksTest extends PipelineTestSupport {
     }
 
     @Test
-    public void whenDrainToMultipleStagesToSingleSink_thenAllItemsShouldBeOnSink() {
+    public void when_writeToMultipleStagesToSingleSink_then_allItemsInSink() {
         // Given
         String secondSourceName = randomName();
         List<Integer> input = sequence(itemCount);
@@ -213,6 +220,37 @@ public class SinksTest extends PipelineTestSupport {
     }
 
     @Test
+    public void map_withToKeyValueFunctions() {
+        // Given
+        BatchStage<Integer> sourceStage = p.readFrom(TestSources.items(0, 1, 2, 3, 4));
+
+        // When
+        sourceStage.writeTo(Sinks.map(sinkName, t -> t, Object::toString));
+
+        // Then
+        execute();
+        IMap<Integer, String> sinkMap = jet().getMap(sinkName);
+        assertEquals(5, sinkMap.size());
+        IntStream.range(0, 5).forEach(i -> assertEquals(String.valueOf(i), sinkMap.get(i)));
+    }
+
+    @Test
+    public void map_withJsonKeyValue() {
+        // Given
+        BatchStage<Integer> sourceStage = p.readFrom(TestSources.items(0, 1, 2, 3, 4));
+
+        // When
+        sourceStage.writeTo(Sinks.map(sinkName, JsonUtil::hazelcastJsonValue, JsonUtil::hazelcastJsonValue));
+
+        // Then
+        execute();
+        IMap<HazelcastJsonValue, HazelcastJsonValue> sinkMap = jet().getMap(sinkName);
+        assertEquals(5, sinkMap.size());
+        IntStream.range(0, 5).forEach(i -> assertEquals(hazelcastJsonValue(String.valueOf(i)),
+                sinkMap.get(hazelcastJsonValue(i))));
+    }
+
+    @Test
     public void remoteMap() {
         // Given
         List<Integer> input = sequence(itemCount);
@@ -243,6 +281,7 @@ public class SinksTest extends PipelineTestSupport {
                 srcName,
                 Entry::getKey,
                 Entry::getValue,
+                // intentionally not a method reference - https://bugs.openjdk.java.net/browse/JDK-8154236
                 (oldValue, newValue) -> oldValue + newValue);
 
         // Then
@@ -268,6 +307,7 @@ public class SinksTest extends PipelineTestSupport {
                 srcMap,
                 Entry::getKey,
                 Entry::getValue,
+                // intentionally not a method reference - https://bugs.openjdk.java.net/browse/JDK-8154236
                 (oldValue, newValue) -> oldValue + newValue);
 
         // Then
@@ -290,7 +330,9 @@ public class SinksTest extends PipelineTestSupport {
 
         // When
         Sink<Entry<String, Integer>> sink = Sinks.mapWithMerging(
-                srcMap, (oldValue, newValue) -> oldValue + newValue);
+                srcMap,
+                // intentionally not a method reference - https://bugs.openjdk.java.net/browse/JDK-8154236
+                (oldValue, newValue) -> oldValue + newValue);
 
         // Then
         p.readFrom(Sources.<String, Integer>map(srcName)).writeTo(sink);
@@ -342,7 +384,10 @@ public class SinksTest extends PipelineTestSupport {
         jet().getList(srcName).addAll(input);
 
         // When
-        Sink<Entry<String, Integer>> sink = Sinks.mapWithMerging(srcName, (oldValue, newValue) -> oldValue + newValue);
+        Sink<Entry<String, Integer>> sink = Sinks.mapWithMerging(
+                srcName,
+                // intentionally not a method reference - https://bugs.openjdk.java.net/browse/JDK-8154236
+                (oldValue, newValue) -> oldValue + newValue);
 
         // Then
         p.readFrom(Sources.<Integer>list(srcName))
@@ -356,8 +401,8 @@ public class SinksTest extends PipelineTestSupport {
 
     @Test
     public void mapWithMerging_when_multipleValuesForSingleKeyInABatch() throws Exception {
-        ProcessorMetaSupplier metaSupplier = SinkProcessors.<Entry<String, Integer>, String, Integer>mergeMapP(
-                sinkName, Entry::getKey, Entry::getValue, Integer::sum);
+        ProcessorMetaSupplier metaSupplier = adaptSupplier(SinkProcessors.<Entry<String, Integer>, String,
+                Integer>mergeMapP(sinkName, Entry::getKey, Entry::getValue, Integer::sum));
 
         TestProcessorSupplierContext psContext = new TestProcessorSupplierContext().setJetInstance(member);
         Processor p = TestSupport.supplierFrom(metaSupplier, psContext).get();
@@ -420,6 +465,7 @@ public class SinksTest extends PipelineTestSupport {
                 clientConfig,
                 Entry::getKey,
                 Entry::getValue,
+                // intentionally not a method reference - https://bugs.openjdk.java.net/browse/JDK-8154236
                 (oldValue, newValue) -> oldValue + newValue);
 
         // Then
@@ -811,6 +857,57 @@ public class SinksTest extends PipelineTestSupport {
         p.readFrom(Sources.list(srcName)).writeTo(sink);
         execute();
         assertEquals(itemCount, remoteHz.getList(sinkName).size());
+    }
+
+    @Test
+    public void reliableTopic_byName() {
+        // Given
+        populateList(srcList);
+
+        List<Object> receivedList = new ArrayList<>();
+        jet().getReliableTopic(sinkName).addMessageListener(message -> receivedList.add(message.getMessageObject()));
+
+        // When
+        Sink<Object> sink = Sinks.reliableTopic(sinkName);
+        p.readFrom(Sources.list(srcName)).writeTo(sink);
+        execute();
+
+        // Then
+        assertTrueEventually(() -> assertEquals(itemCount, receivedList.size()));
+    }
+
+    @Test
+    public void reliableTopic_byRef() {
+        // Given
+        populateList(srcList);
+
+        List<Object> receivedList = new ArrayList<>();
+        jet().getReliableTopic(sinkName).addMessageListener(message -> receivedList.add(message.getMessageObject()));
+
+        // When
+        Sink<Object> sink = Sinks.reliableTopic(jet().getReliableTopic(sinkName));
+        p.readFrom(Sources.list(srcName)).writeTo(sink);
+        execute();
+
+        // Then
+        assertTrueEventually(() -> assertEquals(itemCount, receivedList.size()));
+    }
+
+    @Test
+    public void remoteReliableTopic() {
+        // Given
+        populateList(srcList);
+
+        List<Object> receivedList = new ArrayList<>();
+        remoteHz.getReliableTopic(sinkName).addMessageListener(message -> receivedList.add(message.getMessageObject()));
+
+        // When
+        Sink<Object> sink = Sinks.remoteReliableTopic(sinkName, clientConfig);
+        p.readFrom(Sources.list(srcName)).writeTo(sink);
+        execute();
+
+        // Then
+        assertTrueEventually(() -> assertEquals(itemCount, receivedList.size()));
     }
 
     @Test

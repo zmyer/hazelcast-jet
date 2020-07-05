@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,12 @@ package com.hazelcast.jet.server;
 import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.client.config.XmlClientConfigBuilder;
 import com.hazelcast.client.config.YamlClientConfigBuilder;
+import com.hazelcast.client.impl.clientside.HazelcastClientInstanceImpl;
+import com.hazelcast.client.impl.management.MCClusterMetadata;
+import com.hazelcast.client.impl.spi.ClientClusterService;
 import com.hazelcast.cluster.Cluster;
 import com.hazelcast.instance.JetBuildInfo;
+import com.hazelcast.internal.util.FutureUtil;
 import com.hazelcast.jet.Jet;
 import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.JetInstance;
@@ -29,7 +33,7 @@ import com.hazelcast.jet.JobStateSnapshot;
 import com.hazelcast.jet.Util;
 import com.hazelcast.jet.core.JobNotFoundException;
 import com.hazelcast.jet.core.JobStatus;
-import com.hazelcast.jet.impl.ClusterMetadata;
+import com.hazelcast.jet.impl.JetBootstrap;
 import com.hazelcast.jet.impl.JetClientInstanceImpl;
 import com.hazelcast.jet.impl.JobSummary;
 import com.hazelcast.jet.impl.config.ConfigProvider;
@@ -41,6 +45,7 @@ import picocli.CommandLine.ExecutionException;
 import picocli.CommandLine.Help.Ansi;
 import picocli.CommandLine.Help.Visibility;
 import picocli.CommandLine.HelpCommand;
+import picocli.CommandLine.ITypeConverter;
 import picocli.CommandLine.IVersionProvider;
 import picocli.CommandLine.Mixin;
 import picocli.CommandLine.Option;
@@ -53,7 +58,9 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.reflect.InvocationTargetException;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -92,7 +99,7 @@ public class JetCommandLine implements Runnable {
     @Option(names = {"-f", "--config"},
             description = "Optional path to a client config XML/YAML file." +
                     " The default is to use config/hazelcast-client.yaml." +
-                    " If you set this option, Jet will ignore the --addresses and --group options.",
+                    " If you set this option, Jet will ignore the --targets option.",
             order = 0
     )
     private File config;
@@ -101,21 +108,24 @@ public class JetCommandLine implements Runnable {
             split = ",",
             arity = "1..*",
             paramLabel = "<hostname>:<port>",
-            description = "Optional comma-separated list of Jet node addresses in the format" +
+            description = "[DEPRECATED] Optional comma-separated list of Jet node addresses in the format" +
                     " <hostname>:<port>, if you want to connect to a cluster other than the" +
-                    " one configured in the configuration file",
+                    " one configured in the configuration file. Use --targets instead.",
             order = 1
     )
     private List<String> addresses;
 
     @Option(names = {"-n", "--cluster-name"},
-            description = "The cluster name to use when connecting to the cluster " +
-                    "specified by the <addresses> parameter. ",
-            defaultValue = "jet",
-            showDefaultValue = Visibility.ALWAYS,
-            order = 2
+        description = "[DEPRECATED] The cluster name to use when connecting to the cluster " +
+            "specified by the <addresses> parameter. Use --targets instead.",
+        defaultValue = "jet",
+        showDefaultValue = Visibility.ALWAYS,
+        order = 2
     )
     private String clusterName;
+
+    @Mixin(name = "targets")
+    private TargetsMixin targetsMixin;
 
     @Mixin(name = "verbosity")
     private Verbosity verbosity;
@@ -166,6 +176,7 @@ public class JetCommandLine implements Runnable {
     @Command(description = "Submits a job to the cluster")
     public void submit(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Option(names = {"-s", "--snapshot"},
                     paramLabel = "<snapshot name>",
                     description = "Name of the initial snapshot to start the job from"
@@ -174,6 +185,10 @@ public class JetCommandLine implements Runnable {
                     paramLabel = "<name>",
                     description = "Name of the job"
             ) String name,
+            @Option(names = {"-c", "--class"},
+                    paramLabel = "<class>",
+                    description = "Fully qualified name of the main class inside the JAR file"
+            ) String mainClass,
             @Parameters(index = "0",
                     paramLabel = "<jar file>",
                     description = "The jar file to submit"
@@ -198,17 +213,22 @@ public class JetCommandLine implements Runnable {
         if (snapshotName != null) {
             printf("Will restore the job from the snapshot with name '%s'", snapshotName);
         }
-        JetBootstrap.executeJar(this::getJetClient, file.getAbsolutePath(), snapshotName, name, params);
+
+        targetsMixin.replace(targets);
+
+        JetBootstrap.executeJar(this::getJetClient, file.getAbsolutePath(), snapshotName, name, mainClass, params);
     }
 
     @Command(description = "Suspends a running job")
     public void suspend(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Parameters(index = "0",
                     paramLabel = "<job name or id>",
                     description = "Name of the job to suspend"
             ) String name
     ) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             Job job = getJob(jet, name);
             assertJobRunning(name, job);
@@ -224,11 +244,13 @@ public class JetCommandLine implements Runnable {
     )
     public void cancel(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Parameters(index = "0",
                     paramLabel = "<job name or id>",
                     description = "Name of the job to cancel"
             ) String name
     ) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             Job job = getJob(jet, name);
             assertJobActive(name, job);
@@ -245,6 +267,7 @@ public class JetCommandLine implements Runnable {
     )
     public void saveSnapshot(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Parameters(index = "0",
                     paramLabel = "<job name or id>",
                     description = "Name of the job to take the snapshot from")
@@ -257,6 +280,7 @@ public class JetCommandLine implements Runnable {
                     description = "Cancel the job after taking the snapshot")
                     boolean isTerminal
     ) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             Job job = getJob(jet, jobName);
             assertJobActive(jobName, job);
@@ -280,11 +304,13 @@ public class JetCommandLine implements Runnable {
     )
     public void deleteSnapshot(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Parameters(index = "0",
                     paramLabel = "<snapshot name>",
                     description = "Name of the snapshot")
                     String snapshotName
     ) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             JobStateSnapshot jobStateSnapshot = jet.getJobStateSnapshot(snapshotName);
             if (jobStateSnapshot == null) {
@@ -300,11 +326,13 @@ public class JetCommandLine implements Runnable {
     )
     public void restart(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Parameters(index = "0",
                     paramLabel = "<job name or id>",
                     description = "Name of the job to restart")
                     String name
     ) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             Job job = getJob(jet, name);
             assertJobRunning(name, job);
@@ -320,11 +348,13 @@ public class JetCommandLine implements Runnable {
     )
     public void resume(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Parameters(index = "0",
                     paramLabel = "<job name or id>",
                     description = "Name of the job to resume")
                     String name
     ) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             Job job = getJob(jet, name);
             if (job.getStatus() != JobStatus.SUSPENDED) {
@@ -343,10 +373,12 @@ public class JetCommandLine implements Runnable {
     )
     public void listJobs(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Option(names = {"-a", "--all"},
                     description = "Lists all jobs including completed and failed ones")
                     boolean listAll
     ) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             JetClientInstanceImpl client = (JetClientInstanceImpl) jet;
             List<JobSummary> summaries = client.getJobSummaryList();
@@ -368,9 +400,11 @@ public class JetCommandLine implements Runnable {
     )
     public void listSnapshots(
             @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets,
             @Option(names = {"-F", "--full-job-name"},
                     description = "Don't trim job name to fit, can break layout")
                     boolean fullJobName) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             Collection<JobStateSnapshot> snapshots = jet.getJobStateSnapshots();
             printf("%-23s %-15s %-24s %s", "TIME", "SIZE (bytes)", "JOB NAME", "SNAPSHOT NAME");
@@ -391,15 +425,20 @@ public class JetCommandLine implements Runnable {
             description = "Shows current cluster state and information about members"
     )
     public void cluster(
-            @Mixin(name = "verbosity") Verbosity verbosity
+            @Mixin(name = "verbosity") Verbosity verbosity,
+            @Mixin(name = "targets") TargetsMixin targets
     ) throws IOException {
+        targetsMixin.replace(targets);
         runWithJet(verbosity, jet -> {
             JetClientInstanceImpl client = (JetClientInstanceImpl) jet;
-            ClusterMetadata clusterMetadata = ((JetClientInstanceImpl) jet).getClusterMetadata();
+            HazelcastClientInstanceImpl hazelcastClient = client.getHazelcastClient();
+            ClientClusterService clientClusterService = hazelcastClient.getClientClusterService();
+            MCClusterMetadata clusterMetadata = FutureUtil.getValue(hazelcastClient.getManagementCenterService()
+                    .getClusterMetadata(clientClusterService.getMasterMember()));
             Cluster cluster = client.getCluster();
 
-            println("State: " + clusterMetadata.getState());
-            println("Version: " + clusterMetadata.getVersion());
+            println("State: " + clusterMetadata.getCurrentState());
+            println("Version: " + clusterMetadata.getJetVersion());
             println("Size: " + cluster.getMembers().size());
 
             println("");
@@ -438,6 +477,12 @@ public class JetCommandLine implements Runnable {
             config.setClusterName(clusterName);
             return config;
         }
+        if (targetsMixin.getTargets() != null) {
+            ClientConfig config = new ClientConfig();
+            config.getNetworkConfig().setAddresses(targetsMixin.getAddresses());
+            config.setClusterName(targetsMixin.getClusterName());
+            return config;
+        }
         return ConfigProvider.locateAndGetClientConfig();
     }
 
@@ -450,8 +495,8 @@ public class JetCommandLine implements Runnable {
         return config != null;
     }
 
-    private void configureLogging() throws IOException {
-        JetMemberStarter.configureLogging();
+    private void configureLogging() {
+        JetBootstrap.configureLogging();
         Level logLevel = Level.WARNING;
         if (verbosity.isVerbose) {
             println("Verbose mode is on, setting logging level to INFO");
@@ -541,6 +586,61 @@ public class JetCommandLine implements Runnable {
 
         void merge(Verbosity other) {
             isVerbose |= other.isVerbose;
+        }
+    }
+
+    public static class TargetsMixin {
+
+        @Option(names = {"-t", "--targets"},
+                description = "The cluster name and addresses to use if you want to connect to a "
+                    + "cluster other than the one configured in the configuration file. " +
+                        "At least one address is required. The cluster name is optional.",
+                paramLabel = "[<cluster-name>@]<hostname>:<port>[,<hostname>:<port>]",
+                converter = TargetsMixin.Converter.class)
+        private Targets targets;
+
+        private Targets getTargets() {
+            return targets;
+        }
+
+        public String getClusterName() {
+            return targets.clusterName;
+        }
+
+        public List<String> getAddresses() {
+            return targets.addresses;
+        }
+
+        public void replace(TargetsMixin targets) {
+            if (targets.getTargets() != null) {
+                this.targets = targets.getTargets();
+            }
+        }
+
+        public static class Targets {
+            private String clusterName = "jet";
+            private List<String> addresses = Collections.emptyList();
+        }
+
+        public static class Converter implements ITypeConverter<TargetsMixin.Targets> {
+            @Override
+            public Targets convert(String value) {
+                Targets targets = new Targets();
+                if (value == null) {
+                    return targets;
+                }
+
+                String[] values;
+                if (value.contains("@")) {
+                    values = value.split("@");
+                    targets.clusterName = values[0];
+                    targets.addresses = Arrays.asList(values[1].split(","));
+                } else {
+                    targets.addresses = Arrays.asList(value.split(","));
+                }
+
+                return targets;
+            }
         }
     }
 

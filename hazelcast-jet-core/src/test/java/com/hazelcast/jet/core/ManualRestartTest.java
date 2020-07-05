@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,6 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.TreeMap;
-import java.util.concurrent.CancellationException;
 import java.util.stream.Collectors;
 
 import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
@@ -131,12 +130,7 @@ public class ManualRestartTest extends JetTestSupport {
         Job job = client.newJob(dag);
         job.cancel();
 
-        try {
-            job.join();
-            fail();
-        } catch (CancellationException ignored) {
-            logger.info("Cancellation exception caught");
-        }
+        cancelAndJoin(job);
 
         // Then, the job cannot restart
         exception.expect(IllegalStateException.class);

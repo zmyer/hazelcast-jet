@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,17 +22,23 @@ import org.junit.Test;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static com.hazelcast.jet.config.ProcessingGuarantee.AT_LEAST_ONCE;
+import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
+import static com.hazelcast.jet.config.ProcessingGuarantee.NONE;
 import static com.hazelcast.jet.impl.util.Util.addClamped;
 import static com.hazelcast.jet.impl.util.Util.addOrIncrementIndexInName;
 import static com.hazelcast.jet.impl.util.Util.gcd;
 import static com.hazelcast.jet.impl.util.Util.memoizeConcurrent;
 import static com.hazelcast.jet.impl.util.Util.roundRobinPart;
 import static com.hazelcast.jet.impl.util.Util.subtractClamped;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -156,5 +162,54 @@ public class UtilTest {
                 roundRobinPart(3, 2, 0));
         assertArrayEquals(new int[] {1},
                 roundRobinPart(3, 2, 1));
+    }
+
+    @Test
+    public void test_minGuarantee() {
+        assertEquals(NONE, Util.min(NONE, AT_LEAST_ONCE));
+        assertEquals(AT_LEAST_ONCE, Util.min(AT_LEAST_ONCE, EXACTLY_ONCE));
+        assertEquals(NONE, Util.min(NONE, EXACTLY_ONCE));
+        assertEquals(NONE, Util.min(NONE, NONE));
+    }
+
+    @Test
+    public void whenNullToCheckSerializable_thenReturnNull() {
+        Object returned = Util.checkSerializable(null, "object");
+        assertThat(returned).isNull();
+    }
+
+    @Test
+    public void whenSerializableObjectToCheckSerializable_thenReturnObject() {
+        Object o = "o";
+        Object returned = Util.checkSerializable(o, "object");
+        assertThat(returned).isSameAs(o);
+    }
+
+    @Test
+    public void whenNonSerializableObjectToCheckSerializable_thenThrowException() {
+        assertThatThrownBy(() -> Util.checkSerializable(new HashMap<>().entrySet(), "object"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("\"object\" must implement Serializable");
+    }
+
+    @Test
+    public void whenNullToCheckNonNullAndSerializable_thenThrowException() {
+        assertThatThrownBy(() -> Util.checkNonNullAndSerializable(null, "object"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("\"object\" must not be null");
+    }
+
+    @Test
+    public void whenNonSerializableToCheckNonNullAndSerializable_thenThrowException() {
+        assertThatThrownBy(() -> Util.checkNonNullAndSerializable(new HashMap<>().entrySet(), "object"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("\"object\" must implement Serializable");
+    }
+
+    @Test
+    public void whenObjectToCheckNonNullAndSerializable_thenReturnObject() {
+        String s = "s";
+        String returned = Util.checkNonNullAndSerializable(s, "s");
+        assertThat(returned).isSameAs(s);
     }
 }

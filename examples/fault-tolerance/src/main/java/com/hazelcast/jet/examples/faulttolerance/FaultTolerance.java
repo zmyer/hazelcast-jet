@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -88,7 +88,7 @@ public class FaultTolerance {
         JetInstance instance1 = Jet.newJetInstance();
         JetInstance instance2 = Jet.newJetInstance();
 
-        // create a client and submit the price analyzer DAG
+        // create a client and submit the price analyzer pipeline
         JetInstance client = Jet.newJetClient();
         Job job = client.newJob(buildPipeline(), config);
 

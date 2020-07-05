@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -45,6 +45,7 @@ import java.util.function.Function;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 import static com.hazelcast.jet.impl.util.Util.getJetInstance;
+import static com.hazelcast.jet.impl.util.Util.toList;
 import static java.util.stream.Collectors.toList;
 
 public final class ExecutionPlanBuilder {
@@ -62,7 +63,7 @@ public final class ExecutionPlanBuilder {
         final Address[] partitionOwners = new Address[nodeEngine.getPartitionService().getPartitionCount()];
         initPartitionOwnersAndMembers(nodeEngine, membersView, members, partitionOwners);
 
-        final List<Address> addresses = members.stream().map(MemberInfo::getAddress).collect(toList());
+        final List<Address> addresses = toList(members, MemberInfo::getAddress);
         final int clusterSize = members.size();
         final boolean isJobDistributed = clusterSize > 1;
         final EdgeConfig defaultEdgeConfig = instance.getConfig().getDefaultEdgeConfig();

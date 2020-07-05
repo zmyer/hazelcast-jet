@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -43,7 +43,6 @@ import org.apache.kafka.common.utils.Time;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Properties;
-import java.util.UUID;
 
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static kafka.admin.AdminUtils.createTopic;
@@ -70,7 +69,6 @@ public class KafkaSource {
                 "bootstrap.servers", BOOTSTRAP_SERVERS,
                 "key.deserializer", StringDeserializer.class.getCanonicalName(),
                 "value.deserializer", IntegerDeserializer.class.getCanonicalName(),
-                "group.id", UUID.randomUUID().toString(),
                 "auto.offset.reset", AUTO_OFFSET_RESET)
                 , "t1", "t2"))
          .withoutTimestamps()
@@ -87,13 +85,13 @@ public class KafkaSource {
             createKafkaCluster();
             fillTopics();
 
-            JetInstance instance = Jet.newJetInstance();
-            IMap<String, Integer> sinkMap = instance.getMap(SINK_NAME);
+            JetInstance jet = Jet.bootstrappedInstance();
+            IMap<String, Integer> sinkMap = jet.getMap(SINK_NAME);
 
             Pipeline p = buildPipeline();
 
             long start = System.nanoTime();
-            Job job = instance.newJob(p);
+            Job job = jet.newJob(p);
             while (true) {
                 int mapSize = sinkMap.size();
                 System.out.format("Received %d entries in %d milliseconds.%n",

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.impl.connector;
 
+import com.hazelcast.core.ManagedContext;
 import com.hazelcast.function.BiConsumerEx;
 import com.hazelcast.function.ConsumerEx;
 import com.hazelcast.function.FunctionEx;
@@ -56,10 +57,12 @@ public final class WriteBufferedP<B, T> implements Processor {
 
     @Override
     public void init(@Nonnull Outbox outbox, @Nonnull Context context) {
-        buffer = createFn.apply(context);
-        if (buffer == null) {
+        B localBuff = createFn.apply(context);
+        if (localBuff == null) {
             throw new JetException("Null buffer created");
         }
+        ManagedContext managedContext = context.managedContext();
+        buffer = (B) managedContext.initialize(localBuff);
     }
 
     @Override

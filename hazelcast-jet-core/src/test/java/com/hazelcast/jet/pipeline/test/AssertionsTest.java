@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@ import java.util.stream.IntStream;
 import static com.hazelcast.function.Functions.wholeItem;
 import static com.hazelcast.jet.Traversers.traverseArray;
 import static com.hazelcast.jet.Util.entry;
+import static com.hazelcast.jet.impl.util.Util.toList;
 import static com.hazelcast.jet.pipeline.test.Assertions.assertCollected;
 import static com.hazelcast.jet.pipeline.test.Assertions.assertCollectedEventually;
 import static org.junit.Assert.assertEquals;
@@ -110,9 +111,7 @@ public class AssertionsTest extends PipelineTestSupport {
         List<Integer> input = IntStream.range(0, itemCount).boxed().collect(Collectors.toList());
         putToBatchSrcMap(input);
 
-        List<Entry<String, Integer>> expected = input.stream()
-                                                     .map(i -> entry(String.valueOf(i), i))
-                                                     .collect(Collectors.toList());
+        List<Entry<String, Integer>> expected = toList(input, i -> entry(String.valueOf(i), i));
 
         p.readFrom(Sources.map(srcMap))
          .apply(Assertions.assertAnyOrder(expected));

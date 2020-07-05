@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.impl.processor;
 
+import com.hazelcast.core.ManagedContext;
 import com.hazelcast.function.BiFunctionEx;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.ProcessorSupplier;
@@ -31,17 +32,18 @@ import static java.util.stream.Collectors.toList;
 /**
  * Common processor supplier for transform-using-service processors
  */
-public final class ProcessorSupplierWithService<S> implements ProcessorSupplier {
+public final class ProcessorSupplierWithService<C, S> implements ProcessorSupplier {
 
     static final long serialVersionUID = 1L;
 
-    private final ServiceFactory<S> serviceFactory;
-    private BiFunction<ServiceFactory<S>, S, Processor> createProcessorFn;
-    private transient S service;
+    private final ServiceFactory<C, S> serviceFactory;
+    private final BiFunction<? super ServiceFactory<C, S>, ? super C, ? extends Processor> createProcessorFn;
+
+    private transient C serviceContext;
 
     private ProcessorSupplierWithService(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull BiFunction<ServiceFactory<S>, S, Processor> createProcessorFn
+            @Nonnull ServiceFactory<C, S> serviceFactory,
+            @Nonnull BiFunction<? super ServiceFactory<C, S>, ? super C, ? extends Processor> createProcessorFn
     ) {
         this.serviceFactory = serviceFactory;
         this.createProcessorFn = createProcessorFn;
@@ -49,30 +51,29 @@ public final class ProcessorSupplierWithService<S> implements ProcessorSupplier 
 
     @Override
     public void init(@Nonnull Context context) {
-        if (serviceFactory.hasLocalSharing()) {
-            service = serviceFactory.createFn().apply(context.jetInstance());
-        }
+        ManagedContext managedContext = context.managedContext();
+        serviceContext = serviceFactory.createContextFn().apply(context);
+        serviceContext = (C) managedContext.initialize(serviceContext);
     }
 
-    @Nonnull
-    @Override
+    @Nonnull @Override
     public Collection<? extends Processor> get(int count) {
-        return Stream.generate(() -> createProcessorFn.apply(serviceFactory, service))
+        return Stream.generate(() -> createProcessorFn.apply(serviceFactory, serviceContext))
                 .limit(count)
                 .collect(toList());
     }
 
     @Override
     public void close(Throwable error) {
-        if (service != null) {
-            serviceFactory.destroyFn().accept(service);
+        if (serviceContext != null) {
+            serviceFactory.destroyContextFn().accept(serviceContext);
         }
     }
 
     @Nonnull
-    public static <S> ProcessorSupplier supplierWithService(
-            @Nonnull ServiceFactory<S> serviceFactory,
-            @Nonnull BiFunctionEx<ServiceFactory<S>, S, Processor> createProcessorFn
+    public static <C, S> ProcessorSupplier supplierWithService(
+            @Nonnull ServiceFactory<C, S> serviceFactory,
+            @Nonnull BiFunctionEx<? super ServiceFactory<C, S>, ? super C, ? extends Processor> createProcessorFn
     ) {
         return new ProcessorSupplierWithService<>(serviceFactory, createProcessorFn);
     }

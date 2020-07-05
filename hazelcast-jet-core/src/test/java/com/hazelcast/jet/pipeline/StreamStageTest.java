@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,10 +32,15 @@ import com.hazelcast.jet.datamodel.Tuple2;
 import com.hazelcast.jet.datamodel.Tuple3;
 import com.hazelcast.jet.function.TriFunction;
 import com.hazelcast.jet.impl.JetEvent;
+import com.hazelcast.jet.pipeline.test.SimpleEvent;
+import com.hazelcast.jet.pipeline.test.TestSources;
 import com.hazelcast.map.IMap;
 import com.hazelcast.replicatedmap.ReplicatedMap;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -43,6 +48,11 @@ import java.util.List;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.IntStream;
@@ -59,6 +69,8 @@ import static com.hazelcast.jet.datamodel.Tuple3.tuple3;
 import static com.hazelcast.jet.impl.JetEvent.jetEvent;
 import static com.hazelcast.jet.impl.pipeline.AbstractStage.transformOf;
 import static com.hazelcast.jet.pipeline.JoinClause.joinMapEntries;
+import static com.hazelcast.jet.pipeline.ServiceFactories.nonSharedService;
+import static com.hazelcast.jet.pipeline.ServiceFactories.sharedService;
 import static com.hazelcast.jet.pipeline.WindowDefinition.tumbling;
 import static com.hazelcast.jet.pipeline.test.AssertionSinks.assertAnyOrder;
 import static com.hazelcast.jet.pipeline.test.AssertionSinks.assertOrdered;
@@ -66,12 +78,17 @@ import static java.lang.Math.min;
 import static java.util.Collections.emptyList;
 import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class StreamStageTest extends PipelineStreamTestSupport {
 
     private static BiFunction<String, Integer, String> ENRICHING_FORMAT_FN =
             (prefix, i) -> String.format("%s-%04d", prefix, i);
+
+    @Rule
+    public ExpectedException exception = ExpectedException.none();
 
     @Test
     public void setName() {
@@ -354,14 +371,115 @@ public class StreamStageTest extends PipelineStreamTestSupport {
 
         // When
         StreamStage<String> mapped = streamStageFromList(input).mapUsingService(
-                ServiceFactory.withCreateFn(x -> suffix),
-                formatFn);
+                sharedService(pctx -> suffix),
+                formatFn
+        );
 
         // Then
         mapped.writeTo(sink);
         execute();
         assertEquals(
                 streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapUsingServiceAsync() {
+        ServiceFactory<?, ScheduledExecutorService> serviceFactory = sharedService(
+                pctx -> Executors.newScheduledThreadPool(8), ExecutorService::shutdown
+        );
+
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-context";
+
+        // When
+        StreamStage<String> mapped = streamStageFromList(input).mapUsingServiceAsync(
+                serviceFactory, (executor, i) -> {
+                    CompletableFuture<String> f = new CompletableFuture<>();
+                     executor.schedule(() -> {
+                         f.complete(formatFn.apply(suffix, i));
+                     }, 10, TimeUnit.MILLISECONDS);
+                     return f;
+                }
+        );
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapUsingServiceAsyncBatched() {
+        ServiceFactory<?, ScheduledExecutorService> serviceFactory = sharedService(
+                pctx -> Executors.newScheduledThreadPool(8), ExecutorService::shutdown
+        );
+
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-context";
+
+        // When
+        int batchSize = 4;
+        StreamStage<String> mapped = streamStageFromList(input).mapUsingServiceAsyncBatched(
+                serviceFactory, batchSize, (executor, list) -> {
+                    CompletableFuture<List<String>> f = new CompletableFuture<>();
+                    assertTrue("list size", list.size() <= batchSize && list.size() > 0);
+                    executor.schedule(() -> {
+                        List<String> result = list.stream().map(i -> formatFn.apply(suffix, i)).collect(toList());
+                        f.complete(result);
+                    }, 10, TimeUnit.MILLISECONDS);
+                    return f;
+                }
+        );
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapUsingServiceAsyncBatched_withFiltering() {
+        ServiceFactory<?, ScheduledExecutorService> serviceFactory = sharedService(
+                pctx -> Executors.newScheduledThreadPool(8), ExecutorService::shutdown
+        );
+
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-context";
+
+        // When
+        int batchSize = 4;
+        StreamStage<String> mapped = streamStageFromList(input).mapUsingServiceAsyncBatched(serviceFactory, batchSize,
+                (executor, list) -> {
+                    CompletableFuture<List<String>> f = new CompletableFuture<>();
+                    assertTrue("list size", list.size() <= batchSize && list.size() > 0);
+                    executor.schedule(() -> {
+                        List<String> result = list.stream()
+                                .map(i -> i % 13 == 0 ? null : formatFn.apply(suffix, i))
+                                .collect(toList());
+                        f.complete(result);
+                    }, 10, TimeUnit.MILLISECONDS);
+                    return f;
+                }
+        );
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream()
+                        .filter(i -> i % 13 != 0)
+                        .map(i -> formatFn.apply(suffix, i)), identity()),
                 streamToString(sinkList.stream(), Object::toString));
     }
 
@@ -375,7 +493,10 @@ public class StreamStageTest extends PipelineStreamTestSupport {
         // When
         StreamStage<String> mapped = streamStageFromList(input)
                 .groupingKey(i -> i)
-                .mapUsingService(ServiceFactory.withCreateFn(i -> suffix), (suff, k, i) -> formatFn.apply(suff, i));
+                .mapUsingService(
+                        sharedService(pctx -> suffix),
+                        (suff, k, i) -> formatFn.apply(suff, i)
+                );
 
         // Then
         mapped.writeTo(sink);
@@ -383,6 +504,162 @@ public class StreamStageTest extends PipelineStreamTestSupport {
         assertEquals(
                 streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
                 streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapUsingServiceAsync_keyed() {
+        ServiceFactory<?, ScheduledExecutorService> serviceFactory = sharedService(
+                pctx -> Executors.newScheduledThreadPool(8), ExecutorService::shutdown
+        );
+
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-keyed-context";
+
+        // When
+        StreamStage<String> mapped = streamStageFromList(input)
+                .groupingKey(i -> i)
+                .mapUsingServiceAsync(
+                        serviceFactory, (executor, k, i) -> {
+                            CompletableFuture<String> f = new CompletableFuture<>();
+                            executor.schedule(() -> {
+                                f.complete(formatFn.apply(suffix, i));
+                            }, 10, TimeUnit.MILLISECONDS);
+                            return f;
+                        }
+                );
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapUsingServiceAsyncBatched_keyed_keysExposed() {
+        ServiceFactory<?, ScheduledExecutorService> serviceFactory = sharedService(
+                pctx -> Executors.newScheduledThreadPool(8), ExecutorService::shutdown
+        );
+
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-keyed-context";
+
+        // When
+        int batchSize = 4;
+        StreamStage<String> mapped = streamStageFromList(input)
+                .groupingKey(i -> i)
+                .mapUsingServiceAsyncBatched(
+                        serviceFactory,
+                        batchSize,
+                        (executor, keys, items) -> {
+                            CompletableFuture<List<String>> f = new CompletableFuture<>();
+                            assertTrue("list size", items.size() <= batchSize && items.size() > 0);
+                            assertEquals("lists size equality", items.size(), keys.size());
+                            executor.schedule(() -> {
+                                List<String> result = items.stream()
+                                        .map(i -> formatFn.apply(suffix, i))
+                                        .collect(toList());
+                                f.complete(result);
+                            }, 10, TimeUnit.MILLISECONDS);
+                            return f;
+                        }
+                );
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapUsingServiceAsyncBatched_keyed_keysHidden() {
+        ServiceFactory<?, ScheduledExecutorService> serviceFactory = sharedService(
+                pctx -> Executors.newScheduledThreadPool(8), ExecutorService::shutdown
+        );
+
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-keyed-context";
+
+        // When
+        int batchSize = 4;
+        StreamStage<String> mapped = streamStageFromList(input)
+                .groupingKey(i -> i)
+                .mapUsingServiceAsyncBatched(
+                        serviceFactory,
+                        batchSize,
+                        (executor, items) -> {
+                            CompletableFuture<List<String>> f = new CompletableFuture<>();
+                            assertTrue("list size", items.size() <= batchSize && items.size() > 0);
+                            executor.schedule(() -> {
+                                List<String> result = items.stream()
+                                        .map(i -> formatFn.apply(suffix, i))
+                                        .collect(toList());
+                                f.complete(result);
+                            }, 10, TimeUnit.MILLISECONDS);
+                            return f;
+                        }
+                );
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkList.stream(), Object::toString));
+    }
+
+    @Test
+    public void mapUsingServiceAsyncBatched_keyed_withFiltering() {
+        ServiceFactory<?, ScheduledExecutorService> serviceFactory = sharedService(
+                pctx -> Executors.newScheduledThreadPool(8), ExecutorService::shutdown
+        );
+
+        // Given
+        List<Integer> input = sequence(itemCount);
+        BiFunctionEx<String, Integer, String> formatFn = (suffix, i) -> String.format("%04d%s", i, suffix);
+        String suffix = "-context";
+
+        // When
+        int batchSize = 32;
+        StreamStage<String> mapped = streamStageFromList(input)
+                .groupingKey(i -> i % 23)
+                .mapUsingServiceAsyncBatched(
+                        serviceFactory,
+                        batchSize,
+                        (executor, keys, items) -> {
+                            CompletableFuture<List<String>> f = new CompletableFuture<>();
+                            assertTrue("list size", items.size() <= batchSize && items.size() > 0);
+                            assertEquals("lists size equality", items.size(), keys.size());
+                            executor.schedule(() -> {
+                                List<String> results = items.isEmpty() ? Collections.emptyList() : new ArrayList<>();
+                                for (int i = 0; i < items.size(); i++) {
+                                    Integer item = items.get(i);
+                                    Integer key = keys.get(i);
+                                    results.add(item % 13 == 0 || key == 0 ? null : formatFn.apply(suffix, item));
+                                }
+                                f.complete(results);
+                            }, 10, TimeUnit.MILLISECONDS);
+                            return f;
+                        }
+                );
+
+        // Then
+        mapped.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream()
+                        .filter(i -> i % 13 != 0 && i % 23 != 0)
+                        .map(i -> formatFn.apply(suffix, i)), identity()),
+                streamToString(sinkStreamOf(String.class), identity()));
     }
 
     @Test
@@ -394,7 +671,10 @@ public class StreamStageTest extends PipelineStreamTestSupport {
 
         // When
         StreamStage<Integer> mapped = streamStageFromList(input)
-                .filterUsingService(ServiceFactory.withCreateFn(i -> acceptedRemainder), (rem, i) -> i % 2 == rem);
+                .filterUsingService(
+                        ServiceFactories.sharedService(pctx -> acceptedRemainder),
+                        (rem, i) -> i % 2 == rem
+                );
 
         // Then
         mapped.writeTo(sink);
@@ -415,8 +695,9 @@ public class StreamStageTest extends PipelineStreamTestSupport {
         StreamStage<Integer> mapped = streamStageFromList(input)
                 .groupingKey(i -> i)
                 .filterUsingService(
-                        ServiceFactory.withCreateFn(i -> acceptedRemainder),
-                        (rem, k, i) -> i % 2 == rem);
+                        ServiceFactories.sharedService(pctx -> acceptedRemainder),
+                        (rem, k, i) -> i % 2 == rem
+                );
 
         // Then
         mapped.writeTo(sink);
@@ -436,7 +717,7 @@ public class StreamStageTest extends PipelineStreamTestSupport {
         // When
         StreamStage<String> flatMapped = streamStageFromList(input)
                 .flatMapUsingService(
-                        ServiceFactory.withCreateFn(x -> flatMapFn),
+                        ServiceFactories.sharedService(pctx -> flatMapFn),
                         (fn, i) -> traverseStream(fn.apply(i))
                 );
 
@@ -459,7 +740,7 @@ public class StreamStageTest extends PipelineStreamTestSupport {
         StreamStage<String> flatMapped = streamStageFromList(input)
                 .groupingKey(i -> i)
                 .flatMapUsingService(
-                        ServiceFactory.withCreateFn(x -> flatMapFn),
+                        ServiceFactories.sharedService(pctx -> flatMapFn),
                         (fn, k, i) -> traverseStream(fn.apply(i))
                 );
 
@@ -642,7 +923,7 @@ public class StreamStageTest extends PipelineStreamTestSupport {
         execute();
         Function<Entry<Integer, String>, String> formatFn = e -> String.format("%d %s", e.getKey(), e.getValue());
         assertEquals(
-                streamToString(Stream.of(entry(0, evictedSignal)), formatFn),
+                streamToString(Stream.of(entry(0, evictedSignal), entry(1, evictedSignal)), formatFn),
                 streamToString(sinkStreamOfEntry(), formatFn)
         );
     }
@@ -899,6 +1180,47 @@ public class StreamStageTest extends PipelineStreamTestSupport {
     }
 
     @Test
+    public void when_mergeTimestampedToNonTimestamped_then_error() {
+        StreamStage<SimpleEvent> timestamped = p.readFrom(TestSources.itemStream(1)).withIngestionTimestamps();
+        StreamStage<SimpleEvent> nonTimestamped = p.readFrom(TestSources.itemStream(1)).withoutTimestamps();
+
+        // Then
+        exception.expectMessage("both have or both not have timestamp definitions");
+
+        // When
+        nonTimestamped.merge(timestamped);
+    }
+
+    @Test
+    public void when_mergeNonTimestampedToTimestamped_then_error() {
+        StreamStage<SimpleEvent> timestamped = p.readFrom(TestSources.itemStream(1)).withIngestionTimestamps();
+        StreamStage<SimpleEvent> nonTimestamped = p.readFrom(TestSources.itemStream(1)).withoutTimestamps();
+
+        // Then
+        exception.expectMessage("both have or both not have timestamp definitions");
+
+        // When
+        timestamped.merge(nonTimestamped);
+    }
+
+    @Test
+    public void when_mergeToItself_then_doubleOutput() {
+        List<Integer> input = sequence(itemCount);
+        Function<Integer, String> formatFn = i -> String.format("%04d", i);
+        StreamStage<Integer> srcStage0 = streamStageFromList(input);
+
+        // When
+        StreamStage<Integer> merged = srcStage0.merge(srcStage0);
+
+        // Then
+        merged.writeTo(sink);
+        execute();
+        assertEquals(
+                streamToString(input.stream().flatMap(i -> Stream.of(i, i)), formatFn),
+                streamToString(sinkStreamOf(Integer.class), formatFn));
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     public void hashJoin() {
         // Given
@@ -924,6 +1246,40 @@ public class StreamStageTest extends PipelineStreamTestSupport {
         assertEquals(
                 streamToString(
                         input.stream().map(i -> formatFn.apply(i, ENRICHING_FORMAT_FN.apply(prefixA, i))),
+                        identity()),
+                streamToString(
+                        sinkList.stream().map(t2 -> (Tuple2<Integer, String>) t2),
+                        t2 -> formatFn.apply(t2.f0(), t2.f1()))
+        );
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void innerHashJoin() {
+        // Given
+        List<Integer> input = sequence(itemCount);
+        String prefixA = "A";
+        // entry(0, "A-0000"), entry(2, "A-0002"), ...
+        List<Integer> enrichingInputList = input.stream().filter(e -> e % 2 == 0).collect(toList());
+        BatchStage<Entry<Integer, String>> enrichingStage = enrichingStage(enrichingInputList, prefixA);
+
+        // When
+        @SuppressWarnings("Convert2MethodRef")
+        // there's a method ref bug in JDK
+        StreamStage<Tuple2<Integer, String>> hashJoined = streamStageFromList(input).innerHashJoin(
+                enrichingStage,
+                joinMapEntries(wholeItem()),
+                (i, valueA) -> tuple2(i, valueA)
+        );
+
+        // Then
+        hashJoined.writeTo(sink);
+        execute();
+        BiFunction<Integer, String, String> formatFn = (i, value) -> String.format("(%04d, %s)", i, value);
+        // sinkList: tuple2(0, "A-0000"), tuple2(2, "A-0002"), ...
+        assertEquals(
+                streamToString(
+                        enrichingInputList.stream().map(i -> formatFn.apply(i, ENRICHING_FORMAT_FN.apply(prefixA, i))),
                         identity()),
                 streamToString(
                         sinkList.stream().map(t2 -> (Tuple2<Integer, String>) t2),
@@ -1065,7 +1421,7 @@ public class StreamStageTest extends PipelineStreamTestSupport {
         StreamStage<Object> custom = streamStageFromList(input)
                 .groupingKey(extractKeyFn)
                 .customTransform("map", Processors.mapUsingServiceP(
-                        ServiceFactory.withCreateFn(jet -> new HashSet<>()),
+                        nonSharedService(pctx -> new HashSet<>()),
                         (Set<Integer> seen, JetEvent<Integer> jetEvent) -> {
                             Integer key = extractKeyFn.apply(jetEvent.payload());
                             return seen.add(key) ? jetEvent(jetEvent.timestamp(), key) : null;

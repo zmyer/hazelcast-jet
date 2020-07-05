@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,13 @@
 package com.hazelcast.jet.config;
 
 import com.hazelcast.core.HazelcastException;
-import com.hazelcast.jet.Jet;
 import com.hazelcast.jet.impl.config.ConfigProvider;
 import com.hazelcast.jet.impl.config.XmlJetConfigBuilder;
-import com.hazelcast.jet.impl.util.Util;
+import com.hazelcast.jet.impl.util.IOUtil;
+import com.hazelcast.jet.test.SerialTest;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 
 import java.io.File;
@@ -39,6 +40,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThat;
 
 @RunWith(HazelcastSerialClassRunner.class)
+@Category({SerialTest.class})
 public class XmlJetConfigWithSystemPropertyTest extends AbstractJetMemberConfigWithSystemPropertyTest {
 
     private static final String TEST_XML_1 = "hazelcast-jet-test.xml";
@@ -63,7 +65,7 @@ public class XmlJetConfigWithSystemPropertyTest extends AbstractJetMemberConfigW
         File tempFile = File.createTempFile("jet", ".xml");
         try (FileOutputStream os = new FileOutputStream(tempFile)) {
             InputStream resourceAsStream = getClass().getClassLoader().getResourceAsStream(TEST_XML_1);
-            os.write(Util.readFully(resourceAsStream));
+            os.write(IOUtil.readFully(resourceAsStream));
         }
         System.setProperty(SYSPROP_JET_CONFIG, tempFile.getAbsolutePath());
 
@@ -108,7 +110,7 @@ public class XmlJetConfigWithSystemPropertyTest extends AbstractJetMemberConfigW
         File tempFile = File.createTempFile("imdg", ".xml");
         try (FileOutputStream os = new FileOutputStream(tempFile)) {
             InputStream resourceAsStream = getClass().getClassLoader().getResourceAsStream(TEST_XML_2);
-            os.write(Util.readFully(resourceAsStream));
+            os.write(IOUtil.readFully(resourceAsStream));
         }
         System.setProperty(SYSPROP_MEMBER_CONFIG, tempFile.getAbsolutePath());
 
@@ -244,7 +246,7 @@ public class XmlJetConfigWithSystemPropertyTest extends AbstractJetMemberConfigW
         File tempFile = File.createTempFile("jet", ".xml");
         try (FileOutputStream os = new FileOutputStream(tempFile)) {
             InputStream resourceAsStream = getClass().getClassLoader().getResourceAsStream("hazelcast-jet-foo.bar");
-            os.write(Util.readFully(resourceAsStream));
+            os.write(IOUtil.readFully(resourceAsStream));
         }
         System.setProperty(SYSPROP_JET_CONFIG, tempFile.getAbsolutePath());
 
@@ -264,8 +266,6 @@ public class XmlJetConfigWithSystemPropertyTest extends AbstractJetMemberConfigW
     @Test(expected = HazelcastException.class)
     public void when_loadingThroughSystemPropertyViaLocator_nonXmlSuffix_then_throwsException() {
         System.setProperty(SYSPROP_JET_CONFIG, "classpath:hazelcast-jet-foo.bar");
-        Jet.newJetInstance(); // TODO [viliam] remove?
         JetConfig config = ConfigProvider.locateAndGetJetConfig();
-
     }
 }

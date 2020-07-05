@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,17 +24,21 @@ import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.jet.config.JetClientConfig;
 import com.hazelcast.jet.core.JetTestSupport;
 import com.hazelcast.jet.core.TestProcessors;
+import com.hazelcast.jet.test.SerialTest;
 import com.hazelcast.test.HazelcastSerialClassRunner;
+import com.hazelcast.test.annotation.SlowTest;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 
 import static org.junit.Assert.assertEquals;
 
 @RunWith(HazelcastSerialClassRunner.class)
+@Category({SerialTest.class, SlowTest.class})
 public class MulticastDiscoveryTest extends JetTestSupport {
 
     private static final String UNABLE_TO_CONNECT_MESSAGE = "Unable to connect";
@@ -55,22 +59,22 @@ public class MulticastDiscoveryTest extends JetTestSupport {
 
     @Test
     public void when_twoJetInstancesCreated_then_clusterOfTwoShouldBeFormed() {
-        JetInstance instance1 = Jet.newJetInstance();
-        JetInstance instance2 = Jet.newJetInstance();
+        JetInstance instance = Jet.newJetInstance();
+        Jet.newJetInstance();
 
-        assertEquals(2, instance1.getCluster().getMembers().size());
+        assertEquals(2, instance.getCluster().getMembers().size());
     }
 
     @Test
     public void when_twoJetAndTwoHzInstancesCreated_then_twoClustersOfTwoShouldBeFormed() {
-        JetInstance jetInstance1 = Jet.newJetInstance();
-        JetInstance jetInstance2 = Jet.newJetInstance();
+        JetInstance jetInstance = Jet.newJetInstance();
+        Jet.newJetInstance();
 
-        HazelcastInstance hazelcastInstance1 = Hazelcast.newHazelcastInstance();
-        HazelcastInstance hazelcastInstance2 = Hazelcast.newHazelcastInstance();
+        HazelcastInstance hazelcastInstance = Hazelcast.newHazelcastInstance();
+        Hazelcast.newHazelcastInstance();
 
-        assertEquals(2, jetInstance1.getCluster().getMembers().size());
-        assertEquals(2, hazelcastInstance1.getCluster().getMembers().size());
+        assertEquals(2, jetInstance.getCluster().getMembers().size());
+        assertEquals(2, hazelcastInstance.getCluster().getMembers().size());
     }
 
     @Test

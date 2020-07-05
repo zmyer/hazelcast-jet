@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.function.FunctionEx;
 import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
@@ -24,9 +25,14 @@ import com.hazelcast.jet.SimpleTestInClusterSupport;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.TestProcessors.Identity;
+import com.hazelcast.jet.core.TestProcessors.ListSource;
 import com.hazelcast.jet.core.TestProcessors.MockP;
 import com.hazelcast.jet.core.TestProcessors.MockPS;
 import com.hazelcast.jet.core.TestProcessors.NoOutputSourceP;
+import com.hazelcast.jet.core.processor.DiagnosticProcessors;
+import com.hazelcast.nio.ObjectDataInput;
+import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.nio.serialization.StreamSerializer;
 import com.hazelcast.test.ExpectedRuntimeException;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Before;
@@ -37,6 +43,7 @@ import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 
 import javax.annotation.Nonnull;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -49,6 +56,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.JobStatus.COMPLETED;
 import static com.hazelcast.jet.core.JobStatus.FAILED;
 import static com.hazelcast.jet.core.JobStatus.NOT_RUNNING;
@@ -147,8 +155,7 @@ public class JobTest extends SimpleTestInClusterSupport {
         NoOutputSourceP.executionStarted.await();
 
         // Then
-        job.cancel();
-        joinAndExpectCancellation(job);
+        cancelAndJoin(job);
 
         NoOutputSourceP.proceedLatch.countDown();
         assertJobStatusEventually(job, FAILED);
@@ -187,8 +194,7 @@ public class JobTest extends SimpleTestInClusterSupport {
         // Then
         assertJobStatusEventually(trackedJob, RUNNING);
 
-        submittedJob.cancel();
-        joinAndExpectCancellation(submittedJob);
+        cancelAndJoin(submittedJob);
     }
 
     @Test
@@ -206,8 +212,7 @@ public class JobTest extends SimpleTestInClusterSupport {
         // Then
         assertJobStatusEventually(trackedJob, RUNNING);
 
-        submittedJob.cancel();
-        joinAndExpectCancellation(submittedJob);
+        cancelAndJoin(submittedJob);
     }
 
     @Test
@@ -227,8 +232,7 @@ public class JobTest extends SimpleTestInClusterSupport {
         // Then
         assertJobStatusEventually(trackedJob, RUNNING);
 
-        submittedJob.cancel();
-        joinAndExpectCancellation(submittedJob);
+        cancelAndJoin(submittedJob);
     }
 
     @Test
@@ -728,6 +732,24 @@ public class JobTest extends SimpleTestInClusterSupport {
         assertNotEquals(0, trackedJob.getSubmissionTime());
     }
 
+    @Test
+    public void when_serializerIsRegistered_then_itIsAvailableForTheJob() {
+        // Given
+        DAG dag = new DAG();
+        Vertex source = dag.newVertex("source", () -> new ListSource(new Value(1), new Value(2)));
+        Vertex sink = dag.newVertex("sink", DiagnosticProcessors.writeLoggerP());
+        dag.edge(between(source, sink).distributed().partitioned(FunctionEx.identity()));
+
+        JobConfig config = new JobConfig()
+                .registerSerializer(Value.class, ValueSerializer.class);
+
+        // When
+        Job job = instance().newJob(dag, config);
+
+        // Then
+        assertJobStatusEventually(job, COMPLETED);
+    }
+
     private void joinAndExpectCancellation(Job job) {
         try {
             job.join();
@@ -755,6 +777,33 @@ public class JobTest extends SimpleTestInClusterSupport {
         public Collection<? extends Processor> get(int count) {
             return Stream.generate(supplier).limit(count).collect(toList());
 
+        }
+    }
+
+    private static final class Value {
+
+        private final int value;
+
+        private Value(int value) {
+            this.value = value;
+        }
+    }
+
+    private static class ValueSerializer implements StreamSerializer<Value> {
+
+        @Override
+        public int getTypeId() {
+            return 1;
+        }
+
+        @Override
+        public void write(ObjectDataOutput output, Value value) throws IOException {
+            output.writeInt(value.value);
+        }
+
+        @Override
+        public Value read(ObjectDataInput input) throws IOException {
+            return new Value(input.readInt());
         }
     }
 }

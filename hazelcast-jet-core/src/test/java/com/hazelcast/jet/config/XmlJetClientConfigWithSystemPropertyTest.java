@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,9 +20,11 @@ import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.client.config.XmlClientConfigBuilder;
 import com.hazelcast.core.HazelcastException;
 import com.hazelcast.jet.impl.config.XmlJetClientConfigLocator;
-import com.hazelcast.jet.impl.util.Util;
+import com.hazelcast.jet.impl.util.IOUtil;
+import com.hazelcast.jet.test.SerialTest;
 import com.hazelcast.test.HazelcastSerialClassRunner;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 
 import java.io.File;
@@ -35,6 +37,7 @@ import static com.hazelcast.internal.config.DeclarativeConfigUtil.SYSPROP_CLIENT
 import static org.junit.Assert.assertEquals;
 
 @RunWith(HazelcastSerialClassRunner.class)
+@Category({SerialTest.class})
 public class XmlJetClientConfigWithSystemPropertyTest extends AbstractJetConfigWithSystemPropertyTest {
 
     private static final String JET_CLIENT_XML = "hazelcast-client-test.xml";
@@ -73,7 +76,7 @@ public class XmlJetClientConfigWithSystemPropertyTest extends AbstractJetConfigW
         File tempFile = File.createTempFile("jet", ".xml");
         try (FileOutputStream os = new FileOutputStream(tempFile)) {
             InputStream resourceAsStream = getClass().getClassLoader().getResourceAsStream(JET_CLIENT_XML);
-            os.write(Util.readFully(resourceAsStream));
+            os.write(IOUtil.readFully(resourceAsStream));
         }
         System.setProperty(SYSPROP_CLIENT_CONFIG, tempFile.getAbsolutePath());
 

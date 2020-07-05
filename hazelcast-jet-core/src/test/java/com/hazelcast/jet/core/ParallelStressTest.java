@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@ import org.junit.runner.RunWith;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -81,11 +80,7 @@ public class ParallelStressTest extends JetTestSupport {
         }
         sleepSeconds(3);
         for (Job job : jobs) {
-            job.cancel();
-            try {
-                job.join();
-            } catch (CancellationException expected) {
-            }
+            cancelAndJoin(job);
         }
     }
 }

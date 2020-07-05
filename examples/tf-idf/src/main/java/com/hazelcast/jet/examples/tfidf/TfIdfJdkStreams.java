@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -116,7 +116,7 @@ public class TfIdfJdkStreams {
 
     static Stream<Entry<String, String>> docLines(String name) {
         try {
-            return Files.lines(Paths.get(TfIdfJdkStreams.class.getResource("books/" + name).toURI()))
+            return Files.lines(Paths.get(TfIdfJdkStreams.class.getResource("/books/" + name).toURI()))
                         .map(String::toLowerCase)
                         .map(line -> entry(name, line));
         } catch (IOException | URISyntaxException e) {

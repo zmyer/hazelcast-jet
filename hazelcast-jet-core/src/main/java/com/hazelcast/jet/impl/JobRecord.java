@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,17 @@
 
 package com.hazelcast.jet.impl;
 
+import com.hazelcast.internal.nio.IOUtil;
+import com.hazelcast.internal.serialization.Data;
+import com.hazelcast.internal.util.Clock;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
-import com.hazelcast.nio.serialization.Data;
 import com.hazelcast.nio.serialization.IdentifiedDataSerializable;
 
 import java.io.IOException;
+import java.util.Set;
 
 import static com.hazelcast.jet.Util.idToString;
 import static com.hazelcast.jet.impl.util.Util.toLocalDateTime;
@@ -38,19 +41,21 @@ public class JobRecord implements IdentifiedDataSerializable {
     private long jobId;
     private long creationTime;
     private Data dag;
-    // JSON representation of DAG, used by management center
+    // JSON representation of DAG, used by Management Center
     private String dagJson;
     private JobConfig config;
+    private Set<String> ownedObservables;
 
     public JobRecord() {
     }
 
-    public JobRecord(long jobId, long creationTime, Data dag, String dagJson, JobConfig config) {
+    public JobRecord(long jobId, Data dag, String dagJson, JobConfig config, Set<String> ownedObservables) {
         this.jobId = jobId;
-        this.creationTime = creationTime;
+        this.creationTime = Clock.currentTimeMillis();
         this.dag = dag;
         this.dagJson = dagJson;
         this.config = config;
+        this.ownedObservables = ownedObservables;
     }
 
     public long getJobId() {
@@ -69,13 +74,17 @@ public class JobRecord implements IdentifiedDataSerializable {
         return dag;
     }
 
-    // used by ManCenter
+    // used by Management Center
     public String getDagJson() {
         return dagJson;
     }
 
     public JobConfig getConfig() {
         return config;
+    }
+
+    public Set<String> getOwnedObservables() {
+        return ownedObservables;
     }
 
     @Override
@@ -92,18 +101,20 @@ public class JobRecord implements IdentifiedDataSerializable {
     public void writeData(ObjectDataOutput out) throws IOException {
         out.writeLong(jobId);
         out.writeLong(creationTime);
-        out.writeData(dag);
+        IOUtil.writeData(out, dag);
         out.writeUTF(dagJson);
         out.writeObject(config);
+        out.writeObject(ownedObservables);
     }
 
     @Override
     public void readData(ObjectDataInput in) throws IOException {
         jobId = in.readLong();
         creationTime = in.readLong();
-        dag = in.readData();
+        dag = IOUtil.readData(in);
         dagJson = in.readUTF();
         config = in.readObject();
+        ownedObservables = in.readObject();
     }
 
     @Override
@@ -114,6 +125,7 @@ public class JobRecord implements IdentifiedDataSerializable {
                 ", creationTime=" + toLocalDateTime(creationTime) +
                 ", dagJson=" + dagJson +
                 ", config=" + config +
+                ", ownedObservables=" + ownedObservables +
                 '}';
     }
 }

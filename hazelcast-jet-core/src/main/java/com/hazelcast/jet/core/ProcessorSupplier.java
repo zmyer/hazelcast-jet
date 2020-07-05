@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,17 @@
 
 package com.hazelcast.jet.core;
 
+import com.hazelcast.core.ManagedContext;
 import com.hazelcast.function.SupplierEx;
+import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.impl.processor.ProcessorSupplierFromSimpleSupplier;
 import com.hazelcast.logging.ILogger;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.io.File;
 import java.io.Serializable;
 import java.util.Collection;
-import java.util.stream.Stream;
-
-import static java.util.stream.Collectors.toList;
 
 /**
  * Factory of {@link Processor} instances. Part of the initialization
@@ -82,7 +83,7 @@ public interface ProcessorSupplier extends Serializable {
      */
     @Nonnull
     static ProcessorSupplier of(@Nonnull SupplierEx<? extends Processor> processorSupplier) {
-        return count -> Stream.generate(processorSupplier).limit(count).collect(toList());
+        return new ProcessorSupplierFromSimpleSupplier(processorSupplier);
     }
 
     /**
@@ -105,5 +106,35 @@ public interface ProcessorSupplier extends Serializable {
          * The value is in the range {@code [0...memberCount-1]}.
          */
         int memberIndex();
+
+        /**
+         * Uses the supplied ID to look up a directory you attached to the current
+         * Jet job. Creates a temporary directory with the same contents on the
+         * local cluster member and returns the location of the created directory.
+         * If the directory was already created, just returns its location.
+         *
+         * @param id the ID you used in a previous {@link JobConfig#attachDirectory} call
+         * @since 4.0
+         */
+        @Nonnull
+        File attachedDirectory(@Nonnull String id);
+
+        /**
+         * Uses the supplied ID to look up a file you attached to the current Jet
+         * job. Creates a temporary file with the same contents on the local
+         * cluster member and returns the location of the created file. If the
+         * file was already created, just returns its location.
+         *
+         * @param id the ID you used in a previous {@link JobConfig#attachFile} call
+         * @since 4.0
+         */
+        @Nonnull
+        File attachedFile(@Nonnull String id);
+
+        /**
+         * Returns {@link ManagedContext} associated with this job.
+         */
+        @Nonnull
+        ManagedContext managedContext();
     }
 }

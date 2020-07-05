@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,8 +47,7 @@ public class WriteTextSocket {
         NettyServer nettyServer = new NettyServer(PORT, ConsumerEx.noop(), msg -> COUNTER.incrementAndGet());
         nettyServer.start();
 
-        JetInstance jet = Jet.newJetInstance();
-        Jet.newJetInstance();
+        JetInstance jet = Jet.bootstrappedInstance();
 
         try {
             System.out.println("Populating map...");

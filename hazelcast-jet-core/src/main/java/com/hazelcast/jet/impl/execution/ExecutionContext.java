@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,12 @@ import com.hazelcast.cluster.Address;
 import com.hazelcast.internal.metrics.DynamicMetricsProvider;
 import com.hazelcast.internal.metrics.MetricDescriptor;
 import com.hazelcast.internal.metrics.MetricsCollectionContext;
-import com.hazelcast.internal.nio.BufferObjectDataInput;
+import com.hazelcast.internal.metrics.ProbeLevel;
+import com.hazelcast.internal.metrics.ProbeUnit;
+import com.hazelcast.internal.nio.IOUtil;
+import com.hazelcast.internal.serialization.InternalSerializationService;
+import com.hazelcast.internal.util.counters.Counter;
+import com.hazelcast.internal.util.counters.MwCounter;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.metrics.MetricTags;
@@ -30,19 +35,24 @@ import com.hazelcast.jet.impl.exception.JobTerminateRequestedException;
 import com.hazelcast.jet.impl.exception.TerminatedWithSnapshotException;
 import com.hazelcast.jet.impl.execution.init.ExecutionPlan;
 import com.hazelcast.jet.impl.metrics.RawJobMetrics;
-import com.hazelcast.jet.impl.operation.SnapshotOperation.SnapshotOperationResult;
+import com.hazelcast.jet.impl.operation.SnapshotPhase1Operation.SnapshotPhase1Result;
+import com.hazelcast.jet.impl.util.LoggingUtil;
 import com.hazelcast.jet.impl.util.Util;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.spi.impl.NodeEngine;
 
 import javax.annotation.Nullable;
+import java.io.File;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static com.hazelcast.jet.Util.idToString;
+import static com.hazelcast.jet.core.metrics.MetricNames.EXECUTION_COMPLETION_TIME;
+import static com.hazelcast.jet.core.metrics.MetricNames.EXECUTION_START_TIME;
 import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.unmodifiableList;
@@ -61,6 +71,14 @@ public class ExecutionContext implements DynamicMetricsProvider {
     private final Set<Address> participants;
     private final Object executionLock = new Object();
     private final ILogger logger;
+    private final Counter startTime = MwCounter.newMwCounter(-1);
+    private final Counter completionTime = MwCounter.newMwCounter(-1);
+
+    // key: resource identifier
+    // we use ConcurrentHashMap because ConcurrentMap doesn't guarantee that computeIfAbsent
+    // executes the supplier strictly only if it's needed.
+    private final ConcurrentHashMap<String, File> tempDirectories = new ConcurrentHashMap<>();
+
     private String jobName;
 
     // dest vertex id --> dest ordinal --> sender addr --> receiver tasklet
@@ -85,8 +103,9 @@ public class ExecutionContext implements DynamicMetricsProvider {
     private JobConfig jobConfig;
 
     private boolean metricsEnabled;
-
     private volatile RawJobMetrics jobMetrics = RawJobMetrics.empty();
+
+    private InternalSerializationService serializationService;
 
     public ExecutionContext(NodeEngine nodeEngine, TaskletExecutionService taskletExecService,
                             long jobId, long executionId, Address coordinator, Set<Address> participants) {
@@ -99,7 +118,7 @@ public class ExecutionContext implements DynamicMetricsProvider {
 
         this.jobName = idToString(jobId);
 
-        logger = nodeEngine.getLogger(getClass());
+        this.logger = nodeEngine.getLogger(getClass());
     }
 
     public ExecutionContext initialize(ExecutionPlan plan) {
@@ -112,12 +131,17 @@ public class ExecutionContext implements DynamicMetricsProvider {
         snapshotContext = new SnapshotContext(nodeEngine.getLogger(SnapshotContext.class), jobNameAndExecutionId(),
                 plan.lastSnapshotId(), jobConfig.getProcessingGuarantee());
 
+        JetService jetService = nodeEngine.getService(JetService.SERVICE_NAME);
+        serializationService = jetService.createSerializationService(jobConfig.getSerializerConfigs());
+
         metricsEnabled = jobConfig.isMetricsEnabled() && nodeEngine.getConfig().getMetricsConfig().isEnabled();
-        plan.initialize(nodeEngine, jobId, executionId, snapshotContext);
-        snapshotContext.initTaskletCount(plan.getStoreSnapshotTaskletCount(), plan.getHigherPriorityVertexCount());
+        plan.initialize(nodeEngine, jobId, executionId, snapshotContext, tempDirectories, serializationService);
+        snapshotContext.initTaskletCount(plan.getProcessorTaskletCount(), plan.getStoreSnapshotTaskletCount(),
+                plan.getHigherPriorityVertexCount());
         receiverMap = unmodifiableMap(plan.getReceiverMap());
         senderMap = unmodifiableMap(plan.getSenderMap());
         tasklets = plan.getTasklets();
+
         return this;
     }
 
@@ -139,7 +163,8 @@ public class ExecutionContext implements DynamicMetricsProvider {
                 // begin job execution
                 JetService service = nodeEngine.getService(JetService.SERVICE_NAME);
                 ClassLoader cl = service.getJobExecutionService().getClassLoader(jobConfig, jobId);
-                executionFuture = taskletExecService.beginExecute(tasklets, cancellationFuture, cl)
+                executionFuture = taskletExecService
+                        .beginExecute(tasklets, cancellationFuture, cl)
                         .thenApply(res -> {
                             // There's a race here: a snapshot could be requested after the job just completed
                             // normally, in that case we'll report that it terminated with snapshot.
@@ -149,7 +174,7 @@ public class ExecutionContext implements DynamicMetricsProvider {
                             }
                             return res;
                         });
-
+                startTime.set(System.currentTimeMillis());
             }
             return executionFuture;
         }
@@ -180,6 +205,18 @@ public class ExecutionContext implements DynamicMetricsProvider {
                         + " encountered an exception in ProcessorSupplier.close(), ignoring it", e);
             }
         }
+
+        tempDirectories.forEach((k, dir) -> {
+            try {
+                IOUtil.delete(dir);
+            } catch (Exception e) {
+                logger.warning("Failed to delete temporary directory " + dir);
+            }
+        });
+
+        if (serializationService != null) {
+            serializationService.dispose();
+        }
     }
 
     /**
@@ -207,26 +244,46 @@ public class ExecutionContext implements DynamicMetricsProvider {
     }
 
     /**
-     * Starts a new snapshot by incrementing the current snapshot id
+     * Starts the phase 1 of a new snapshot.
      */
-    public CompletableFuture<SnapshotOperationResult> beginSnapshot(long snapshotId, String mapName,
-                                                                  boolean isTerminal) {
+    public CompletableFuture<SnapshotPhase1Result> beginSnapshotPhase1(long snapshotId, String mapName, int flags) {
+        LoggingUtil.logFine(logger, "Starting snapshot %d phase 1 for %s on member", snapshotId, jobNameAndExecutionId());
         synchronized (executionLock) {
             if (cancellationFuture.isDone()) {
                 throw new CancellationException();
             } else if (executionFuture != null && executionFuture.isDone()) {
-                // if execution is done, there are 0 processors to take snapshots. Therefore we're done now.
-                return CompletableFuture.completedFuture(new SnapshotOperationResult(0, 0, 0, null));
+                // if execution is done, there are 0 processors to take snapshot of. Therefore we're done now.
+                LoggingUtil.logFine(logger, "Ignoring snapshot %d phase 1 for %s: execution completed",
+                        snapshotId, jobNameAndExecutionId());
+                return CompletableFuture.completedFuture(new SnapshotPhase1Result(0, 0, 0, null));
             }
-            return snapshotContext.startNewSnapshot(snapshotId, mapName, isTerminal);
+            return snapshotContext.startNewSnapshotPhase1(snapshotId, mapName, flags);
         }
     }
 
-    public void handlePacket(int vertexId, int ordinal, Address sender, BufferObjectDataInput in) {
+    /**
+     * Starts the phase 2 of the current snapshot.
+     */
+    public CompletableFuture<Void> beginSnapshotPhase2(long snapshotId, boolean success) {
+        LoggingUtil.logFine(logger, "Starting snapshot %d phase 2 for %s on member", snapshotId, jobNameAndExecutionId());
+        synchronized (executionLock) {
+            if (cancellationFuture.isDone()) {
+                throw new CancellationException();
+            } else if (executionFuture != null && executionFuture.isDone()) {
+                // if execution is done, there are 0 processors to take snapshot of. Therefore we're done now.
+                LoggingUtil.logFine(logger, "Ignoring snapshot %d phase 2 for %s: execution completed",
+                        snapshotId, jobNameAndExecutionId());
+                return CompletableFuture.completedFuture(null);
+            }
+            return snapshotContext.startNewSnapshotPhase2(snapshotId, success);
+        }
+    }
+
+    public void handlePacket(int vertexId, int ordinal, Address sender, byte[] payload, int offset) {
         receiverMap.get(vertexId)
                    .get(ordinal)
                    .get(sender)
-                   .receiveStreamPacket(in);
+                   .receiveStreamPacket(payload, offset);
     }
 
     public boolean hasParticipant(Address member) {
@@ -277,8 +334,16 @@ public class ExecutionContext implements DynamicMetricsProvider {
         }
         descriptor = descriptor.withTag(MetricTags.JOB, idToString(jobId))
                                .withTag(MetricTags.EXECUTION, idToString(executionId));
+
+        context.collect(descriptor, EXECUTION_START_TIME, ProbeLevel.INFO, ProbeUnit.MS, startTime.get());
+        context.collect(descriptor, EXECUTION_COMPLETION_TIME, ProbeLevel.INFO, ProbeUnit.MS, completionTime.get());
+
         for (Tasklet tasklet : tasklets) {
             tasklet.provideDynamicMetrics(descriptor.copy(), context);
         }
+    }
+
+    public void setCompletionTime() {
+        completionTime.set(System.currentTimeMillis());
     }
 }

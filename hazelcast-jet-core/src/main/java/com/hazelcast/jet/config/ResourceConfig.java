@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,35 +16,43 @@
 
 package com.hazelcast.jet.config;
 
+import com.hazelcast.internal.util.Preconditions;
+import com.hazelcast.spi.annotation.PrivateApi;
+
 import javax.annotation.Nonnull;
 import java.io.Serializable;
 import java.net.URL;
+import java.util.Objects;
 
-import static com.hazelcast.internal.util.Preconditions.checkNotNull;
-import static com.hazelcast.internal.util.Preconditions.checkTrue;
+import static com.hazelcast.jet.impl.util.ReflectionUtils.toClassResourceId;
 
 /**
  * Describes a single resource to deploy to the Jet cluster.
  *
  * @since 3.0
  */
+@PrivateApi
 public class ResourceConfig implements Serializable {
+
     private final URL url;
     private final String id;
-    private final boolean isArchive;
+    private final ResourceType resourceType;
 
     /**
      * Creates a resource config with the given properties.
      *
-     * @param url       url of the resource
-     * @param id        id of the resource
-     * @param isArchive true, if this is an JAR archive with many entries
+     * @param url           url of the resource
+     * @param id            id of the resource
+     * @param resourceType  type of the resource
      */
-    ResourceConfig(@Nonnull URL url, String id, boolean isArchive) {
-        checkTrue(isArchive ^ id != null, "Either isArchive == true, or id != null, exclusively");
+    ResourceConfig(@Nonnull URL url, @Nonnull String id, @Nonnull ResourceType resourceType) {
+        Preconditions.checkNotNull(url, "url");
+        Preconditions.checkNotNull(resourceType, "resourceType");
+        Preconditions.checkHasText(id, "id cannot be null or empty");
+
         this.url = url;
         this.id = id;
-        this.isArchive = isArchive;
+        this.resourceType = resourceType;
     }
 
     /**
@@ -53,37 +61,60 @@ public class ResourceConfig implements Serializable {
      *
      * @param clazz the class to deploy
      */
-    ResourceConfig(Class clazz) {
-        id = clazz.getName().replace('.', '/') + ".class";
-        url = clazz.getClassLoader().getResource(id);
-        checkNotNull(this.url, "Couldn't derive URL from class " + clazz);
-        isArchive = false;
+    ResourceConfig(@Nonnull Class<?> clazz) {
+        Preconditions.checkNotNull(clazz, "clazz");
+
+        String id = toClassResourceId(clazz.getName());
+        ClassLoader cl = clazz.getClassLoader();
+        if (cl == null) {
+            throw new IllegalArgumentException(clazz.getName() + ".getClassLoader() returned null, cannot" +
+                    " access the class resource. You may have added a JDK class that is loaded by the" +
+                    " bootstrap classloader. There is no need to add JDK classes to the job configuration.");
+        }
+        URL url = cl.getResource(id);
+        if (url == null) {
+            throw new IllegalArgumentException("The classloader of " + clazz.getName() + " couldn't resolve" +
+                    " the resource URL of " + id);
+        }
+
+        this.id = id;
+        this.url = url;
+        this.resourceType = ResourceType.CLASS;
     }
 
     /**
-     * Returns the URL at which the resource will be available.
+     * Returns the URL at which the resource is available. Resolved on the
+     * local machine during job submission.
      */
+    @Nonnull
     public URL getUrl() {
         return url;
     }
 
     /**
-     * The ID of the resource, null for {@link #isArchive() archives}.
+     * Returns the ID of the resource that will be used to form the {@code
+     * IMap} key under which it will be stored in the Jet cluster.
      */
+    @Nonnull
     public String getId() {
         return id;
     }
 
     /**
-     * Whether this entry is an Jar archive or a single resource element.
+     * Returns the type of the resource.
      */
-    public boolean isArchive() {
-        return isArchive;
+    @Nonnull
+    public ResourceType getResourceType() {
+        return resourceType;
     }
 
     @Override
     public String toString() {
-        return "ResourceConfig{url=" + url + ", id='" + id + '\'' + ", isArchive=" + isArchive + '}';
+        return "ResourceConfig{" +
+                "url=" + url +
+                ", id='" + id + '\'' +
+                ", resourceType=" + resourceType +
+                '}';
     }
 
     @Override
@@ -94,23 +125,14 @@ public class ResourceConfig implements Serializable {
         if (o == null || getClass() != o.getClass()) {
             return false;
         }
-
         ResourceConfig that = (ResourceConfig) o;
-
-        if (isArchive != that.isArchive) {
-            return false;
-        }
-        if (url != null ? !url.toString().equals(that.url.toString()) : that.url != null) {
-            return false;
-        }
-        return id != null ? id.equals(that.id) : that.id == null;
+        return url.toString().equals(that.url.toString()) &&
+                id.equals(that.id) &&
+                resourceType == that.resourceType;
     }
 
     @Override
     public int hashCode() {
-        int result = url != null ? url.toString().hashCode() : 0;
-        result = 31 * result + (id != null ? id.hashCode() : 0);
-        result = 31 * result + (isArchive ? 1 : 0);
-        return result;
+        return Objects.hash(url, id, resourceType);
     }
 }

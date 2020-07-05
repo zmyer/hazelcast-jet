@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,10 @@
 package com.hazelcast.jet.pipeline;
 
 import com.hazelcast.function.BiFunctionEx;
+import com.hazelcast.function.ConsumerEx;
 import com.hazelcast.function.FunctionEx;
+import com.hazelcast.jet.core.Processor;
+import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.map.IMap;
 import com.hazelcast.replicatedmap.ReplicatedMap;
 
@@ -61,9 +64,8 @@ public final class ServiceFactories {
      * @since 3.0
      */
     @Nonnull
-    public static <K, V> ServiceFactory<ReplicatedMap<K, V>> replicatedMapService(@Nonnull String mapName) {
-        return ServiceFactory
-                .withCreateFn(jet -> jet.getHazelcastInstance().getReplicatedMap(mapName));
+    public static <K, V> ServiceFactory<?, ReplicatedMap<K, V>> replicatedMapService(@Nonnull String mapName) {
+        return ServiceFactories.sharedService(ctx -> ctx.jetInstance().getReplicatedMap(mapName));
     }
 
     /**
@@ -88,9 +90,130 @@ public final class ServiceFactories {
      * @since 3.0
      */
     @Nonnull
-    public static <K, V> ServiceFactory<IMap<K, V>> iMapService(@Nonnull String mapName) {
-        return ServiceFactory
-                .withCreateFn(jet -> jet.<K, V>getMap(mapName))
-                .withLocalSharing();
+    public static <K, V> ServiceFactory<?, IMap<K, V>> iMapService(@Nonnull String mapName) {
+        return ServiceFactories.sharedService(ctx -> ctx.jetInstance().getMap(mapName));
+    }
+
+    /**
+     * A variant of {@link #sharedService(FunctionEx, ConsumerEx)
+     * sharedService(createFn, destroyFn)} with a no-op {@code
+     * destroyFn}.
+     * <p>
+     * <strong>Note:</strong> if your service has a blocking API (e.g., doing
+     * synchronous IO or acquiring locks), you must call {@link
+     * ServiceFactory#toNonCooperative()} as a hint to the Jet execution engine
+     * to start a dedicated thread for those calls. Failing to do this can
+     * cause severe performance problems. You should also carefully consider
+     * how much local parallelism you need for this step since each parallel
+     * tasklet needs its own thread. Call {@link GeneralStage#setLocalParallelism
+     * stage.setLocalParallelism()} to set an explicit level, otherwise it will
+     * depend on the number of cores on the Jet machine, which makes no sense
+     * for blocking code.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    public static <S> ServiceFactory<?, S> sharedService(
+            @Nonnull FunctionEx<? super ProcessorSupplier.Context, S> createServiceFn
+    ) {
+        return sharedService(createServiceFn, ConsumerEx.noop());
+    }
+
+    /**
+     * Returns a {@link ServiceFactory} which will provide a single shared
+     * service object per cluster member. All parallel processors serving the
+     * associated pipeline stage will use the same object. Since the service
+     * object will be accessed from many parallel threads, it must be
+     * thread-safe.
+     * <p>
+     * <strong>Note:</strong> if your service has a blocking API (e.g., doing
+     * synchronous IO or acquiring locks), you must call {@link
+     * ServiceFactory#toNonCooperative()} as a hint to the Jet execution engine
+     * to start a dedicated thread for those calls. Failing to do this can
+     * cause severe performance problems. You should also carefully consider
+     * how much local parallelism you need for this step since each parallel
+     * tasklet needs its own thread. Call {@link GeneralStage#setLocalParallelism
+     * stage.setLocalParallelism()} to set an explicit level, otherwise it will
+     * depend on the number of cores on the Jet machine, which makes no sense
+     * for blocking code.
+     *
+     * @param createServiceFn the function that creates the service. It will be called once on each
+     *                        Jet member.
+     * @param destroyServiceFn the function that destroys the service. It will be called once on each
+     *                         Jet member. It can be used to tear down any resources acquired by the
+     *                         service.
+     * @param <S> type of the service object
+     *
+     * @see #nonSharedService(FunctionEx, ConsumerEx)
+     */
+    public static <S> ServiceFactory<?, S> sharedService(
+            @Nonnull FunctionEx<? super ProcessorSupplier.Context, S> createServiceFn,
+            @Nonnull ConsumerEx<S> destroyServiceFn
+    ) {
+        return ServiceFactory.withCreateContextFn(c -> createServiceFn.apply(c))
+                             .withCreateServiceFn((ctx, c) -> c)
+                             .withDestroyContextFn(destroyServiceFn);
+    }
+
+    /**
+     * A variant of {@link #nonSharedService(FunctionEx, ConsumerEx)
+     * nonSharedService(createFn, destroyFn)} with a no-op {@code
+     * destroyFn}.
+     * <p>
+     * <strong>Note:</strong> if your service has a blocking API (e.g., doing
+     * synchronous IO or acquiring locks), you must call {@link
+     * ServiceFactory#toNonCooperative()} as a hint to the Jet execution engine
+     * to start a dedicated thread for those calls. Failing to do this can
+     * cause severe performance problems. You should also carefully consider
+     * how much local parallelism you need for this step since each parallel
+     * tasklet needs its own thread. Call {@link GeneralStage#setLocalParallelism
+     * stage.setLocalParallelism()} to set an explicit level, otherwise it will
+     * depend on the number of cores on the Jet machine, which makes no sense
+     * for blocking code.
+     *
+     * @since 4.0
+     */
+    @Nonnull
+    public static <S> ServiceFactory<?, S> nonSharedService(
+            @Nonnull FunctionEx<? super Processor.Context, ? extends S> createServiceFn
+    ) {
+        return nonSharedService(createServiceFn, ConsumerEx.noop());
+    }
+
+    /**
+     * Returns a {@link ServiceFactory} which creates a separate service
+     * instance for each parallel Jet processor. The number of processors on
+     * each cluster member is dictated by {@link GeneralStage#setLocalParallelism
+     * stage.localParallelism}. Use this when the service instance should not
+     * be shared across multiple threads.
+     * <p>
+     * <strong>Note:</strong> if your service has a blocking API (e.g., doing
+     * synchronous IO or acquiring locks), you must call {@link
+     * ServiceFactory#toNonCooperative()} as a hint to the Jet execution engine
+     * to start a dedicated thread for those calls. Failing to do this can
+     * cause severe performance problems. You should also carefully consider
+     * how much local parallelism you need for this step since each parallel
+     * tasklet needs its own thread. Call {@link GeneralStage#setLocalParallelism
+     * stage.setLocalParallelism()} to set an explicit level, otherwise it will
+     * depend on the number of cores on the Jet machine, which makes no sense
+     * for blocking code.
+     *
+     * @param createServiceFn the function that creates the service. It will be called once per
+     *                        processor instance.
+     * @param destroyServiceFn the function that destroys the service. It will be called once per
+     *                         processor instance. It can be used to tear down any resources
+     *                         acquired by the service.
+     *
+     * @param <S> type of the service object
+     *
+     * @see #sharedService(FunctionEx, ConsumerEx)
+     */
+    public static <S> ServiceFactory<?, S> nonSharedService(
+            @Nonnull FunctionEx<? super Processor.Context, ? extends S> createServiceFn,
+            @Nonnull ConsumerEx<? super S> destroyServiceFn
+    ) {
+        return ServiceFactory.<Void>withCreateContextFn(c -> null)
+                .<S>withCreateServiceFn((ctx, c) -> createServiceFn.apply(ctx))
+                .withDestroyServiceFn(destroyServiceFn);
     }
 }

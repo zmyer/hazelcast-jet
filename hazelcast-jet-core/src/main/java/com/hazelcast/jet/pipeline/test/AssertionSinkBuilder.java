@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,12 @@ import com.hazelcast.function.ConsumerEx;
 import com.hazelcast.function.SupplierEx;
 import com.hazelcast.internal.util.Preconditions;
 import com.hazelcast.jet.impl.pipeline.SinkImpl;
-import com.hazelcast.jet.impl.pipeline.test.AssertionP;
 import com.hazelcast.jet.pipeline.Sink;
-import com.hazelcast.spi.annotation.Beta;
 
 import javax.annotation.Nonnull;
 
+import static com.hazelcast.jet.impl.pipeline.SinkImpl.Type.TOTAL_PARALLELISM_ONE;
+import static com.hazelcast.jet.impl.pipeline.test.AssertionP.assertionP;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
 
 /**
@@ -37,7 +37,6 @@ import static com.hazelcast.jet.impl.util.Util.checkSerializable;
  *
  * @since 3.2
  */
-@Beta
 public final class AssertionSinkBuilder<S, T> {
 
     private final SupplierEx<? extends S> createFn;
@@ -158,6 +157,6 @@ public final class AssertionSinkBuilder<S, T> {
     @Nonnull
     public Sink<T> build() {
         Preconditions.checkNotNull(receiveFn, "receiveFn must be set");
-        return new SinkImpl<>(name, AssertionP.assertionP(name, createFn, receiveFn, timerFn, completeFn), true, null);
+        return new SinkImpl<>(name, assertionP(name, createFn, receiveFn, timerFn, completeFn), TOTAL_PARALLELISM_ONE);
     }
 }

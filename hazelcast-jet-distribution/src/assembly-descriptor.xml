@@ -1,5 +1,5 @@
 <!--
-  ~ Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+  ~ Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
   ~
   ~ Licensed under the Apache License, Version 2.0 (the "License");
   ~ you may not use this file except in compliance with the License.
@@ -28,8 +28,9 @@
             <useProjectArtifact>false</useProjectArtifact>
             <includes>
                 <include>com.hazelcast.jet:hazelcast-jet</include>
-                <include>log4j:log4j</include>
+                <include>org.apache.logging.log4j:*</include>
                 <include>org.slf4j:*</include>
+                <include>io.prometheus.jmx:jmx_prometheus_javaagent</include>
             </includes>
             <outputDirectory>lib</outputDirectory>
             <outputFileNameMapping>${artifact.artifactId}-${artifact.baseVersion}.${artifact.extension}</outputFileNameMapping>
@@ -38,6 +39,14 @@
             <useProjectArtifact>false</useProjectArtifact>
             <includes>
                 <include>com.hazelcast.jet:hazelcast-jet-avro</include>
+                <include>com.hazelcast.jet:hazelcast-jet-cdc-debezium</include>
+                <include>com.hazelcast.jet:hazelcast-jet-cdc-mysql</include>
+                <include>com.hazelcast.jet:hazelcast-jet-cdc-postgres</include>
+                <include>com.hazelcast.jet:hazelcast-jet-elasticsearch-7</include>
+                <include>com.hazelcast.jet:hazelcast-jet-grpc</include>
+                <include>com.hazelcast.jet:hazelcast-jet-protobuf</include>
+                <include>com.hazelcast.jet:hazelcast-jet-spring</include>
+                <include>com.hazelcast.jet:hazelcast-jet-python</include>
                 <include>com.hazelcast.jet:hazelcast-jet-hadoop</include>
                 <include>com.hazelcast.jet:hazelcast-jet-kafka</include>
                 <include>com.hazelcast.jet:hazelcast-jet-s3</include>

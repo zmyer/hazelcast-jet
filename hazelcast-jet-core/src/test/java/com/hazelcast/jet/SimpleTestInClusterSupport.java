@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -70,6 +70,9 @@ public abstract class SimpleTestInClusterSupport extends JetTestSupport {
 
     @After
     public void supportAfter() {
+        if (instances == null) {
+            return;
+        }
         // after each test ditch all jobs and objects
         for (Job job : instances[0].getJobs()) {
             ditchJob(job, instances());
@@ -80,9 +83,11 @@ public abstract class SimpleTestInClusterSupport extends JetTestSupport {
     }
 
     @AfterClass
-    public static void tearDown() throws Exception {
-        spawn(() -> factory.terminateAll())
-                .get(1, TimeUnit.MINUTES);
+    public static void supportAfterClass() throws Exception {
+        if (factory != null) {
+            spawn(() -> factory.terminateAll())
+                    .get(1, TimeUnit.MINUTES);
+        }
 
         factory = null;
         instances = null;

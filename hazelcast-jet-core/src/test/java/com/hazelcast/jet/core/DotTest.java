@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -143,7 +143,7 @@ public class DotTest {
                 "\t\"aggregateToCount\" -> \"loggerSink\";\n" +
                 "}", p.toDotString());
         assertEquals("digraph DAG {\n" +
-            "\t\"mapSource(source1\\\")\" [localParallelism=default];\n" +
+            "\t\"mapSource(source1\\\")\" [localParallelism=1];\n" +
             "\t\"aggregateToCount-prepare\" [localParallelism=default];\n" +
             "\t\"aggregateToCount\" [localParallelism=default];\n" +
             "\t\"loggerSink\" [localParallelism=1];\n" +

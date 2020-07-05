@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,7 @@ public class PeekingWrapperPreferredParallelismTest {
     public void when_peekInput_then_propagatesPreferredParallelism() {
         // Given
         int preferredParallelism = 3;
-        ProcessorMetaSupplier wrappedMetaSupplier = ProcessorMetaSupplier.of(Processors.noopP(), preferredParallelism);
+        ProcessorMetaSupplier wrappedMetaSupplier = ProcessorMetaSupplier.of(preferredParallelism, Processors.noopP());
 
         // When
         ProcessorMetaSupplier peekingMetaSupplier = peekInputP(wrappedMetaSupplier);
@@ -46,7 +46,7 @@ public class PeekingWrapperPreferredParallelismTest {
     public void when_peekOutput_then_propagatesPreferredParallelism() {
         // Given
         int preferredParallelism = 3;
-        ProcessorMetaSupplier wrappedMetaSupplier = ProcessorMetaSupplier.of(Processors.noopP(), preferredParallelism);
+        ProcessorMetaSupplier wrappedMetaSupplier = ProcessorMetaSupplier.of(preferredParallelism, Processors.noopP());
 
         // When
         ProcessorMetaSupplier peekingMetaSupplier = peekOutputP(wrappedMetaSupplier);
@@ -59,7 +59,7 @@ public class PeekingWrapperPreferredParallelismTest {
     public void when_peekSnapshot_then_propagatesPreferredParallelism() {
         // Given
         int preferredParallelism = 3;
-        ProcessorMetaSupplier wrappedMetaSupplier = ProcessorMetaSupplier.of(Processors.noopP(), preferredParallelism);
+        ProcessorMetaSupplier wrappedMetaSupplier = ProcessorMetaSupplier.of(preferredParallelism, Processors.noopP());
 
         // When
         ProcessorMetaSupplier peekingMetaSupplier = peekSnapshotP(wrappedMetaSupplier);

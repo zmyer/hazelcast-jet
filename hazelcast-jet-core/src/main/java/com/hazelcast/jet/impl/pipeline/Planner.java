@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,6 +51,7 @@ import java.util.stream.Collectors;
 import static com.hazelcast.jet.core.Edge.from;
 import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
 import static com.hazelcast.jet.impl.TopologicalSorter.checkTopologicalSort;
+import static com.hazelcast.jet.impl.util.Util.toList;
 import static java.util.stream.Collectors.toList;
 
 @SuppressWarnings("unchecked")
@@ -74,6 +75,7 @@ public class Planner {
         this.pipeline = pipeline;
     }
 
+    @SuppressWarnings("rawtypes")
     DAG createDag() {
         pipeline.makeNamesUnique();
         Map<Transform, List<Transform>> adjacencyMap = pipeline.adjacencyMap();
@@ -144,22 +146,32 @@ public class Planner {
         return dag;
     }
 
-    private static List<Transform> findFusableChain(Transform transform, Map<Transform, List<Transform>> adjacencyMap) {
+    private static List<Transform> findFusableChain(
+            @Nonnull Transform transform,
+            @Nonnull Map<Transform, List<Transform>> adjacencyMap
+    ) {
         ArrayList<Transform> chain = new ArrayList<>();
         for (;;) {
-            if (transform instanceof MapTransform || transform instanceof FlatMapTransform) {
-                chain.add(transform);
-                List<Transform> downstreams = adjacencyMap.get(transform);
-                if (downstreams.size() == 1 && downstreams.get(0).localParallelism() == transform.localParallelism()) {
-                    transform = downstreams.get(0);
-                    continue;
-                }
+            if (!(transform instanceof MapTransform || transform instanceof FlatMapTransform)) {
+                break;
             }
-            break;
+            chain.add(transform);
+            List<Transform> downstream = adjacencyMap.get(transform);
+            if (downstream.size() != 1) {
+                break;
+            }
+            Transform nextTransform = downstream.get(0);
+            if (nextTransform.localParallelism() != transform.localParallelism()
+                    || nextTransform.shouldRebalanceInput(0)
+            ) {
+                break;
+            }
+            transform = nextTransform;
         }
         return chain.size() > 1 ? chain : null;
     }
 
+    @SuppressWarnings("rawtypes")
     private static Transform fuseFlatMapTransforms(List<Transform> chain) {
         assert chain.size() > 1 : "chain.size()=" + chain.size();
         assert chain.get(0).upstream().size() == 1;
@@ -198,11 +210,12 @@ public class Planner {
         }
     }
 
+    @SuppressWarnings("rawtypes")
     private static FunctionEx mergeMapFunctions(List<Transform> chain) {
         if (chain.isEmpty()) {
             return null;
         }
-        List<FunctionEx> functions = chain.stream().map(t -> ((MapTransform) t).mapFn()).collect(toList());
+        List<FunctionEx> functions = toList(chain, t -> ((MapTransform) t).mapFn());
         return t -> {
             Object result = t;
             for (int i = 0; i < functions.size() && result != null; i++) {
@@ -247,9 +260,22 @@ public class Planner {
         for (Transform fromTransform : transform.upstream()) {
             PlannerVertex fromPv = xform2vertex.get(fromTransform);
             Edge edge = from(fromPv.v, fromPv.nextAvailableOrdinal()).to(toVertex, destOrdinal);
+            applyRebalancing(edge, transform);
             dag.edge(edge);
             configureEdgeFn.accept(edge, destOrdinal);
             destOrdinal++;
+        }
+    }
+
+    public static void applyRebalancing(Edge edge, Transform toTransform) {
+        int destOrdinal = edge.getDestOrdinal();
+        if (!toTransform.shouldRebalanceInput(destOrdinal)) {
+            return;
+        }
+        edge.distributed();
+        FunctionEx<?, ?> keyFn = toTransform.partitionKeyFnForInput(destOrdinal);
+        if (keyFn != null) {
+            edge.partitioned(keyFn);
         }
     }
 

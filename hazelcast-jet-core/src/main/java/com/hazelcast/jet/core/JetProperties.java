@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import com.hazelcast.spi.properties.HazelcastProperty;
 
 import java.util.concurrent.locks.LockSupport;
 
-import static com.hazelcast.spi.properties.GroupProperty.SHUTDOWNHOOK_ENABLED;
+import static com.hazelcast.spi.properties.ClusterProperty.SHUTDOWNHOOK_ENABLED;
 import static java.util.concurrent.TimeUnit.DAYS;
 import static java.util.concurrent.TimeUnit.MICROSECONDS;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
@@ -79,7 +79,7 @@ public final class JetProperties {
             = new HazelcastProperty("jet.job.results.max.size", 1_000);
 
     /**
-     * Root of Jet installation. Used as default location for the lossless recovery
+     * Root of Jet installation. Used as default location for the lossless restart
      * store. By default it will be automatically set to the start of the Jet
      * installation path.
      *

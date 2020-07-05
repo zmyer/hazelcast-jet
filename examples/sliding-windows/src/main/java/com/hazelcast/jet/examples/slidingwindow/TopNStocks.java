@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,11 @@ import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.Job;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.datamodel.KeyedWindowResult;
+import com.hazelcast.jet.examples.tradesource.Trade;
+import com.hazelcast.jet.examples.tradesource.TradeSource;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 
@@ -72,7 +73,7 @@ public class TopNStocks {
                 topN(5, comparingValue.reversed()),
                 TopNResult::new);
 
-        p.readFrom(TradeGenerator.tradeSource(500, 6_000))
+        p.readFrom(TradeSource.tradeStream(500, 6_000))
          .withNativeTimestamps(1_000)
          .groupingKey(Trade::getTicker)
          .window(sliding(10_000, 1_000))
@@ -86,11 +87,10 @@ public class TopNStocks {
         return p;
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        JetInstance[] instances = new JetInstance[2];
-        Arrays.parallelSetAll(instances, i -> Jet.newJetInstance());
+    public static void main(String[] args) throws Exception {
+        JetInstance jet = Jet.bootstrappedInstance();
         try {
-            Job job = instances[0].newJob(buildPipeline());
+            Job job = jet.newJob(buildPipeline());
             SECONDS.sleep(JOB_DURATION);
             job.cancel();
             job.join();
@@ -116,9 +116,9 @@ public class TopNStocks {
         public String toString() {
             return String.format(
                     "Top rising stocks:%n%s\nTop falling stocks:%n%s",
-                    topIncrease.stream().map(kwr -> String.format("   %s by %.2f", kwr.key(), kwr.result()))
+                    topIncrease.stream().map(kwr -> String.format("   %s by %.2f%%", kwr.key(), 100d * kwr.result()))
                                .collect(joining("\n")),
-                    topDecrease.stream().map(kwr -> String.format("   %s by %.2f", kwr.key(), kwr.result()))
+                    topDecrease.stream().map(kwr -> String.format("   %s by %.2f%%", kwr.key(), 100d * kwr.result()))
                                .collect(joining("\n"))
             );
         }

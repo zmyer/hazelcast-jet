@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,10 @@ import com.hazelcast.internal.metrics.MetricsCollectionContext;
 import com.hazelcast.internal.metrics.Probe;
 import com.hazelcast.internal.metrics.ProbeUnit;
 import com.hazelcast.internal.nio.BufferObjectDataInput;
+import com.hazelcast.internal.serialization.InternalSerializationService;
 import com.hazelcast.internal.util.concurrent.MPSCQueue;
+import com.hazelcast.internal.util.counters.Counter;
+import com.hazelcast.internal.util.counters.SwCounter;
 import com.hazelcast.jet.config.InstanceConfig;
 import com.hazelcast.jet.core.metrics.MetricNames;
 import com.hazelcast.jet.core.metrics.MetricTags;
@@ -36,12 +39,10 @@ import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Queue;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static com.hazelcast.jet.impl.execution.DoneItem.DONE_ITEM;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
 import static com.hazelcast.jet.impl.util.LoggingUtil.logFinest;
-import static com.hazelcast.jet.impl.util.Util.lazyAdd;
 import static java.lang.Math.ceil;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
@@ -92,14 +93,15 @@ public class ReceiverTasklet implements Tasklet {
     private final ProgressTracker tracker = new ProgressTracker();
     private final ArrayDeque<ObjWithPtionIdAndSize> inbox = new ArrayDeque<>();
     private final OutboundCollector collector;
+    private final InternalSerializationService serializationService;
 
     private boolean receptionDone;
 
     @Probe(name = MetricNames.DISTRIBUTED_ITEMS_IN)
-    private final AtomicLong itemsInCounter = new AtomicLong();
+    private final Counter itemsInCounter = SwCounter.newSwCounter();
 
     @Probe(name = MetricNames.DISTRIBUTED_BYTES_IN, unit = ProbeUnit.BYTES)
-    private final AtomicLong bytesInCounter = new AtomicLong();
+    private final Counter bytesInCounter = SwCounter.newSwCounter();
 
     //                    FLOW-CONTROL STATE
     //            All arrays are indexed by sender ID.
@@ -116,11 +118,12 @@ public class ReceiverTasklet implements Tasklet {
     //                 END FLOW-CONTROL STATE
 
     public ReceiverTasklet(
-            OutboundCollector collector, int rwinMultiplier, int flowControlPeriodMs,
-            LoggingService loggingService,
+            OutboundCollector collector, InternalSerializationService serializationService,
+            int rwinMultiplier, int flowControlPeriodMs, LoggingService loggingService,
             Address sourceAddress, int ordinal, String destinationVertexName
     ) {
         this.collector = collector;
+        this.serializationService = serializationService;
         this.rwinMultiplier = rwinMultiplier;
         this.flowControlPeriodNs = (double) MILLISECONDS.toNanos(flowControlPeriodMs);
         this.sourceAddressString = sourceAddress.toString();
@@ -131,7 +134,8 @@ public class ReceiverTasklet implements Tasklet {
         this.receiveWindowCompressed = INITIAL_RECEIVE_WINDOW_COMPRESSED;
     }
 
-    @Override @Nonnull
+    @Override
+    @Nonnull
     public ProgressState call() {
         if (receptionDone) {
             return collector.offerBroadcast(DONE_ITEM);
@@ -162,8 +166,9 @@ public class ReceiverTasklet implements Tasklet {
         return tracker.toProgressState();
     }
 
-    void receiveStreamPacket(BufferObjectDataInput packetInput) {
-        incoming.add(packetInput);
+    void receiveStreamPacket(byte[] payload, int offset) {
+        BufferObjectDataInput input = serializationService.createObjectDataInput(payload, offset);
+        incoming.add(input);
     }
 
     /**
@@ -287,8 +292,8 @@ public class ReceiverTasklet implements Tasklet {
                 received.close();
                 tracker.madeProgress();
             }
-            lazyAdd(bytesInCounter, totalBytes);
-            lazyAdd(itemsInCounter, totalItems);
+            bytesInCounter.inc(totalBytes);
+            itemsInCounter.inc(totalItems);
         } catch (IOException e) {
             throw rethrow(e);
         }
@@ -306,8 +311,8 @@ public class ReceiverTasklet implements Tasklet {
     @Override
     public void provideDynamicMetrics(MetricDescriptor descriptor, MetricsCollectionContext context) {
         descriptor = descriptor.withTag(MetricTags.VERTEX, destinationVertexName)
-                       .withTag(MetricTags.SOURCE_ADDRESS, sourceAddressString)
-                       .withTag(MetricTags.ORDINAL, ordinalString);
+                               .withTag(MetricTags.SOURCE_ADDRESS, sourceAddressString)
+                               .withTag(MetricTags.ORDINAL, ordinalString);
 
         context.collect(descriptor, this);
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 
 package com.hazelcast.jet.impl.connector;
 
-import com.hazelcast.function.BiFunctionEx;
 import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
@@ -47,30 +46,29 @@ import static com.hazelcast.jet.impl.util.Util.checkSerializable;
  * one file is only read by one thread, so extra parallelism won't improve
  * performance if there aren't enough files to read.
  */
-public final class ReadFilesP<R, T> extends AbstractProcessor {
+public final class ReadFilesP<T> extends AbstractProcessor {
+
+    private static final int DEFAULT_LOCAL_PARALLELISM = 4;
 
     private final Path directory;
     private final String glob;
     private final boolean sharedFileSystem;
-    private final FunctionEx<? super Path, ? extends Stream<R>> readFileFn;
-    private final BiFunctionEx<? super String, ? super R, ? extends T> mapOutputFn;
+    private final FunctionEx<? super Path, ? extends Stream<T>> readFileFn;
 
     private int processorIndex;
     private int parallelism;
     private DirectoryStream<Path> directoryStream;
     private Traverser<? extends T> outputTraverser;
-    private Stream<R> currentStream;
+    private Stream<T> currentStream;
 
     private ReadFilesP(
             @Nonnull String directory,
             @Nonnull String glob, boolean sharedFileSystem,
-            @Nonnull FunctionEx<? super Path, ? extends Stream<R>> readFileFn,
-            @Nonnull BiFunctionEx<? super String, ? super R, ? extends T> mapOutputFn
+            @Nonnull FunctionEx<? super Path, ? extends Stream<T>> readFileFn
     ) {
         this.directory = Paths.get(directory);
         this.glob = glob;
         this.readFileFn = readFileFn;
-        this.mapOutputFn = mapOutputFn;
         this.sharedFileSystem = sharedFileSystem;
     }
 
@@ -109,9 +107,7 @@ public final class ReadFilesP<R, T> extends AbstractProcessor {
         }
         assert currentStream == null : "currentStream != null";
         currentStream = readFileFn.apply(file);
-        String fileName = file.getFileName().toString();
         return traverseStream(currentStream)
-                .map(line -> mapOutputFn.apply(fileName, line))
                 .onFirstNull(() -> {
                     currentStream.close();
                     currentStream = null;
@@ -139,18 +135,16 @@ public final class ReadFilesP<R, T> extends AbstractProcessor {
     /**
      * Private API. Use {@link SourceProcessors#readFilesP} instead.
      */
-    public static <W, T> ProcessorMetaSupplier metaSupplier(
+    public static <T> ProcessorMetaSupplier metaSupplier(
             @Nonnull String directory,
             @Nonnull String glob,
             boolean sharedFileSystem,
-            @Nonnull FunctionEx<? super Path, ? extends Stream<W>> readFileFn,
-            @Nonnull BiFunctionEx<? super String, ? super W, ? extends T> mapOutputFn
+            @Nonnull FunctionEx<? super Path, ? extends Stream<T>> readFileFn
     ) {
         checkSerializable(readFileFn, "readFileFn");
-        checkSerializable(mapOutputFn, "mapOutputFn");
 
-        return ProcessorMetaSupplier.of(() -> new ReadFilesP<>(
-                directory, glob, sharedFileSystem, readFileFn, mapOutputFn),
-                2);
+        return ProcessorMetaSupplier.of(DEFAULT_LOCAL_PARALLELISM, () -> new ReadFilesP<>(
+                directory, glob, sharedFileSystem, readFileFn)
+        );
     }
 }

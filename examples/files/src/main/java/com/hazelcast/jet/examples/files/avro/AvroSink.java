@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,9 +48,10 @@ public class AvroSink {
     private static Pipeline buildPipeline() {
         Pipeline p = Pipeline.create();
 
+        Schema schema = schemaForUser();
         p.readFrom(Sources.<String, User>map(MAP_NAME))
          .map(Map.Entry::getValue)
-         .writeTo(AvroSinks.files(DIRECTORY_NAME, AvroSink::schemaForUser, User.class));
+         .writeTo(AvroSinks.files(DIRECTORY_NAME, User.class, schema));
 
         return p;
     }
@@ -69,8 +70,7 @@ public class AvroSink {
     }
 
     private void setup() {
-        jet = Jet.newJetInstance();
-        Jet.newJetInstance();
+        jet = Jet.bootstrappedInstance();
 
         IMap<String, User> map = jet.getMap(MAP_NAME);
         for (int i = 0; i < 100; i++) {

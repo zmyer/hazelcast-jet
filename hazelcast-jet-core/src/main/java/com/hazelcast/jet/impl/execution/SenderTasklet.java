@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,9 @@ import com.hazelcast.internal.nio.Bits;
 import com.hazelcast.internal.nio.BufferObjectDataOutput;
 import com.hazelcast.internal.nio.Connection;
 import com.hazelcast.internal.nio.Packet;
+import com.hazelcast.internal.serialization.InternalSerializationService;
+import com.hazelcast.internal.util.counters.Counter;
+import com.hazelcast.internal.util.counters.SwCounter;
 import com.hazelcast.jet.RestartableException;
 import com.hazelcast.jet.core.metrics.MetricNames;
 import com.hazelcast.jet.core.metrics.MetricTags;
@@ -37,7 +40,6 @@ import javax.annotation.Nonnull;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Queue;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 
 import static com.hazelcast.jet.impl.Networking.createStreamPacketHeader;
@@ -45,12 +47,12 @@ import static com.hazelcast.jet.impl.execution.DoneItem.DONE_ITEM;
 import static com.hazelcast.jet.impl.execution.ReceiverTasklet.compressSeq;
 import static com.hazelcast.jet.impl.execution.ReceiverTasklet.estimatedMemoryFootprint;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.rethrow;
-import static com.hazelcast.jet.impl.util.ImdgUtil.createObjectDataOutput;
 import static com.hazelcast.jet.impl.util.ImdgUtil.getMemberConnection;
-import static com.hazelcast.jet.impl.util.Util.lazyAdd;
 import static com.hazelcast.jet.impl.util.Util.uncheckRun;
 
 public class SenderTasklet implements Tasklet {
+
+    private static final int BUFFER_SIZE = 1 << 15;
 
     private final Connection connection;
     private final Queue<Object> inbox = new ArrayDeque<>();
@@ -66,10 +68,10 @@ public class SenderTasklet implements Tasklet {
     private final String sourceVertexName;
 
     @Probe(name = MetricNames.DISTRIBUTED_ITEMS_OUT)
-    private final AtomicLong itemsOutCounter = new AtomicLong();
+    private final Counter itemsOutCounter = SwCounter.newSwCounter();
 
     @Probe(name = MetricNames.DISTRIBUTED_BYTES_OUT, unit = ProbeUnit.BYTES)
-    private final AtomicLong bytesOutCounter = new AtomicLong();
+    private final Counter bytesOutCounter = SwCounter.newSwCounter();
 
     private boolean instreamExhausted;
     // read and written by Jet thread
@@ -84,7 +86,8 @@ public class SenderTasklet implements Tasklet {
             NodeEngine nodeEngine,
             Address destinationAddress,
             int destinationVertexId, int packetSizeLimit, long executionId,
-            String sourceVertexName, int sourceOrdinal
+            String sourceVertexName, int sourceOrdinal,
+            InternalSerializationService serializationService
     ) {
         this.inboundEdgeStream = inboundEdgeStream;
         this.destinationAddressString = destinationAddress.toString();
@@ -93,9 +96,9 @@ public class SenderTasklet implements Tasklet {
         this.packetSizeLimit = packetSizeLimit;
         // we use Connection directly because we rely on packets not being transparently skipped or reordered
         this.connection = getMemberConnection(nodeEngine, destinationAddress);
-        this.outputBuffer = createObjectDataOutput(nodeEngine);
-        uncheckRun(() -> outputBuffer.write(createStreamPacketHeader(
-                nodeEngine, executionId, destinationVertexId, inboundEdgeStream.ordinal())));
+        this.outputBuffer = serializationService.createObjectDataOutput(BUFFER_SIZE);
+        uncheckRun(() -> outputBuffer.write(createStreamPacketHeader(nodeEngine,
+                executionId, destinationVertexId, inboundEdgeStream.ordinal())));
         bufPosPastHeader = outputBuffer.position();
     }
 
@@ -144,15 +147,15 @@ public class SenderTasklet implements Tasklet {
                  writtenCount++
             ) {
                 ObjectWithPartitionId itemWithPId = item instanceof ObjectWithPartitionId ?
-                        (ObjectWithPartitionId) item : new ObjectWithPartitionId(item, - 1);
+                        (ObjectWithPartitionId) item : new ObjectWithPartitionId(item, -1);
                 final int mark = outputBuffer.position();
                 outputBuffer.writeObject(itemWithPId.getItem());
                 sentSeq += estimatedMemoryFootprint(outputBuffer.position() - mark);
                 outputBuffer.writeInt(itemWithPId.getPartitionId());
             }
             outputBuffer.writeInt(bufPosPastHeader, writtenCount);
-            lazyAdd(bytesOutCounter, outputBuffer.position());
-            lazyAdd(itemsOutCounter, writtenCount);
+            bytesOutCounter.inc(outputBuffer.position());
+            itemsOutCounter.inc(writtenCount);
             return writtenCount > 0;
         } catch (IOException e) {
             throw rethrow(e);
@@ -193,8 +196,8 @@ public class SenderTasklet implements Tasklet {
     @Override
     public void provideDynamicMetrics(MetricDescriptor descriptor, MetricsCollectionContext context) {
         descriptor = descriptor.withTag(MetricTags.VERTEX, sourceVertexName)
-                        .withTag(MetricTags.ORDINAL, sourceOrdinalString)
-                        .withTag(MetricTags.DESTINATION_ADDRESS, destinationAddressString);
+                               .withTag(MetricTags.ORDINAL, sourceOrdinalString)
+                               .withTag(MetricTags.DESTINATION_ADDRESS, destinationAddressString);
 
         context.collect(descriptor, this);
     }

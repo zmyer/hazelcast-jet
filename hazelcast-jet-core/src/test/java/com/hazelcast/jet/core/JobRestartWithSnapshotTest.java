@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -199,10 +199,10 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
         Job job = instance1.newJob(dag, config);
 
         JobRepository jobRepository = new JobRepository(instance1);
-        int timeout = (int) (MILLISECONDS.toSeconds(config.getSnapshotIntervalMillis()) + 2);
+        int timeout = (int) (MILLISECONDS.toSeconds(config.getSnapshotIntervalMillis() * 3) + 2);
 
         waitForFirstSnapshot(jobRepository, job.getId(), timeout, false);
-        waitForNextSnapshot(jobRepository, job.getId(), timeout);
+        waitForNextSnapshot(jobRepository, job.getId(), timeout, false);
         // wait a little more to emit something, so that it will be overwritten in the sink map
         Thread.sleep(300);
 
@@ -211,8 +211,8 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
         // Now the job should detect member shutdown and restart from snapshot.
         // Let's wait until the next snapshot appears.
         waitForNextSnapshot(jobRepository, job.getId(),
-                (int) (MILLISECONDS.toSeconds(config.getSnapshotIntervalMillis()) + 10));
-        waitForNextSnapshot(jobRepository, job.getId(), timeout);
+                (int) (MILLISECONDS.toSeconds(config.getSnapshotIntervalMillis()) + 10), false);
+        waitForNextSnapshot(jobRepository, job.getId(), timeout, false);
 
         job.join();
 
@@ -455,7 +455,7 @@ public class JobRestartWithSnapshotTest extends JetTestSupport {
      * A source processor which never completes and only allows the first
      * snapshot to finish.
      */
-    private static final class FirstSnapshotProcessor implements Processor {
+    private static final class FirstSnapshotProcessor extends AbstractProcessor {
         private boolean firstSnapshotDone;
 
         @Override

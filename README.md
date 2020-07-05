@@ -1,13 +1,15 @@
 # Hazelcast Jet
 
 ![GitHub release](https://img.shields.io/github/release/hazelcast/hazelcast-jet.svg)
-[![Join the chat at https://gitter.im/hazelcast/hazelcast-jet](https://badges.gitter.im/hazelcast/hazelcast-jet.svg)](https://gitter.im/hazelcast/hazelcast-jet?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+[![Join the community on Slack](https://hz-community-slack.herokuapp.com/badge.svg)](https://hz-community-slack.herokuapp.com)
+[![Code Quality: Java](https://img.shields.io/lgtm/grade/java/g/hazelcast/hazelcast.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/hazelcast/hazelcast-jet/context:java)
+[![Docker pulls](https://img.shields.io/docker/pulls/hazelcast/hazelcast-jet)](https://img.shields.io/docker/pulls/hazelcast/hazelcast-jet)
 
 <img src="https://github.com/hazelcast/hazelcast-jet/raw/master/logo/hazelcast-jet.png" width="100">
 
 ----
 
-[Hazelcast Jet] is an open-source, cloud-native, distributed stream
+[Hazelcast Jet](https://jet-start.sh/) is an open-source, cloud-native, distributed stream
 and batch processing engine.
 
 Jet is simple to set up. The nodes you start discover each other and
@@ -39,7 +41,7 @@ dependency:
 <dependency>
     <groupId>com.hazelcast.jet</groupId>
     <artifactId>hazelcast-jet</artifactId>
-    <version>3.2</version>
+    <version>4.1</version>
 </dependency>
 ```
 
@@ -54,16 +56,16 @@ computation:
 ```java
 String path = "books";
 
-JetInstance jet = Jet.newJetInstance();
+JetInstance jet = Jet.bootstrappedInstance();
 
 Pipeline p = Pipeline.create();
 
 p.readFrom(Sources.files(path))
-        .flatMap(line -> Traversers.traverseArray(line.toLowerCase().split("\\W+")))
-        .filter(word -> !word.isEmpty())
-        .groupingKey(word -> word)
-        .aggregate(AggregateOperations.counting())
-        .writeTo(Sinks.logger());
+ .flatMap(line -> Traversers.traverseArray(line.toLowerCase().split("\\W+")))
+ .filter(word -> !word.isEmpty())
+ .groupingKey(word -> word)
+ .aggregate(AggregateOperations.counting())
+ .writeTo(Sinks.logger());
 
 jet.newJob(p).join();
 ```
@@ -86,19 +88,19 @@ appended line. Here's the code you can try out:
 ```java
 String path = "books";
 
-JetInstance jet = Jet.newJetInstance();
+JetInstance jet = Jet.bootstrappedInstance();
 
 Pipeline p = Pipeline.create();
 
 p.readFrom(Sources.fileWatcher(path))
-        .withIngestionTimestamps()
-        .setLocalParallelism(1)
-        .flatMap(line -> Traversers.traverseArray(line.toLowerCase().split("\\W+")))
-        .filter(word -> !word.isEmpty())
-        .groupingKey(word -> word)
-        .window(WindowDefinition.tumbling(1000))
-        .aggregate(AggregateOperations.counting())
-        .writeTo(Sinks.logger());
+ .withIngestionTimestamps()
+ .setLocalParallelism(1)
+ .flatMap(line -> Traversers.traverseArray(line.toLowerCase().split("\\W+")))
+ .filter(word -> !word.isEmpty())
+ .groupingKey(word -> word)
+ .window(WindowDefinition.tumbling(1000))
+ .aggregate(AggregateOperations.counting())
+ .writeTo(Sinks.logger());
 
 jet.newJob(p).join();
 ```
@@ -112,7 +114,7 @@ and Jet will process them right away.
 * Constant low latency - predictable latency is a design goal
 * Zero dependencies - single JAR which is embeddable (minimum JDK 8)
 * Cloud Native - with [Docker images](https://hub.docker.com/r/hazelcast/hazelcast-jet/)
-and [Kubernetes support](https://github.com/hazelcast/hazelcast-jet-code-samples/tree/master/integration/kubernetes)
+and [Kubernetes support](https://jet-start.sh/docs/operations/kubernetes)
 including Helm Charts.
 * Elastic - Jet can scale jobs up and down while running
 * Fault Tolerant - At-least-once and exactly-once processing guarantees
@@ -124,26 +126,54 @@ for caching, enrichment or storing job results
 ## Distribution
 
 You can download the distribution package which includes command-line
-tools from [jet.hazelcast.org](http://jet.hazelcast.org/download/).
+tools from [https://jet-start.sh](https://jet-start.sh/download).
 
-## Documentation
+## Getting Started and Documentation
 
-See the [Hazelcast Jet Reference Manual].
+See the [Hazelcast Jet Getting Started Guide](https://jet-start.sh/docs/get-started/intro).
 
 ## Code Samples
 
 See [examples folder](examples) for some examples.
 
-## Additional Connectors
-
-See [hazelcast-jet-contrib](https://github.com/hazelcast/hazelcast-jet-contrib) repository for community supported
-connectors and tools.
-
 ## Architecture
 
-See the [architecture](https://jet.hazelcast.org/architecture/) and
-[performance](https://jet.hazelcast.org/performance/) pages for
-more details about Jet's internals and design.
+See the following architecture pages for more insight into the internals of Jet:
+
+* [Cooperative Multithreading](https://jet-start.sh/docs/architecture/execution-engine)
+* [Fault Tolerance](https://jet-start.sh/docs/architecture/fault-tolerance)
+* [In-memory storage](https://jet-start.sh/docs/architecture/in-memory-storage)
+* [Event-time processing](https://jet-start.sh/docs/architecture/event-time-processing)
+
+## Connectors
+
+You can see a full list of connectors at the [Sources and Sink](https://jet-start.sh/docs/api/sources-sinks) section of the docs. A summary is below:
+
+| Name                                                         | Description                                                  |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| [Amazon S3](https://github.com/hazelcast/hazelcast-jet/tree/master/extensions/s3/src/main/java/com/hazelcast/jet/s3) | A connector that allows AWS S3 read/write support for Hazelcast Jet. |
+| [Apache Avro](https://github.com/hazelcast/hazelcast-jet/tree/master/extensions/avro)   | Source and sink connector for Avro files.                                                     |
+| [Apache Hadoop](https://github.com/hazelcast/hazelcast-jet/tree/master/extensions/hadoop/src/main/java/com/hazelcast/jet/hadoop) | A connector that allows Apache Hadoop read/write support for Hazelcast Jet. |
+| [Apache Kafka](https://github.com/hazelcast/hazelcast-jet/tree/master/extensions/kafka) | A connector that allows consuming/producing events from/to Apache Kafka. |
+| [CDC Debezium](https://github.com/hazelcast/hazelcast-jet/tree/master/extensions/cdc-debezium) | A Hazelcast Jet connector for Debezium which enables Hazelcast Jet pipelines to consume CDC events from various databases. |
+| [CDC MySQL](https://github.com/hazelcast/hazelcast-jet/tree/master/extensions/cdc-mysql) | A Hazelcast Jet connector for CDC data coming from MySQL databases (based on Debizium wrapped with a proprietary API). |
+| [Elasticsearch](https://github.com/hazelcast/hazelcast-jet/tree/master/extensions/elasticsearch) | A Hazelcast Jet connector for Elasticsearch for querying/indexing objects from/to Elasticsearch. |
+| [Files](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java)            | Connector for local filesystem.                                               |
+| [Hazelcast Cache Journal](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java) | Connector for change events on caches in local and remote Hazelcast clusters. |
+| [Hazelcast Cache](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java)         | Connector for caches in local and remote Hazelcast clusters.                  |
+| [Hazelcast List](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java)          | Connector for lists in local and remote Hazelcast clusters.                   |
+| [Hazelcast Map Journal](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java)   | Connector for change events on maps in local and remote Hazelcast clusters.   |
+| [Hazelcast Map](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java)           | Connector for maps in local and remote Hazelcast clusters.                    |
+| [InfluxDb](https://github.com/hazelcast/hazelcast-jet-contrib/tree/master/influxdb) | A Hazelcast Jet Connector for InfluxDb which enables pipelines to read/write data points from/to InfluxDb. |
+| [JDBC](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java)          | Connector for relational databases via JDBC.                                  |
+| [JMS](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java)           | Connector for JMS topics and queues.|
+| [Kafka Connect](https://github.com/hazelcast/hazelcast-jet-contrib/blob/master/kafka-connect) | A generic Kafka Connect source provides ability to plug any Kafka Connect source for data ingestion to Jet pipelines.|
+| [MongoDB](https://github.com/hazelcast/hazelcast-jet-contrib/tree/master/mongodb) | A Hazelcast Jet connector for MongoDB for querying/inserting objects from/to MongoDB. |
+| [Redis](https://github.com/hazelcast/hazelcast-jet-contrib/tree/master/redis) | Hazelcast Jet connectors for various Redis data structures.  |
+| [Socket](https://github.com/hazelcast/hazelcast-jet/blob/master/hazelcast-jet-core/src/main/java/com/hazelcast/jet/pipeline/Sources.java)        | Connector for TCP sockets.                                                    |
+| [Twitter](https://github.com/hazelcast/hazelcast-jet-contrib/blob/master/twitter)  | A Hazelcast Jet connector for consuming data from Twitter stream sources in Jet pipelines. |
+
+See [hazelcast-jet-contrib](https://github.com/hazelcast/hazelcast-jet-contrib) repository for more detailed information on community supported connectors and tools. 
 
 ## Start Developing Hazelcast Jet
 
@@ -170,7 +200,7 @@ Maven snippet:
     <dependency>
         <groupId>com.hazelcast.jet</groupId>
         <artifactId>hazelcast-jet</artifactId>
-        <version>4.0-SNAPSHOT</version>
+        <version>4.2-SNAPSHOT</version>
     </dependency>
 </dependencies>
 ```
@@ -180,12 +210,14 @@ Maven snippet:
 #### Requirements
 
 * JDK 8 or later
-* [Apache Maven](https://maven.apache.org/) version 3.5.2 or later
 
-To build, use the command:
-
+To build on Linux/MacOS X use:
 ```
-mvn clean package -DskipTests
+./mvnw clean package -DskipTests
+```
+for Windows use:
+```
+mvnw clean package -DskipTests
 ```
 
 ### Contributions
@@ -199,23 +231,24 @@ To contribute:
 
 ### Community
 
-Hazelcast Jet team actively answers questions on [Stack Overflow](https://stackoverflow.com/tags/hazelcast-jet).
+Hazelcast Jet team actively answers questions on [Stack Overflow](https://stackoverflow.com/tags/hazelcast-jet)
+and [Gitter](https://gitter.im/hazelcast/hazelcast-jet).
 
 You are also encouraged to join the [hazelcast-jet mailing list](http://groups.google.com/group/hazelcast-jet)
 if you are interested in community discussions
 
 ## License
+          
+Source code in this repository is covered by one of two licenses:   
 
-Hazelcast Jet is available under the Apache 2 License. Please see the
-[Licensing section](http://docs.hazelcast.org/docs/latest-dev/manual/html-single/index.html#licensing) for more information.
+ 1. [Apache License 2.0](licenses/apache-v2-license.txt)   
+ 2. [Hazelcast Community License](licenses/hazelcast-community-license.txt).   
+
+The default license throughout the repository is Apache License 2.0 unless the  
+header specifies another license. Please see the [Licensing section](https://jet-start.sh/license) for more information.
 
 ## Copyright
 
-Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
 
 Visit [www.hazelcast.com](http://www.hazelcast.com/) for more info.
-
-
-[Hazelcast Jet]: http://jet.hazelcast.org
-[Hazelcast Jet Reference Manual]: https://docs.hazelcast.org/docs/jet/latest/manual/
-[Hazelcast Jet Code Samples]: https://github.com/hazelcast/hazelcast-jet-code-samples

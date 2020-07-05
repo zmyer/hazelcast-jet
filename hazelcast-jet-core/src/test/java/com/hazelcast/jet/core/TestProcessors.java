@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package com.hazelcast.jet.core;
 import com.hazelcast.cluster.Address;
 import com.hazelcast.function.SupplierEx;
 import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.core.processor.Processors;
 
 import javax.annotation.Nonnull;
 import java.util.List;
@@ -40,6 +41,7 @@ import static com.hazelcast.jet.Traversers.traverseStream;
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.core.BroadcastKey.broadcastKey;
 import static com.hazelcast.jet.core.ProcessorMetaSupplier.preferLocalParallelismOne;
+import static com.hazelcast.jet.impl.JetEvent.jetEvent;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
 import static java.util.stream.Collectors.toList;
 import static org.junit.Assert.assertEquals;
@@ -66,6 +68,8 @@ public final class TestProcessors {
 
         MockP.initCount.set(0);
         MockP.closeCount.set(0);
+        MockP.saveToSnapshotCalled = false;
+        MockP.onSnapshotCompletedCalled = false;
 
         NoOutputSourceP.proceedLatch = new CountDownLatch(1);
         NoOutputSourceP.executionStarted = new CountDownLatch(totalParallelism);
@@ -87,7 +91,7 @@ public final class TestProcessors {
      * A source processor (stream or batch) that outputs no items and allows to
      * externally control when and whether to complete or fail.
      */
-    public static final class NoOutputSourceP implements Processor {
+    public static final class NoOutputSourceP extends AbstractProcessor {
         public static volatile CountDownLatch executionStarted;
         public static volatile CountDownLatch proceedLatch;
         public static final AtomicReference<RuntimeException> failure = new AtomicReference<>();
@@ -106,7 +110,7 @@ public final class TestProcessors {
         }
 
         @Override
-        public void init(@Nonnull Outbox outbox, @Nonnull Context context) {
+        protected void init(@Nonnull Context context) throws Exception {
             initCount.incrementAndGet();
         }
 
@@ -270,12 +274,17 @@ public final class TestProcessors {
 
         static AtomicInteger initCount = new AtomicInteger();
         static AtomicInteger closeCount = new AtomicInteger();
+        static volatile boolean onSnapshotCompletedCalled;
+        static volatile boolean saveToSnapshotCalled;
 
         private Throwable initError;
         private Throwable processError;
         private Throwable completeError;
         private Throwable closeError;
+        private Throwable onSnapshotCompleteError;
+        private Throwable saveToSnapshotError;
         private boolean isCooperative;
+        private boolean streaming;
 
         @Override
         public boolean isCooperative() {
@@ -297,6 +306,16 @@ public final class TestProcessors {
             return this;
         }
 
+        public MockP setOnSnapshotCompleteError(Throwable e) {
+            this.onSnapshotCompleteError = e;
+            return this;
+        }
+
+        public MockP setSaveToSnapshotError(Throwable e) {
+            this.saveToSnapshotError = e;
+            return this;
+        }
+
         public MockP setCloseError(Throwable closeError) {
             this.closeError = closeError;
             return this;
@@ -304,6 +323,11 @@ public final class TestProcessors {
 
         public MockP nonCooperative() {
             isCooperative = false;
+            return this;
+        }
+
+        public MockP streaming() {
+            streaming = true;
             return this;
         }
 
@@ -327,6 +351,24 @@ public final class TestProcessors {
         public boolean complete() {
             if (completeError != null) {
                 throw sneakyThrow(completeError);
+            }
+            return !streaming;
+        }
+
+        @Override
+        public boolean saveToSnapshot() {
+            saveToSnapshotCalled = true;
+            if (saveToSnapshotError != null) {
+                throw sneakyThrow(saveToSnapshotError);
+            }
+            return true;
+        }
+
+        @Override
+        public boolean snapshotCommitFinish(boolean success) {
+            onSnapshotCompletedCalled = true;
+            if (onSnapshotCompleteError != null) {
+                throw sneakyThrow(onSnapshotCompleteError);
             }
             return true;
         }
@@ -371,13 +413,22 @@ public final class TestProcessors {
     /**
      * A processor that maps Watermarks to String (otherwise, they would not be
      * inserted to sink). It passes other items without change (from all input
-     * edges to all output edges. It can't be done using {@link
-     * com.hazelcast.jet.core.processor.Processors#mapP} because it doesn't
-     * handle watermarks.
+     * edges to all output edges, including the watermarks. It can't be done
+     * using {@link Processors#mapP} because it doesn't handle watermarks.
      */
-    public static class MapWatermarksToString extends AbstractProcessor {
+    public static final class MapWatermarksToString extends AbstractProcessor {
 
-        FlatMapper<Watermark, Object> flatMapper = flatMapper(wm -> traverseItems("wm(" + wm.timestamp() + ')', wm));
+        private final FlatMapper<Watermark, Object> flatMapper;
+
+        private MapWatermarksToString(boolean wrapToJetEvent) {
+            this.flatMapper = wrapToJetEvent
+                    ? flatMapper(wm -> traverseItems(jetEvent(wm.timestamp(), "wm(" + wm.timestamp() + ')'), wm))
+                    : flatMapper(wm -> traverseItems("wm(" + wm.timestamp() + ')', wm));
+        }
+
+        public static SupplierEx<Processor> mapWatermarksToString(boolean wrapToJetEvent) {
+            return () -> new MapWatermarksToString(wrapToJetEvent);
+        }
 
         @Override
         protected boolean tryProcess(int ordinal, @Nonnull Object item) {

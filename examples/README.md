@@ -50,7 +50,7 @@ samples using the Core API.
   - use an `IMap` as the data source
   - stateless transforms to clean up the input (flatMap + filter)
   - perform basic aggregation (counting)
-  - print a table of the most frequent words on the console
+  - print a table of the most frequent words on the console using an `Observable`
 
 ### [Inverted Index with TF-IDF Scoring](tf-idf/src/main/java/com/hazelcast/jet/examples/tfidf/TfIdf.java)
   - serialize a small dataset to use as side input
@@ -102,6 +102,30 @@ samples using the Core API.
   - hash-join an unbounded stream with two batch streams in one step
   - print the results on the console
 
+## Return Results to the Caller
+### [Basic Observables](return-results/src/main/java/com/hazelcast/jet/examples/returnresults/BasicObservable.java)
+  - obtain an `Observable`
+  - incorporate it in a streaming pipeline by wrapping it in a `Sink` 
+  - register an `Observer` on it
+  - execute the pipeline (streaming job)
+  - observe the results as they show up in the `Observer`
+  
+### [Iterable results](return-results/src/main/java/com/hazelcast/jet/examples/returnresults/IterableResults.java)
+  - obtain an `Observable`
+  - use it as `Sink` in a batch job
+  - get a result `Iterator` form of the `Observable`
+  - execute the batch job
+  - observe the results by iterating once execution has finished
+
+### [Results as a Future](return-results/src/main/java/com/hazelcast/jet/examples/returnresults/FutureResults.java)
+  - obtain an `Observable`
+  - use it as `Sink` in a batch job
+  - get the `CompletableFuture` form of the `Observable`
+  - specify actions to be executed once the results are complete
+  - execute the batch job
+  - observe the results when they become available
+  
+
 ## Job Management
 
 - [Suspend/Resume a Job](job-management/src/main/java/com/hazelcast/jet/examples/jobmanagement/JobSuspendResume.java)
@@ -134,8 +158,13 @@ samples using the Core API.
 - [JDBC Sink](jdbc/src/main/java/com/hazelcast/jet/examples/jdbc/JdbcSink.java)
 - [JMS Queue Source and Sink](jms/src/main/java/com/hazelcast/jet/examples/jms/JmsQueueSample.java)
 - [JMS Topic Source and Sink](jms/src/main/java/com/hazelcast/jet/examples/jms/JmsTopicSample.java)
+- [Python Mapping Function](python/src/main/java/com/hazelcast/jet/examples/python/Python.java)
 - [TCP/IP Socket Source](sockets/src/main/java/com/hazelcast/jet/examples/sockets/StreamTextSocket.java)
 - [TCP/IP Socket Sink](sockets/src/main/java/com/hazelcast/jet/examples/sockets/WriteTextSocket.java)
+- [CSV Batch Source](files/src/main/java/com/hazelcast/jet/examples/files/SalesCsvAnalyzer.java)
+  - use Jet to analyze sales transactions from CSV file 
+- [JSON Batch Source](files/src/main/java/com/hazelcast/jet/examples/files/SalesJsonAnalyzer.java)
+  - use Jet to analyze sales transactions from JSON file 
 - [File Batch Source](files/src/main/java/com/hazelcast/jet/examples/files/AccessLogAnalyzer.java)
   - use Jet to analyze an HTTP access log file
   - variant with [Avro serialization](files/src/main/java/com/hazelcast/jet/examples/files/avro/AvroSource.java)
@@ -144,7 +173,14 @@ samples using the Core API.
     running
 - [File Sink](files/src/main/java/com/hazelcast/jet/examples/files/AccessLogAnalyzer.java)
   - variant with [Avro serialization](files/src/main/java/com/hazelcast/jet/examples/files/avro/AvroSink.java)
-- [Amazon AWS S3 Source and Sink](/files/src/main/java/com/hazelcast/jet/examples/files/s3/S3WordCount.java)
+- [Amazon AWS S3 Source and Sink](files/src/main/java/com/hazelcast/jet/examples/files/s3/S3WordCount.java)
+- [Hadoop Source and Sink](hadoop/src/main/java/com/hazelcast/jet/examples/hadoop/HadoopWordCount.java)
+    - variant with [Avro serialization](hadoop/src/main/java/com/hazelcast/jet/examples/hadoop/avro/HadoopAvro.java)
+    - variant with [Parquet format](hadoop/src/main/java/com/hazelcast/jet/examples/hadoop/parquet/HadoopParquet.java)
+    - variant with [Amazon S3](hadoop/src/main/java/com/hazelcast/jet/examples/hadoop/cloud/AmazonS3.java)
+    - variant with [Azure Cloud Storage](hadoop/src/main/java/com/hazelcast/jet/examples/hadoop/cloud/AzureCloudStorage.java)
+    - variant with [Azure Data Lake](hadoop/src/main/java/com/hazelcast/jet/examples/hadoop/cloud/AzureDataLake.java)
+    - variant with [Google Cloud Storage](hadoop/src/main/java/com/hazelcast/jet/examples/hadoop/cloud/GoogleCloudStorage.java)
 
 ## Custom Sources and Sinks
 - [Custom Source](source-sink-builder/src/main/java/com/hazelcast/jet/examples/sourcebuilder/HttpSource.java):
@@ -156,7 +192,7 @@ samples using the Core API.
 - [Custom Sink](source-sink-builder/src/main/java/com/hazelcast/jet/examples/sinkbuilder/TopicSink.java)
   - construct a custom Hazelcast `ITopic` sink
 
-## Integration with Frameworks
+## Integration with Frameworks and Libraries
 
 ### Spring Framework
 - [Annotation-Based Spring Context](spring/src/main/java/com/hazelcast/jet/examples/spring/AnnotationBasedConfigurationSample.java)
@@ -173,4 +209,8 @@ samples using the Core API.
   as a Spring bean using Jet's XML Schema for Spring Configuration
   - XML-based dependency injection into a Jet Processor
 - [Spring Boot App that Runs a Jet
-  Job](spring/src/main/java/com/hazelcast/jet/examples/spring/SpringBootSample.java)
+  Job](spring-boot/src/main/java/com/hazelcast/jet/examples/spring/SpringBootSample.java)
+
+### Protocol Buffers
+- [Protobuf Serializer Adapter](protobuf/src/main/java/com/hazelcast/jet/examples/protobuf/ProtobufSerializerAdapter.java)
+- [Protobuf Serializer Hook Adapter](protobuf/src/main/java/com/hazelcast/jet/examples/protobuf/ProtobufSerializerHookAdapter.java)

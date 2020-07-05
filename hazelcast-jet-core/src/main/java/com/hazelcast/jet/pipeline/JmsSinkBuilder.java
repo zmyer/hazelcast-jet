@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,19 +16,20 @@
 
 package com.hazelcast.jet.pipeline;
 
-import com.hazelcast.function.BiConsumerEx;
 import com.hazelcast.function.BiFunctionEx;
-import com.hazelcast.function.ConsumerEx;
 import com.hazelcast.function.FunctionEx;
 import com.hazelcast.function.SupplierEx;
+import com.hazelcast.jet.config.JobConfig;
+import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.impl.connector.WriteJmsP;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
 import javax.jms.Message;
-import javax.jms.MessageProducer;
 import javax.jms.Session;
+import javax.jms.XAConnectionFactory;
 
 import static com.hazelcast.internal.util.Preconditions.checkNotNull;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
@@ -45,16 +46,12 @@ public final class JmsSinkBuilder<T> {
     private final SupplierEx<ConnectionFactory> factorySupplier;
     private final boolean isTopic;
 
+    private boolean exactlyOnce = true;
     private FunctionEx<ConnectionFactory, Connection> connectionFn;
-    private FunctionEx<Connection, Session> sessionFn;
     private BiFunctionEx<Session, T, Message> messageFn;
-    private BiConsumerEx<MessageProducer, Message> sendFn;
-    private ConsumerEx<Session> flushFn;
 
     private String username;
     private String password;
-    private boolean transacted;
-    private int acknowledgeMode = Session.AUTO_ACKNOWLEDGE;
     private String destinationName;
 
     /**
@@ -73,56 +70,41 @@ public final class JmsSinkBuilder<T> {
      * @param username   the username, Default value is {@code null}
      * @param password   the password, Default value is {@code null}
      */
-    public JmsSinkBuilder<T> connectionParams(String username, String password) {
+    @Nonnull
+    public JmsSinkBuilder<T> connectionParams(@Nullable String username, @Nullable String password) {
         this.username = username;
         this.password = password;
         return this;
     }
 
     /**
-     * Sets the function which creates the connection from connection factory.
+     * Sets the function which creates a connection given a connection factory.
      * <p>
-     * If not provided, the builder creates a function which uses {@code
-     * ConnectionFactory#createConnection(username, password)} to create the
-     * connection. See {@link #connectionParams(String, String)}.
+     * If not provided, the following will be used:
+     * <pre>{@code
+     *     if (factory instanceof XAConnectionFactory) {
+     *         XAConnectionFactory xaFactory = (XAConnectionFactory) factory;
+     *         return usernameLocal != null || passwordLocal != null
+     *                 ? xaFactory.createXAConnection(usernameLocal, passwordLocal)
+     *                 : xaFactory.createXAConnection();
+     *     } else {
+     *         return usernameLocal != null || passwordLocal != null
+     *                 ? factory.createConnection(usernameLocal, passwordLocal)
+     *                 : factory.createConnection();
+     *     }
+     * }</pre>
      */
-    public JmsSinkBuilder<T> connectionFn(@Nonnull FunctionEx<ConnectionFactory, Connection> connectionFn) {
+    @Nonnull
+    public JmsSinkBuilder<T> connectionFn(@Nullable FunctionEx<ConnectionFactory, Connection> connectionFn) {
         checkSerializable(connectionFn, "connectionFn");
         this.connectionFn = connectionFn;
         return this;
     }
 
     /**
-     * Sets the session parameters. If {@code sessionFn} is provided, these
-     * parameters are ignored.
-     *
-     * @param transacted       if true, marks the session as transacted.
-     *                         Default value is false.
-     * @param acknowledgeMode  sets the acknowledge mode of the session,
-     *                         Default value is {@code Session.AUTO_ACKNOWLEDGE}
-     */
-    public JmsSinkBuilder<T> sessionParams(boolean transacted, int acknowledgeMode) {
-        this.transacted = transacted;
-        this.acknowledgeMode = acknowledgeMode;
-        return this;
-    }
-
-    /**
-     * Sets the function which creates a session from a connection.
-     * <p>
-     * If not provided, the builder creates a function which uses {@code
-     * Connection#createSession(boolean transacted, int acknowledgeMode)} to
-     * create the session. See {@link #sessionParams(boolean, int)}.
-     */
-    public JmsSinkBuilder<T> sessionFn(@Nonnull FunctionEx<Connection, Session> sessionFn) {
-        checkSerializable(sessionFn, "sessionFn");
-        this.sessionFn = sessionFn;
-        return this;
-    }
-
-    /**
      * Sets the name of the destination.
      */
+    @Nonnull
     public JmsSinkBuilder<T> destinationName(@Nonnull String destinationName) {
         this.destinationName = destinationName;
         return this;
@@ -135,68 +117,70 @@ public final class JmsSinkBuilder<T> {
      * item.toString()} into a {@link javax.jms.TextMessage}, unless the item
      * is already an instance of {@code javax.jms.Message}.
      */
-    public JmsSinkBuilder<T> messageFn(BiFunctionEx<Session, T, Message> messageFn) {
+    @Nonnull
+    public JmsSinkBuilder<T> messageFn(@Nullable BiFunctionEx<Session, T, Message> messageFn) {
         checkSerializable(messageFn, "messageFn");
         this.messageFn = messageFn;
         return this;
     }
 
     /**
-     * Sets the function which sends the message via message producer.
-     * <p>
-     * If not provided, the builder creates a function which sends the message via
-     * {@code MessageProducer#send(Message message)}.
+     * Enables or disables the exactly-once behavior of the sink using
+     * two-phase commit of state snapshots. If enabled, the {@linkplain
+     * JobConfig#setProcessingGuarantee(ProcessingGuarantee) processing
+     * guarantee} of the job must be set to {@linkplain
+     * ProcessingGuarantee#EXACTLY_ONCE exactly-once}, otherwise the sink's
+     * guarantee will match that of the job. In other words, sink's
+     * guarantee cannot be higher than job's, but can be lower to avoid the
+     * additional overhead.
+     *
+     * <p>The default value is true.
+     *
+     * @param enable If true, sink's guarantee will match the job
+     *      guarantee. If false, sink's guarantee will be at-least-once
+     *      even if job's is exactly-once
+     * @return this instance for fluent API
      */
-    public JmsSinkBuilder<T> sendFn(BiConsumerEx<MessageProducer, Message> sendFn) {
-        checkSerializable(sendFn, "sendFn");
-        this.sendFn = sendFn;
-        return this;
-    }
-
-    /**
-     * Sets the function which flushes the session after a batch of messages is
-     * sent.
-     * <p>
-     * If not provided, the builder creates a no-op consumer.
-     */
-    public JmsSinkBuilder<T> flushFn(ConsumerEx<Session> flushFn) {
-        checkSerializable(flushFn, "flushFn");
-        this.flushFn = flushFn;
+    @Nonnull
+    public JmsSinkBuilder<T> exactlyOnce(boolean enable) {
+        this.exactlyOnce = enable;
         return this;
     }
 
     /**
      * Creates and returns the JMS {@link Sink} with the supplied components.
      */
+    @Nonnull
     public Sink<T> build() {
         String usernameLocal = username;
         String passwordLocal = password;
-        boolean transactedLocal = transacted;
-        int acknowledgeModeLocal = acknowledgeMode;
 
         checkNotNull(destinationName);
         if (connectionFn == null) {
-            connectionFn = factory -> factory.createConnection(usernameLocal, passwordLocal);
-        }
-        if (sessionFn == null) {
-            sessionFn = connection -> connection.createSession(transactedLocal, acknowledgeModeLocal);
+            connectionFn = factory -> {
+                if (factory instanceof XAConnectionFactory) {
+                    XAConnectionFactory xaFactory = (XAConnectionFactory) factory;
+                    return usernameLocal != null || passwordLocal != null
+                            ? xaFactory.createXAConnection(usernameLocal, passwordLocal)
+                            : xaFactory.createXAConnection();
+                } else {
+                    return usernameLocal != null || passwordLocal != null
+                            ? factory.createConnection(usernameLocal, passwordLocal)
+                            : factory.createConnection();
+                }
+            };
         }
         if (messageFn == null) {
             messageFn = (session, item) ->
                     item instanceof Message ? (Message) item : session.createTextMessage(item.toString());
         }
-        if (sendFn == null) {
-            sendFn = MessageProducer::send;
-        }
-        if (flushFn == null) {
-            flushFn = ConsumerEx.noop();
-        }
 
         FunctionEx<ConnectionFactory, Connection> connectionFnLocal = connectionFn;
+        @SuppressWarnings("UnnecessaryLocalVariable") // it's necessary to not capture this in the lambda
         SupplierEx<ConnectionFactory> factorySupplierLocal = factorySupplier;
         SupplierEx<Connection> newConnectionFn = () -> connectionFnLocal.apply(factorySupplierLocal.get());
         return Sinks.fromProcessor(sinkName(),
-                WriteJmsP.supplier(newConnectionFn, sessionFn, messageFn, sendFn, flushFn, destinationName, isTopic));
+                WriteJmsP.supplier(destinationName, exactlyOnce, newConnectionFn, messageFn, isTopic));
     }
 
     private String sinkName() {

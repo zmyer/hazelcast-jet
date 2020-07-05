@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,8 +41,7 @@ public class RemoteListSourceAndSink {
     private static final String LIST_1 = "list-1";
     private static final String LIST_2 = "list-2";
 
-    public static void main(String[] args) throws Exception {
-        System.setProperty("hazelcast.logging.type", "log4j");
+    public static void main(String[] args) {
         JetInstance localJet = Jet.newJetInstance();
         try {
             HazelcastInstance externalHz = startExternalHazelcast();

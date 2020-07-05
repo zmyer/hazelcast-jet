@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import com.hazelcast.function.FunctionEx;
 import com.hazelcast.jet.aggregate.AggregateOperation;
 import com.hazelcast.jet.datamodel.KeyedWindowResult;
 import com.hazelcast.jet.datamodel.Tag;
+import com.hazelcast.jet.impl.pipeline.transform.AbstractTransform;
 import com.hazelcast.jet.impl.pipeline.transform.GroupTransform;
 import com.hazelcast.jet.impl.pipeline.transform.Transform;
 import com.hazelcast.jet.impl.pipeline.transform.WindowGroupTransform;
@@ -41,7 +42,7 @@ import static com.hazelcast.jet.datamodel.Tag.tag;
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ADAPT_TO_JET_EVENT;
 import static com.hazelcast.jet.impl.pipeline.ComputeStageImplBase.ensureJetEvents;
 import static com.hazelcast.jet.impl.util.Util.checkSerializable;
-import static java.util.stream.Collectors.toList;
+import static com.hazelcast.jet.impl.util.Util.toList;
 
 /**
  * Support class for {@link GroupAggregateBuilder1}
@@ -51,6 +52,7 @@ import static java.util.stream.Collectors.toList;
  *
  * @param <K> type of the grouping key
  */
+@SuppressWarnings("rawtypes")
 public class GrAggBuilder<K> {
     private final PipelineImpl pipelineImpl;
     private final WindowDefinition wDef;
@@ -95,26 +97,21 @@ public class GrAggBuilder<K> {
             @Nonnull BiFunctionEx<? super K, ? super R, OUT> mapToOutputFn
     ) {
         checkSerializable(mapToOutputFn, "mapToOutputFn");
-        List<Transform> upstreamTransforms = upstreamStages.stream().map(s -> s.transform).collect(toList());
-        Transform transform = new GroupTransform<>(upstreamTransforms, keyFns, aggrOp, mapToOutputFn);
-        pipelineImpl.connect(upstreamTransforms, transform);
+        List<Transform> upstreamTransforms = toList(upstreamStages, s -> s.transform);
+        AbstractTransform transform = new GroupTransform<>(upstreamTransforms, keyFns, aggrOp, mapToOutputFn);
+        pipelineImpl.connect(upstreamStages, transform);
         return new BatchStageImpl<>(transform, pipelineImpl);
     }
 
-    @SuppressWarnings("unchecked")
     public <A, R> StreamStage<KeyedWindowResult<K, R>> buildStream(@Nonnull AggregateOperation<A, ? extends R> aggrOp) {
-        List<Transform> upstreamTransforms = upstreamStages.stream().map(s -> s.transform).collect(toList());
+        List<Transform> upstreamTransforms = toList(upstreamStages, s -> s.transform);
         FunctionAdapter fnAdapter = ADAPT_TO_JET_EVENT;
-
-        // Avoided Stream API here due to static typing issues
-        List<FunctionEx<?, ? extends K>> adaptedKeyFns = new ArrayList<>();
-        for (FunctionEx keyFn : keyFns) {
-            adaptedKeyFns.add(fnAdapter.adaptKeyFn(keyFn));
-        }
-
-        Transform transform = new WindowGroupTransform<K, R>(
+        // Casts in this expression are a workaround for JDK 8 compiler bug:
+        @SuppressWarnings("unchecked")
+        List<FunctionEx<?, ? extends K>> adaptedKeyFns = toList(keyFns, fn -> fnAdapter.adaptKeyFn((FunctionEx) fn));
+        AbstractTransform transform = new WindowGroupTransform<K, R>(
                 upstreamTransforms, wDef, adaptedKeyFns, fnAdapter.adaptAggregateOperation(aggrOp));
-        pipelineImpl.connect(upstreamTransforms, transform);
+        pipelineImpl.connect(upstreamStages, transform);
         return new StreamStageImpl<>(transform, fnAdapter, pipelineImpl);
     }
 }

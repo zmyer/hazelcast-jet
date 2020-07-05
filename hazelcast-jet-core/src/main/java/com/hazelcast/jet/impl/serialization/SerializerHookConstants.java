@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -53,7 +53,13 @@ public final class SerializerHookConstants {
     public static final int HASH_SET = -323;
     public static final int JET_EVENT = -324;
     public static final int TIMESTAMPED_ITEM = -325;
-    public static final int PRIORITY_QUEUE = -326;
+    public static final int QUERY_ENTRY = -326;
+    public static final int DEFERRED_MAP = -327;
+    public static final int AVRO_UTF8 = -328;
+
+    public static final int CDC_RECORD = -340;
+    public static final int CDC_RECORD_PART = -341;
+    public static final int CDC_SOURCE_STATE = -342;
 
 
     // reserved for hadoop module: -380 to -390

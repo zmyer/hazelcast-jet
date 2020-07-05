@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,28 +16,42 @@
 
 package com.hazelcast.jet.impl.util;
 
+import com.hazelcast.internal.nio.ClassLoaderUtil;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.github.classgraph.ClassGraph;
+import io.github.classgraph.ClassInfo;
+import io.github.classgraph.ScanResult;
+
+import javax.annotation.Nonnull;
 import java.lang.reflect.Field;
+import java.net.URL;
+import java.util.Collection;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Stream;
+
+import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
+import static java.util.Arrays.stream;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static java.util.stream.Stream.concat;
 
 public final class ReflectionUtils {
-    private ReflectionUtils() {
 
+    private ReflectionUtils() {
     }
 
     public static <T> T readStaticFieldOrNull(String classname, String fieldName) {
         try {
             Class<?> clazz = Class.forName(classname);
             return readStaticField(clazz, fieldName);
-        } catch (ClassNotFoundException e) {
-            return null;
-        } catch (NoSuchFieldException e) {
-            return null;
-        } catch (IllegalAccessException e) {
-            return null;
-        } catch (SecurityException e) {
+        } catch (ClassNotFoundException | NoSuchFieldException | IllegalAccessException | SecurityException e) {
             return null;
         }
     }
 
+    @SuppressWarnings("unchecked")
     private static <T> T readStaticField(Class<?> clazz, String fieldName) throws NoSuchFieldException,
             IllegalAccessException {
         Field field = clazz.getDeclaredField(fieldName);
@@ -45,5 +59,131 @@ public final class ReflectionUtils {
             field.setAccessible(true);
         }
         return (T) field.get(null);
+    }
+
+    @Nonnull
+    @SuppressFBWarnings(value = "RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE", justification =
+            "False positive on try-with-resources as of JDK11")
+    public static Collection<Class<?>> nestedClassesOf(Class<?>... classes) {
+        ClassGraph classGraph = new ClassGraph()
+                .enableClassInfo()
+                .ignoreClassVisibility();
+        stream(classes).map(Class::getClassLoader).distinct().forEach(classGraph::addClassLoader);
+        stream(classes).map(ReflectionUtils::toPackageName).distinct().forEach(classGraph::whitelistPackages);
+        try (ScanResult scanResult = classGraph.scan()) {
+            Set<String> classNames = stream(classes).map(Class::getName).collect(toSet());
+            return concat(
+                    stream(classes),
+                    scanResult.getAllClasses()
+                              .stream()
+                              .filter(classInfo -> classNames.contains(classInfo.getName()))
+                              .flatMap(classInfo -> classInfo.getInnerClasses().stream())
+                              .map(ClassInfo::loadClass)
+            ).collect(toList());
+        }
+    }
+
+    private static String toPackageName(Class<?> clazz) {
+        return Optional.ofNullable(clazz.getPackage()).map(Package::getName).orElse("");
+    }
+
+    @Nonnull
+    @SuppressFBWarnings(value = "RCN_REDUNDANT_NULLCHECK_WOULD_HAVE_BEEN_A_NPE", justification =
+            "False positive on try-with-resources as of JDK11")
+    public static Resources resourcesOf(String... packages) {
+        String[] paths = stream(packages).map(ReflectionUtils::toPath).toArray(String[]::new);
+        ClassGraph classGraph = new ClassGraph()
+                .whitelistPackages(packages)
+                .whitelistPaths(paths)
+                .ignoreClassVisibility();
+        try (ScanResult scanResult = classGraph.scan()) {
+            Collection<ClassResource> classes = Util.toList(scanResult.getAllClasses(), ClassResource::new);
+            Collection<URL> nonClasses = scanResult.getAllResources().nonClassFilesOnly().getURLs();
+            return new Resources(classes, nonClasses);
+        }
+    }
+
+    private static String toPath(String name) {
+        return name.replace('.', '/');
+    }
+
+    public static String toClassResourceId(String name) {
+        return toPath(name) + ".class";
+    }
+
+    public static Class<?> loadClass(ClassLoader classLoader, String name) {
+        try {
+            return ClassLoaderUtil.loadClass(classLoader, name);
+        } catch (ClassNotFoundException e) {
+            throw sneakyThrow(e);
+        }
+    }
+
+    public static <T> T newInstance(ClassLoader classLoader, String name) {
+        try {
+            return ClassLoaderUtil.newInstance(classLoader, name);
+        } catch (Exception e) {
+            throw sneakyThrow(e);
+        }
+    }
+
+    public static final class Resources {
+
+        private final Collection<ClassResource> classes;
+        private final Collection<URL> nonClasses;
+
+        private Resources(Collection<ClassResource> classes, Collection<URL> nonClasses) {
+            this.classes = classes;
+            this.nonClasses = nonClasses;
+        }
+
+        public Stream<ClassResource> classes() {
+            return classes.stream();
+        }
+
+        public Stream<URL> nonClasses() {
+            return nonClasses.stream();
+        }
+    }
+
+    public static final class ClassResource {
+
+        private final String id;
+        private final URL url;
+
+        private ClassResource(ClassInfo classInfo) {
+            this(classInfo.getName(), classInfo.getResource().getURL());
+        }
+
+        public ClassResource(String name, URL url) {
+            this.id = toClassResourceId(name);
+            this.url = url;
+        }
+
+        public String getId() {
+            return id;
+        }
+
+        public URL getUrl() {
+            return url;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            ClassResource that = (ClassResource) o;
+            return Objects.equals(id, that.id) &&
+                    Objects.equals(url, that.url);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(id, url);
+        }
     }
 }

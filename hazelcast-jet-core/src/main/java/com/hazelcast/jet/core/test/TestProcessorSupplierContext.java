@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,15 +16,20 @@
 
 package com.hazelcast.jet.core.test;
 
+import com.hazelcast.core.ManagedContext;
 import com.hazelcast.jet.JetInstance;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.logging.ILogger;
 
 import javax.annotation.Nonnull;
+import java.io.File;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
- * {@link ProcessorSupplier.Context} implementation suitable to be used in tests.
+ * Implementation of {@link ProcessorSupplier.Context} suitable to be used
+ * in tests.
  *
  * @since 3.0
  */
@@ -33,6 +38,8 @@ public class TestProcessorSupplierContext
         implements ProcessorSupplier.Context {
 
     private int memberIndex;
+    private ManagedContext managedContext = object -> object;
+    private final Map<String, File> attached = new HashMap<>();
 
     @Nonnull @Override
     public TestProcessorSupplierContext setLogger(@Nonnull ILogger logger) {
@@ -60,7 +67,7 @@ public class TestProcessorSupplierContext
     }
 
     @Nonnull @Override
-    public TestProcessorSupplierContext setProcessingGuarantee(ProcessingGuarantee processingGuarantee) {
+    public TestProcessorSupplierContext setProcessingGuarantee(@Nonnull ProcessingGuarantee processingGuarantee) {
         return (TestProcessorSupplierContext) super.setProcessingGuarantee(processingGuarantee);
     }
 
@@ -71,11 +78,50 @@ public class TestProcessorSupplierContext
         return memberIndex;
     }
 
+    @Nonnull @Override
+    public File attachedDirectory(@Nonnull String id) {
+        return attachedFile(id);
+    }
+
+    @Nonnull @Override
+    public File attachedFile(@Nonnull String id) {
+        File file = attached.get(id);
+        if (file == null) {
+            throw new IllegalArgumentException("File '" + id + "' was not found");
+        }
+        return file;
+    }
+
+    @Nonnull @Override
+    public ManagedContext managedContext() {
+        return managedContext;
+    }
+
     /**
-     * Set the member index.
+     * Add an attached file or folder. The test context doesn't distinguish
+     * between files and folders;
      */
+    @Nonnull
+    public TestProcessorSupplierContext addFile(@Nonnull String id, @Nonnull File file) {
+        attached.put(id, file);
+        return this;
+    }
+
+    /**
+     * Sets the member index
+     */
+    @Nonnull
     public TestProcessorSupplierContext setMemberIndex(int memberIndex) {
         this.memberIndex = memberIndex;
+        return this;
+    }
+
+    /**
+     * Sets the {@link ManagedContext}
+     */
+    @Nonnull
+    public TestProcessorSupplierContext setManagedContext(@Nonnull ManagedContext managedContext) {
+        this.managedContext = managedContext;
         return this;
     }
 

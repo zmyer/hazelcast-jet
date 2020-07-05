@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,13 +18,14 @@ package com.hazelcast.jet.impl.operation;
 
 import com.hazelcast.cluster.Address;
 import com.hazelcast.internal.cluster.MemberInfo;
+import com.hazelcast.internal.nio.IOUtil;
 import com.hazelcast.jet.impl.JetService;
 import com.hazelcast.jet.impl.execution.init.ExecutionPlan;
 import com.hazelcast.jet.impl.execution.init.JetInitDataSerializerHook;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
-import com.hazelcast.nio.serialization.Data;
+import com.hazelcast.internal.serialization.Data;
 import com.hazelcast.spi.impl.operationservice.ExceptionAction;
 
 import java.io.IOException;
@@ -93,7 +94,7 @@ public class InitExecutionOperation extends AbstractJobOperation {
         for (MemberInfo participant : participants) {
             out.writeObject(participant);
         }
-        out.writeData(serializedPlan);
+        IOUtil.writeData(out, serializedPlan);
     }
 
     @Override
@@ -107,7 +108,7 @@ public class InitExecutionOperation extends AbstractJobOperation {
         for (int i = 0; i < count; i++) {
             participants.add(in.readObject());
         }
-        serializedPlan = in.readData();
+        serializedPlan = IOUtil.readData(in);
     }
 
     private ExecutionPlan deserializePlan(Data planBlob) {

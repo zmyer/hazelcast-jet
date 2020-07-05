@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,7 @@
 
 package com.hazelcast.jet.examples.jms;
 
-import com.hazelcast.jet.impl.util.ExceptionUtil;
-import org.apache.activemq.broker.BrokerFactory;
 import org.apache.activemq.broker.BrokerService;
-
-import java.net.URI;
 
 /**
  * Utility class to start/stop an ActiveMQ Broker instance
@@ -32,23 +28,14 @@ public final class ActiveMQBroker {
     private BrokerService broker;
 
     ActiveMQBroker() throws Exception {
-        this.broker = BrokerFactory.createBroker(new URI("broker:(" + BROKER_URL + ")"));
+        broker = new BrokerService();
+        broker.setPersistent(false);
+        broker.addConnector(BROKER_URL);
+        broker.start();
     }
 
-    public void start() {
-        try {
-            broker.start();
-        } catch (Exception e) {
-            throw ExceptionUtil.rethrow(e);
-        }
-    }
-
-    public void stop() {
-        try {
-            broker.stop();
-            broker.waitUntilStopped();
-        } catch (Exception e) {
-            throw ExceptionUtil.rethrow(e);
-        }
+    public void stop() throws Exception {
+        broker.stop();
+        broker.waitUntilStopped();
     }
 }

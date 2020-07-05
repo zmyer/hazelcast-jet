@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package com.hazelcast.jet;
 
 import com.hazelcast.config.CacheSimpleConfig;
 import com.hazelcast.config.Config;
-import com.hazelcast.core.DistributedObject;
 import com.hazelcast.jet.config.JetConfig;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.core.JetTestSupport;
@@ -105,15 +104,8 @@ public abstract class TestInClusterSupport extends JetTestSupport {
 
     @After
     public void after() throws Exception {
-        Future future = spawn(() -> {
-            for (Job job : allJetInstances()[0].getJobs()) {
-                ditchJob(job, allJetInstances());
-            }
-            for (DistributedObject o : allJetInstances()[0].getHazelcastInstance().getDistributedObjects()) {
-                o.destroy();
-            }
-        });
-
+        Future future = spawn(() ->
+                cleanUpCluster(allJetInstances()));
         future.get(1, TimeUnit.MINUTES);
     }
 

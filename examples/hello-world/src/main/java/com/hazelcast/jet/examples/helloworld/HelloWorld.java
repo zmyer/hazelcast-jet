@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,43 +17,43 @@
 package com.hazelcast.jet.examples.helloworld;
 
 import com.hazelcast.function.ComparatorEx;
-//import com.hazelcast.jet.Jet;
+import com.hazelcast.jet.Jet;
 import com.hazelcast.jet.JetInstance;
-import com.hazelcast.jet.Job;
+import com.hazelcast.jet.Observable;
 import com.hazelcast.jet.aggregate.AggregateOperations;
 import com.hazelcast.jet.config.JobConfig;
 import com.hazelcast.jet.config.ProcessingGuarantee;
+import com.hazelcast.jet.datamodel.WindowResult;
+import com.hazelcast.jet.function.Observer;
 import com.hazelcast.jet.pipeline.Pipeline;
 import com.hazelcast.jet.pipeline.Sinks;
+import com.hazelcast.jet.pipeline.WindowDefinition;
 import com.hazelcast.jet.pipeline.test.TestSources;
-import com.hazelcast.jet.server.JetBootstrap;
-import com.hazelcast.map.IMap;
-import org.apache.log4j.Logger;
 
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
-
-import static com.hazelcast.jet.Util.entry;
 
 /**
  * Demonstrates a simple job which calculates the top 10 numbers from a
- * stream of random numbers. This job is intended to be submitted to running
- * Jet cluster by `jet submit` script in Hazelcast Jet distribution.
+ * stream of random numbers. This code is included in Jet's distribution
+ * package as {@code examples/hello-world.jar}, ready to be submitted to
+ * a running Jet cluster with {@code bin/jet submit examples/hello-world.jar}.
+ * <p>
+ * It also uses an {@link Observable} to print the results on the client side.
  */
 public class HelloWorld {
 
-    private static final String KEY = "top10";
-    private static Logger LOGGER = Logger.getLogger(HelloWorld.class);
+    public static final int TOP = 10;
+    private static final String RESULTS = "top10_results";
 
-    private static Pipeline buildPipeline(String mapName) {
+    private static Pipeline buildPipeline() {
         Pipeline p = Pipeline.create();
-        p.readFrom(TestSources.itemStream(10, (ts, seq) -> nextRandomNumber()))
-         .withIngestionTimestamps()
-         .rollingAggregate(AggregateOperations.topN(10, ComparatorEx.comparingLong(l -> l)))
-         .map(l -> entry(KEY, l))
-         .writeTo(Sinks.map(mapName))
-         .setLocalParallelism(1);
+        p.readFrom(TestSources.itemStream(100, (ts, seq) -> nextRandomNumber()))
+                .withIngestionTimestamps()
+                .window(WindowDefinition.tumbling(1000))
+                .aggregate(AggregateOperations.topN(TOP, ComparatorEx.comparingLong(l -> l)))
+                .map(WindowResult::result)
+                .writeTo(Sinks.observable(RESULTS));
         return p;
     }
 
@@ -61,36 +61,26 @@ public class HelloWorld {
         return ThreadLocalRandom.current().nextLong();
     }
 
-    public static void main(String[] args) throws InterruptedException {
-        /**
-         * JetBootstrap.getInstance() can be changed to Jet.newJetInstance()
-         * to start an embedded Jet node instead and submit the job to it.
-         */
-        JetInstance jet = JetBootstrap.getInstance();
-//        JetInstance jet = Jet.newJetInstance();
+    public static void main(String[] args) {
+        JetInstance jet = Jet.bootstrappedInstance();
 
-        String mapName = "top10_" + UUID.randomUUID().toString();
-        Pipeline p = buildPipeline(mapName);
+        Observable<List<Long>> observable = jet.getObservable(RESULTS);
+        observable.addObserver(Observer.of(HelloWorld::printResults));
+
+        Pipeline p = buildPipeline();
 
         JobConfig config = new JobConfig();
         config.setName("hello-world");
         config.setProcessingGuarantee(ProcessingGuarantee.EXACTLY_ONCE);
-        Job job = jet.newJob(p, config);
+        jet.newJobIfAbsent(p, config).join();
+    }
 
-        LOGGER.info("Generating a stream of random numbers and calculating the top 10");
-        LOGGER.info("The results will be written to a distributed map");
-        while (true) {
-            IMap<String, List<Long>> top10Map = jet.getMap(mapName);
-
-            List<Long> top10numbers = top10Map.get(KEY);
-            if (top10numbers != null) {
-                LOGGER.info("Top 10 random numbers observed so far in the stream are: ");
-                for (int i = 0; i < top10numbers.size(); i++) {
-                    LOGGER.info(String.format("%d. %,d", i + 1, top10numbers.get(i)));
-                }
-            }
-            Thread.sleep(1000);
+    private static void printResults(List<Long> topNumbers) {
+        StringBuilder sb = new StringBuilder(String.format("\nTop %d random numbers in the latest window: ", TOP));
+        for (int i = 0; i < topNumbers.size(); i++) {
+            sb.append(String.format("\n\t%d. %,d", i + 1, topNumbers.get(i)));
         }
+        System.out.println(sb.toString());
     }
 
 }

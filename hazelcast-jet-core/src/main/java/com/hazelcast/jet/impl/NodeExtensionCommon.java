@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ class NodeExtensionCommon {
             "\to---o o---o   o   o-o   |     o     o---o o---o   |          | o-o     |\n" +
             "\t|   | |   |  /    |     |     |     |   |     |   |      \\   | |       |\n" +
             "\to   o o   o o---o o---o o---o o---o o   o o---o   o       o--o o---o   o";
-    private static final String COPYRIGHT_LINE = "Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.";
+    private static final String COPYRIGHT_LINE = "Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.";
 
     private final Node node;
     private final ILogger logger;
@@ -80,6 +80,7 @@ class NodeExtensionCommon {
 
     void printNodeInfo(ILogger log, String addToProductName) {
         log.info(versionAndAddressMessage(addToProductName));
+        log.info(clusterNameMessage());
         log.fine(serializationVersionMessage());
         log.info('\n' + JET_LOGO);
         log.info(COPYRIGHT_LINE);
@@ -98,6 +99,10 @@ class NodeExtensionCommon {
 
     private String serializationVersionMessage() {
         return "Configured Hazelcast Serialization version: " + node.getBuildInfo().getSerializationVersion();
+    }
+
+    private String clusterNameMessage() {
+        return "Cluster name: " + node.getConfig().getClusterName();
     }
 
     Map<String, Object> createExtensionServices() {

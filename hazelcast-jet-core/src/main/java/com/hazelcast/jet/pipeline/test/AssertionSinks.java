@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package com.hazelcast.jet.pipeline.test;
 
 import com.hazelcast.function.ConsumerEx;
 import com.hazelcast.jet.pipeline.Sink;
-import com.hazelcast.spi.annotation.Beta;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -43,7 +42,6 @@ import static java.util.concurrent.TimeUnit.SECONDS;
  *
  * @since 3.2
  */
-@Beta
 public final class AssertionSinks {
 
     private AssertionSinks() {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@
 package com.hazelcast.jet.config;
 
 import com.hazelcast.jet.impl.util.ExceptionUtil;
-import com.hazelcast.jet.impl.util.Util;
+import com.hazelcast.jet.impl.util.IOUtil;
 import com.hazelcast.test.HazelcastParallelClassRunner;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -118,7 +118,7 @@ public class JetConfigXmlGeneratorTest {
         try {
             File tempFile = File.createTempFile("jet", ".xml");
             try (FileOutputStream os = new FileOutputStream(tempFile)) {
-                os.write(Util.readFully(new ByteArrayInputStream(xml.getBytes())));
+                os.write(IOUtil.readFully(new ByteArrayInputStream(xml.getBytes())));
             }
             return JetConfig.loadFromFile(tempFile);
         } catch (IOException e) {

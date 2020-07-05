@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.Vertex;
 import com.hazelcast.jet.impl.pipeline.Planner;
 import com.hazelcast.jet.impl.pipeline.Planner.PlannerVertex;
-import com.hazelcast.jet.pipeline.ServiceFactory;
 
 import java.util.HashSet;
 
@@ -29,6 +28,7 @@ import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.Partitioner.HASH_CODE;
 import static com.hazelcast.jet.core.processor.Processors.filterUsingServiceP;
 import static com.hazelcast.jet.impl.pipeline.transform.AggregateTransform.FIRST_STAGE_VERTEX_NAME_SUFFIX;
+import static com.hazelcast.jet.pipeline.ServiceFactories.nonSharedService;
 
 public class DistinctTransform<T, K> extends AbstractTransform {
     private final FunctionEx<? super T, ? extends K> keyFn;
@@ -50,7 +50,7 @@ public class DistinctTransform<T, K> extends AbstractTransform {
 
     @SuppressWarnings("unchecked")
     private static <T, K> ProcessorSupplier distinctP(FunctionEx<? super T, ? extends K> keyFn) {
-        return filterUsingServiceP(ServiceFactory.withCreateFn(jet -> new HashSet<>()),
+        return filterUsingServiceP(nonSharedService(pctx -> new HashSet<>()),
                 (seenItems, item) -> seenItems.add(keyFn.apply((T) item)));
     }
 }

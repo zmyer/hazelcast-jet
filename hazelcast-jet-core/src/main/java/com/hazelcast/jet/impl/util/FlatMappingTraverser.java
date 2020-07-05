@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package com.hazelcast.jet.impl.util;
 
 import com.hazelcast.jet.Traverser;
+import com.hazelcast.jet.Traversers;
 
 import java.util.function.Function;
 
@@ -27,6 +28,7 @@ public class FlatMappingTraverser<T, R> implements Traverser<R> {
 
     // Do not replace with lambda as we rely on the NULL_TRAVERSER to be our
     // own unique instance, which is not guaranteed with lambda.
+    @SuppressWarnings("Convert2Lambda")
     private static final Traverser NULL_TRAVERSER = new Traverser() {
         @Override
         public Object next() {
@@ -36,12 +38,11 @@ public class FlatMappingTraverser<T, R> implements Traverser<R> {
 
     private final Traverser<T> wrapped;
     private final Function<? super T, ? extends Traverser<? extends R>> mapper;
-    private Traverser<? extends R> currentTraverser;
+    private Traverser<? extends R> currentTraverser = Traversers.empty();
 
     public FlatMappingTraverser(Traverser<T> wrapped, Function<? super T, ? extends Traverser<? extends R>> mapper) {
         this.wrapped = wrapped;
         this.mapper = mapper;
-        this.currentTraverser = nextTraverser();
     }
 
     @Override
@@ -56,6 +57,7 @@ public class FlatMappingTraverser<T, R> implements Traverser<R> {
         return null;
     }
 
+    @SuppressWarnings("unchecked")
     private Traverser<? extends R> nextTraverser() {
         final T t = wrapped.next();
         return t != null ? mapper.apply(t) : NULL_TRAVERSER;

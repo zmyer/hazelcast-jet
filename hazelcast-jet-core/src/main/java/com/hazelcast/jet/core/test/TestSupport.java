@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2019, Hazelcast, Inc. All Rights Reserved.
+ * Copyright (c) 2008-2020, Hazelcast, Inc. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,9 @@ import com.hazelcast.cluster.Address;
 import com.hazelcast.config.NetworkConfig;
 import com.hazelcast.function.SupplierEx;
 import com.hazelcast.instance.BuildInfoProvider;
+import com.hazelcast.internal.serialization.SerializationService;
+import com.hazelcast.internal.serialization.SerializationServiceAware;
+import com.hazelcast.internal.serialization.impl.DefaultSerializationServiceBuilder;
 import com.hazelcast.internal.util.concurrent.BackoffIdleStrategy;
 import com.hazelcast.internal.util.concurrent.IdleStrategy;
 import com.hazelcast.jet.JetInstance;
@@ -31,6 +34,7 @@ import com.hazelcast.jet.core.ProcessorSupplier;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.logging.ILogger;
 import com.hazelcast.logging.impl.LoggingServiceImpl;
+import com.hazelcast.spi.impl.SerializationServiceSupport;
 
 import javax.annotation.Nonnull;
 import java.net.UnknownHostException;
@@ -188,7 +192,7 @@ public final class TestSupport {
     private static final long BLOCKING_TIME_LIMIT_MS_WARN = 10000;
 
     private static final LoggingServiceImpl LOGGING_SERVICE = new LoggingServiceImpl(
-            "test-group", null, BuildInfoProvider.getBuildInfo()
+            "test-group", null, BuildInfoProvider.getBuildInfo(), true
     );
 
     static {
@@ -208,6 +212,12 @@ public final class TestSupport {
     private boolean logInputOutput = true;
     private boolean callComplete = true;
     private int outputOrdinalCount;
+    private Runnable beforeEachRun = () -> { };
+
+    private int localProcessorIndex;
+    private int globalProcessorIndex;
+    private int localParallelism = 1;
+    private int totalParallelism = 1;
 
     private JetInstance jetInstance;
     private long cooperativeTimeout = COOPERATIVE_TIME_LIMIT_MS_FAIL;
@@ -460,6 +470,46 @@ public final class TestSupport {
     }
 
     /**
+     * Sets the localProcessorIndex for the Processor
+     *
+     * @param localProcessorIndex localProcessorIndex, defaults to 0
+     */
+    public TestSupport localProcessorIndex(int localProcessorIndex) {
+        this.localProcessorIndex = localProcessorIndex;
+        return this;
+    }
+
+    /**
+     * Sets the globalProcessorIndex for the Processor
+     *
+     * @param globalProcessorIndex globalProcessorIndex, default to 0
+     */
+    public TestSupport globalProcessorIndex(int globalProcessorIndex) {
+        this.globalProcessorIndex = globalProcessorIndex;
+        return this;
+    }
+
+    /**
+     * Sets the localParallelism for the Processor
+     *
+     * @param localParallelism localParallelism, defaults to 1
+     */
+    public TestSupport localParallelism(int localParallelism) {
+        this.localParallelism = localParallelism;
+        return this;
+    }
+
+    /**
+     * Sets the totalParallelism for the Processor
+     *
+     * @param totalParallelism totalParallelism, defaults to 1
+     */
+    public TestSupport totalParallelism(int totalParallelism) {
+        this.totalParallelism = totalParallelism;
+        return this;
+    }
+
+    /**
      * Predicate to compare expected and actual output. Parameters to the
      * {@code BiPredicate} are the list of expected items and the list of actual
      * processor output.
@@ -485,7 +535,20 @@ public final class TestSupport {
         return this;
     }
 
+    /**
+     * Execute test before each test run
+     *
+     * @param runnable runnable to be executed before each test run
+     * @return {@code this} instance for fluent API
+     */
+    public TestSupport executeBeforeEachRun(Runnable runnable) {
+        this.beforeEachRun = runnable;
+        return this;
+    }
+
     private void runTest(TestMode testMode) throws Exception {
+        beforeEachRun.run();
+
         assert testMode.isSnapshotsEnabled() || testMode.snapshotRestoreInterval() == 0
             : "Illegal combination: don't do snapshots, but do restore";
 
@@ -773,10 +836,29 @@ public final class TestSupport {
     }
 
     private void initProcessor(Processor processor, TestOutbox outbox) {
+        SerializationService serializationService;
+        if (jetInstance != null && jetInstance.getHazelcastInstance() instanceof SerializationServiceSupport) {
+            SerializationServiceSupport impl = (SerializationServiceSupport) jetInstance.getHazelcastInstance();
+            serializationService = impl.getSerializationService();
+        } else {
+            serializationService = new DefaultSerializationServiceBuilder()
+                    .setManagedContext(e -> e)
+                    .build();
+        }
+
         TestProcessorContext context = new TestProcessorContext()
-                .setLogger(getLogger(processor.getClass().getName()));
+                .setLogger(getLogger(processor.getClass().getName()))
+                .setManagedContext(serializationService.getManagedContext())
+                .setLocalProcessorIndex(localProcessorIndex)
+                .setGlobalProcessorIndex(globalProcessorIndex)
+                .setLocalParallelism(localParallelism)
+                .setTotalParallelism(totalParallelism);
+
         if (jetInstance != null) {
             context.setJetInstance(jetInstance);
+        }
+        if (processor instanceof SerializationServiceAware) {
+            ((SerializationServiceAware) processor).setSerializationService(serializationService);
         }
         try {
             processor.init(outbox, context);
